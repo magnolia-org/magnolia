@@ -503,12 +503,25 @@ async fn stream_file(
 
 impl TorrentManager {
     pub async fn new(download_dir: PathBuf) -> Result<Self> {
-        std::fs::create_dir_all(&download_dir)?;
+        println!("initializing TorrentManager with download_dir: {:?}", download_dir);
+        
+        if let Err(e) = std::fs::create_dir_all(&download_dir) {
+            eprintln!("failed to create download directory: {}", e);
+            return Err(e.into());
+        }
 
         // Create session with default options
-        let session = Session::new(download_dir.clone())
-            .await
-            .context("Failed to create librqbit session")?;
+        println!("creating librqbit session...");
+        let session = match Session::new(download_dir.clone()).await {
+            Ok(s) => {
+                println!("librqbit session created successfully");
+                s
+            }
+            Err(e) => {
+                eprintln!("failed to create librqbit session: {}", e);
+                return Err(anyhow::anyhow!("Failed to create librqbit session: {}", e));
+            }
+        };
 
         let torrents = Arc::new(RwLock::new(HashMap::new()));
         let next_id = Arc::new(RwLock::new(0));
@@ -517,8 +530,19 @@ impl TorrentManager {
         // and only add them to session when streaming starts
         tracing::info!("TorrentManager initialized");
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        println!("binding HTTP server to localhost...");
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => {
+                println!("HTTP server listener created successfully");
+                l
+            }
+            Err(e) => {
+                eprintln!("failed to bind HTTP server: {}", e);
+                return Err(e.into());
+            }
+        };
         let http_addr = listener.local_addr()?;
+        println!("HTTP server will run on: {}", http_addr);
         
         let transcode_states: Arc<RwLock<HashMap<(usize, usize), TranscodeState>>> = 
             Arc::new(RwLock::new(HashMap::new()));
@@ -1548,9 +1572,9 @@ async fn transcode_audio_track(
     }
     
     // Use ffmpeg-sidecar to get the ffmpeg path
-    let ffmpeg_exe = ffmpeg_path();
+    use tokio::process::Command;
     
-    let mut cmd = tokio::process::Command::new(ffmpeg_exe);
+    let mut cmd = Command::new(ffmpeg_path());
     cmd.args(&[
         "-y",  // Overwrite output
         "-i", input_path.to_str().unwrap(),

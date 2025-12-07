@@ -16,7 +16,13 @@
   }
 
   async function maximizeWindow() {
-    await appWindow.toggleMaximize();
+    if (isMacOS) {
+      // On macOS, use fullscreen instead of maximize
+      const isFullscreen = await appWindow.isFullscreen();
+      await appWindow.setFullscreen(!isFullscreen);
+    } else {
+      await appWindow.toggleMaximize();
+    }
   }
 
   async function closeWindow() {

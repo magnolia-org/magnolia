@@ -70,12 +70,28 @@ body {
   overflow: hidden;
 }
 
+/* macOS specific styles */
+@supports (-webkit-backdrop-filter: blur(10px)) {
+  :global(html) {
+    /* Enable rounded corners on macOS */
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  
+  :global(body) {
+    border-radius: 12px;
+    overflow: hidden;
+  }
+}
+
 #app {
   width: 100vw;
   height: 100vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* Rounded corners for the app container on macOS */
+  border-radius: 12px;
 }
 
 main {

@@ -23,6 +23,116 @@ use font_manager::FontManager;
 use watch_history::{WatchHistoryManager, WatchHistoryItem};
 use track_preferences::TrackPreferencesManager;
 use settings::{SettingsManager, Settings};
+use ffmpeg_sidecar::download::{check_latest_version, download_ffmpeg_package, unpack_ffmpeg};
+
+// Check if ffmpeg is installed on system or via sidecar
+fn is_ffmpeg_installed() -> bool {
+    // First check if ffmpeg is in system PATH
+    #[cfg(target_os = "windows")]
+    let system_check = std::process::Command::new("where")
+        .arg("ffmpeg")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    
+    #[cfg(not(target_os = "windows"))]
+    let system_check = std::process::Command::new("which")
+        .arg("ffmpeg")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    
+    if system_check {
+        println!("ffmpeg found in system PATH");
+        return true;
+    }
+    
+    // Check if sidecar ffmpeg exists
+    let sidecar_exists = ffmpeg_sidecar::paths::ffmpeg_path().exists();
+    if sidecar_exists {
+        println!("ffmpeg found in sidecar directory");
+    }
+    
+    sidecar_exists
+}
+
+// Check and install ffmpeg if not present
+async fn ensure_ffmpeg_installed() -> Result<(), Box<dyn std::error::Error>> {
+    if is_ffmpeg_installed() {
+        println!("ffmpeg is already available");
+        return Ok(());
+    }
+    
+    println!("============================================");
+    println!("ffmpeg not found, downloading and installing...");
+    println!("this may take a few minutes (approximately 80MB download)");
+    println!("============================================");
+    
+    // Get sidecar directory first
+    let sidecar_dir = match ffmpeg_sidecar::paths::sidecar_dir() {
+        Ok(dir) => {
+            println!("sidecar directory: {:?}", dir);
+            dir
+        }
+        Err(e) => {
+            eprintln!("failed to get sidecar directory: {}", e);
+            return Err(e.into());
+        }
+    };
+    
+    // Create sidecar directory if it doesn't exist
+    if let Err(e) = std::fs::create_dir_all(&sidecar_dir) {
+        eprintln!("failed to create sidecar directory: {}", e);
+        return Err(e.into());
+    }
+    
+    // Download ffmpeg
+    println!("checking latest version...");
+    let download_url = match check_latest_version() {
+        Ok(url) => {
+            println!("download URL: {}", url);
+            url
+        }
+        Err(e) => {
+            eprintln!("failed to check latest version: {}", e);
+            return Err(e.into());
+        }
+    };
+    
+    let destination = sidecar_dir.join("ffmpeg-download.zip");
+    println!("downloading to: {:?}", destination);
+    
+    if let Err(e) = download_ffmpeg_package(&download_url, &destination) {
+        eprintln!("failed to download ffmpeg package: {}", e);
+        return Err(e.into());
+    }
+    
+    println!("download complete, unpacking...");
+    
+    if let Err(e) = unpack_ffmpeg(&destination, &sidecar_dir) {
+        eprintln!("failed to unpack ffmpeg: {}", e);
+        // Clean up partial download
+        let _ = std::fs::remove_file(&destination);
+        return Err(e.into());
+    }
+    
+    // Clean up downloaded archive
+    let _ = std::fs::remove_file(&destination);
+    
+    println!("ffmpeg installed successfully to {:?}", sidecar_dir);
+    
+    // Verify installation
+    let ffmpeg_exe = ffmpeg_sidecar::paths::ffmpeg_path();
+    if ffmpeg_exe.exists() {
+        println!("ffmpeg installation verified at: {:?}", ffmpeg_exe);
+        println!("============================================");
+        Ok(())
+    } else {
+        eprintln!("ffmpeg installation failed - binary not found after unpacking");
+        eprintln!("expected location: {:?}", ffmpeg_exe);
+        Err("ffmpeg installation failed - binary not found after unpacking".into())
+    }
+}
 
 #[tauri::command]
 async fn search_nyaa(query: String) -> Result<Vec<search::SearchResult>, String> {
@@ -594,6 +704,21 @@ async fn open_in_external_player(
 }
 
 fn main() {
+    // Ensure ffmpeg is installed before starting the app
+    println!("checking ffmpeg installation...");
+    tauri::async_runtime::block_on(async {
+        match ensure_ffmpeg_installed().await {
+            Ok(_) => println!("ffmpeg ready"),
+            Err(e) => {
+                eprintln!("============================================");
+                eprintln!("WARNING: Failed to install ffmpeg: {}", e);
+                eprintln!("Audio transcoding features may not work properly");
+                eprintln!("You can manually install ffmpeg to your system PATH");
+                eprintln!("============================================");
+            }
+        }
+    });
+    
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())

@@ -21,7 +21,9 @@
         "minHeight": 700,
         "decorations": false,
         "shadow": true,
-        "transparent": true
+        "transparent": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {
