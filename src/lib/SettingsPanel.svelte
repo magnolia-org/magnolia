@@ -8,9 +8,10 @@
   
   let externalPlayer = 'mpv';
   let rememberPreferences = true;
-  let showSkipPrompts = true; // Track this separately
+  let showSkipPrompts = true;
   let settingsPanel;
   let playerDropdownOpen = false;
+  let settingsLoaded = false;
   
   const playerOptions = [
     { value: 'mpv', label: 'MPV' },
@@ -23,34 +24,37 @@
       externalPlayer = settings.external_player;
       rememberPreferences = settings.remember_preferences;
       showSkipPrompts = settings.show_skip_prompts;
-      console.log('Loaded settings from backend:', settings);
+      console.log('loaded settings from backend:', settings);
+      // Set loaded flag after a tick to ensure reactive statements see the loaded values
+      await new Promise(resolve => setTimeout(resolve, 0));
+      settingsLoaded = true;
     } catch (error) {
-      console.error('Failed to load settings:', error);
+      console.error('failed to load settings:', error);
+      settingsLoaded = true;
     }
   });
   
   async function saveSettings() {
+    if (!settingsLoaded) return;
+    
     try {
       await invoke('save_settings', {
         settings: {
           external_player: externalPlayer,
           remember_preferences: rememberPreferences,
-          show_skip_prompts: showSkipPrompts // Use actual value
+          show_skip_prompts: showSkipPrompts
         }
       });
-      console.log('Settings saved to backend');
+      console.log('settings saved to backend');
     } catch (error) {
-      console.error('Failed to save settings:', error);
+      console.error('failed to save settings:', error);
     }
   }
   
-  $: {
-    if (externalPlayer) {
-      saveSettings();
-    }
-  }
-  
-  $: {
+  // Auto-save when any setting changes (tracks the actual variables)
+  $: if (settingsLoaded) {
+    // This will re-run whenever externalPlayer, rememberPreferences, or showSkipPrompts change
+    externalPlayer, rememberPreferences, showSkipPrompts;
     saveSettings();
   }
   
@@ -146,6 +150,18 @@
           <div class="setting-control">
             <label class="toggle-switch">
               <input type="checkbox" bind:checked={rememberPreferences} />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+        
+        <div class="setting-item">
+          <div class="setting-label">
+            <span>Show skip intro/outro prompts</span>
+          </div>
+          <div class="setting-control">
+            <label class="toggle-switch">
+              <input type="checkbox" bind:checked={showSkipPrompts} />
               <span class="toggle-slider"></span>
             </label>
           </div>

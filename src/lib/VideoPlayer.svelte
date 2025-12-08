@@ -1904,9 +1904,9 @@
       const settings = await invoke('get_settings');
       settings.show_skip_prompts = showSkipPrompts;
       await invoke('save_settings', { settings });
-      console.log('Saved showSkipPrompts to backend:', showSkipPrompts);
+      console.log('saved showSkipPrompts to backend:', showSkipPrompts);
     } catch (error) {
-      console.error('Failed to save showSkipPrompts:', error);
+      console.error('failed to save showSkipPrompts:', error);
     }
   }
 
@@ -2677,23 +2677,6 @@
                 </button>
               </div>
             {/if}
-
-            <div class="menu-divider"></div>
-
-            <!-- Settings -->
-            <div class="player-track-option menu-item toggle-item">
-              <span class="player-track-info">
-                <i class="ri-skip-forward-mini-line"></i> Show skip prompts
-              </span>
-              <label class="menu-toggle-switch">
-                <input 
-                  type="checkbox" 
-                  bind:checked={showSkipPrompts}
-                  on:change={toggleSkipPrompts}
-                />
-                <span class="menu-toggle-slider"></span>
-              </label>
-            </div>
 
             <div class="menu-divider"></div>
 

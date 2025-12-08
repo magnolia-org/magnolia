@@ -29,10 +29,33 @@ pub struct SettingsManager {
 impl SettingsManager {
     pub fn new(app_data_dir: PathBuf) -> Self {
         let file_path = app_data_dir.join("settings.json");
+        
+        // Ensure parent directory exists
+        if let Some(parent) = file_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        
         let data = if file_path.exists() {
-            let content = fs::read_to_string(&file_path).unwrap_or_default();
-            serde_json::from_str(&content).unwrap_or_default()
+            match fs::read_to_string(&file_path) {
+                Ok(content) => {
+                    match serde_json::from_str(&content) {
+                        Ok(settings) => {
+                            println!("loaded settings from {:?}", file_path);
+                            settings
+                        }
+                        Err(e) => {
+                            eprintln!("failed to parse settings file: {}, using defaults", e);
+                            Settings::default()
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("failed to read settings file: {}, using defaults", e);
+                    Settings::default()
+                }
+            }
         } else {
+            println!("no settings file found, using defaults");
             Settings::default()
         };
 
@@ -44,10 +67,16 @@ impl SettingsManager {
 
     pub async fn save(&self, settings: Settings) {
         let mut data = self.data.write().await;
-        *data = settings;
+        *data = settings.clone();
 
-        if let Ok(content) = serde_json::to_string_pretty(&*data) {
-            let _ = fs::write(&self.file_path, content);
+        match serde_json::to_string_pretty(&settings) {
+            Ok(content) => {
+                match fs::write(&self.file_path, content) {
+                    Ok(_) => println!("settings saved to {:?}", self.file_path),
+                    Err(e) => eprintln!("failed to write settings file: {}", e),
+                }
+            }
+            Err(e) => eprintln!("failed to serialize settings: {}", e),
         }
     }
 

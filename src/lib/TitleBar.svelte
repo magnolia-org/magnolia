@@ -48,29 +48,6 @@
     : ""}
 >
   {#if isMacOS}
-    <div class="titlebar-controls macos window-controls">
-      <button
-        class="titlebar-button close"
-        on:click={closeWindow}
-        aria-label="Close"
-      >
-        <div class="dot"></div>
-      </button>
-      <button
-        class="titlebar-button minimize"
-        on:click={minimizeWindow}
-        aria-label="Minimize"
-      >
-        <div class="dot"></div>
-      </button>
-      <button
-        class="titlebar-button maximize"
-        on:click={maximizeWindow}
-        aria-label="Maximize"
-      >
-        <div class="dot"></div>
-      </button>
-    </div>
     <div class="titlebar-center">
       <div class="logo"></div>
       {#if !immersive}

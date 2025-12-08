@@ -43,6 +43,7 @@ base64 = "0.22"
 md5 = "0.7"
 ffmpeg-sidecar = "2.3.0"
 dirs = "5.0"
+fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
 
 
 [features]

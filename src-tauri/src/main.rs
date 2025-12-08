@@ -68,70 +68,75 @@ async fn ensure_ffmpeg_installed() -> Result<(), Box<dyn std::error::Error>> {
     println!("this may take a few minutes (approximately 80MB download)");
     println!("============================================");
     
-    // Get sidecar directory first
-    let sidecar_dir = match ffmpeg_sidecar::paths::sidecar_dir() {
-        Ok(dir) => {
-            println!("sidecar directory: {:?}", dir);
-            dir
-        }
-        Err(e) => {
-            eprintln!("failed to get sidecar directory: {}", e);
-            return Err(e.into());
-        }
-    };
-    
-    // Create sidecar directory if it doesn't exist
-    if let Err(e) = std::fs::create_dir_all(&sidecar_dir) {
-        eprintln!("failed to create sidecar directory: {}", e);
-        return Err(e.into());
-    }
-    
-    // Download ffmpeg
-    println!("checking latest version...");
-    let download_url = match check_latest_version() {
-        Ok(url) => {
-            println!("download URL: {}", url);
-            url
-        }
-        Err(e) => {
-            eprintln!("failed to check latest version: {}", e);
-            return Err(e.into());
-        }
-    };
-    
-    let destination = sidecar_dir.join("ffmpeg-download.zip");
-    println!("downloading to: {:?}", destination);
-    
-    if let Err(e) = download_ffmpeg_package(&download_url, &destination) {
-        eprintln!("failed to download ffmpeg package: {}", e);
-        return Err(e.into());
-    }
-    
-    println!("download complete, unpacking...");
-    
-    if let Err(e) = unpack_ffmpeg(&destination, &sidecar_dir) {
-        eprintln!("failed to unpack ffmpeg: {}", e);
-        // Clean up partial download
+    // Run all blocking operations in spawn_blocking
+    tokio::task::spawn_blocking(|| {
+        // Get sidecar directory first
+        let sidecar_dir = ffmpeg_sidecar::paths::sidecar_dir()
+            .map_err(|e| {
+                eprintln!("failed to get sidecar directory: {}", e);
+                format!("failed to get sidecar directory: {}", e)
+            })?;
+        
+        println!("sidecar directory: {:?}", sidecar_dir);
+        
+        // Create sidecar directory if it doesn't exist
+        std::fs::create_dir_all(&sidecar_dir)
+            .map_err(|e| {
+                eprintln!("failed to create sidecar directory: {}", e);
+                format!("failed to create sidecar directory: {}", e)
+            })?;
+        
+        // Download ffmpeg
+        println!("checking latest version...");
+        let download_url = check_latest_version()
+            .map_err(|e| {
+                eprintln!("failed to check latest version: {}", e);
+                format!("failed to check latest version: {}", e)
+            })?;
+        
+        println!("download URL: {}", download_url);
+        
+        let destination = sidecar_dir.join("ffmpeg-download.zip");
+        println!("downloading to: {:?}", destination);
+        
+        download_ffmpeg_package(&download_url, &destination)
+            .map_err(|e| {
+                eprintln!("failed to download ffmpeg package: {}", e);
+                format!("failed to download ffmpeg package: {}", e)
+            })?;
+        
+        println!("download complete, unpacking...");
+        
+        unpack_ffmpeg(&destination, &sidecar_dir)
+            .map_err(|e| {
+                eprintln!("failed to unpack ffmpeg: {}", e);
+                // Clean up partial download
+                let _ = std::fs::remove_file(&destination);
+                format!("failed to unpack ffmpeg: {}", e)
+            })?;
+        
+        // Clean up downloaded archive
         let _ = std::fs::remove_file(&destination);
-        return Err(e.into());
-    }
+        
+        println!("ffmpeg installed successfully to {:?}", sidecar_dir);
+        
+        // Verify installation
+        let ffmpeg_exe = ffmpeg_sidecar::paths::ffmpeg_path();
+        if ffmpeg_exe.exists() {
+            println!("ffmpeg installation verified at: {:?}", ffmpeg_exe);
+            println!("============================================");
+            Ok(())
+        } else {
+            eprintln!("ffmpeg installation failed - binary not found after unpacking");
+            eprintln!("expected location: {:?}", ffmpeg_exe);
+            Err(format!("ffmpeg installation failed - binary not found after unpacking at {:?}", ffmpeg_exe))
+        }
+    })
+    .await
+    .map_err(|e| -> Box<dyn std::error::Error> { Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("ffmpeg installation task panicked: {}", e))) })?
+    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     
-    // Clean up downloaded archive
-    let _ = std::fs::remove_file(&destination);
-    
-    println!("ffmpeg installed successfully to {:?}", sidecar_dir);
-    
-    // Verify installation
-    let ffmpeg_exe = ffmpeg_sidecar::paths::ffmpeg_path();
-    if ffmpeg_exe.exists() {
-        println!("ffmpeg installation verified at: {:?}", ffmpeg_exe);
-        println!("============================================");
-        Ok(())
-    } else {
-        eprintln!("ffmpeg installation failed - binary not found after unpacking");
-        eprintln!("expected location: {:?}", ffmpeg_exe);
-        Err("ffmpeg installation failed - binary not found after unpacking".into())
-    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -766,6 +771,14 @@ fn main() {
             // Cleanup torrents on app close
             let manager_for_cleanup = torrent_manager_arc.clone();
             let main_window = app.get_webview_window("main").unwrap();
+            
+            // Set macOS-specific window properties for inset traffic lights
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::TitleBarStyle;
+                let _ = main_window.set_title_bar_style(TitleBarStyle::Overlay);
+            }
+            
             main_window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
                     tauri::async_runtime::block_on(async {

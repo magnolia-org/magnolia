@@ -316,6 +316,13 @@ pre {
   -webkit-backdrop-filter: blur(100px);
 }
 
+/* macOS specific titlebar padding for inset traffic lights */
+@supports (-webkit-backdrop-filter: blur(10px)) {
+  .titlebar {
+    padding-left: 78px;
+  }
+}
+
 .titlebar.immersive-mode {
   background: rgba(10, 10, 10, 0.7);
   border-bottom: none;
