@@ -10,6 +10,7 @@ pub struct TrackPreference {
     pub audio_track_index: Option<usize>,
     pub subtitle_track_index: Option<i32>,
     pub subtitle_language: Option<String>,
+    pub subtitle_offset: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -44,6 +45,7 @@ impl TrackPreferencesManager {
         audio_track_index: Option<usize>,
         subtitle_track_index: Option<i32>,
         subtitle_language: Option<String>,
+        subtitle_offset: Option<f64>,
     ) {
         let mut data = self.data.write().await;
         
@@ -51,6 +53,7 @@ impl TrackPreferencesManager {
             audio_track_index,
             subtitle_track_index,
             subtitle_language,
+            subtitle_offset,
         });
 
         if let Ok(content) = serde_json::to_string_pretty(&*data) {

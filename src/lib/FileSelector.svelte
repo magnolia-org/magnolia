@@ -34,7 +34,7 @@
         selectedSeason = availableSeasons[0];
     }
     $: currentSeasonData = seasons.find(s => s.season_number === selectedSeason);
-    $: episodeCount = currentSeasonData?.episode_count || 12;
+    $: episodeCount = currentSeasonData?.episode_count || 24;
     
     $: hasSelection = selectedFiles.size > 0;
     $: assignedCount = Object.keys(assignments).length;
@@ -370,7 +370,7 @@
                 {:else}
                     <span class="status-text">
                         <i class="ri-information-line"></i>
-                        Select files, then pick starting episode
+                        Click and drag to select files and then assign them to episodes by clicking the starting episode on the right.
                     </span>
                 {/if}
             </div>

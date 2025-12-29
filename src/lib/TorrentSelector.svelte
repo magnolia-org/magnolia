@@ -12,11 +12,13 @@
     export let selectedTorrentName = "";
     export let isAnime = false;
     export let hasImdbId = false;
+    export let isTVShow = false;
 
     const dispatch = createEventDispatcher();
     
     let trackerMode = 'auto';
     let selectedTrackers = [];
+    let isSelectingTorrent = false;
     
     const storedPref = getTrackerPreference();
     if (Array.isArray(storedPref) && storedPref.length > 0) {
@@ -78,7 +80,21 @@
         .sort((a, b) => {
             let comparison = 0;
             if (sortBy === "relevance") {
-                return 0;
+                const maxSeeds = Math.max(...filteredResults.map(t => t.seeds));
+                const seedThreshold = maxSeeds * 0.1;
+                
+                const aSeedPenalty = a.seeds < seedThreshold ? 0.5 : 1;
+                const bSeedPenalty = b.seeds < seedThreshold ? 0.5 : 1;
+                
+                // Detect batch torrents (for TV shows, prioritize torrents with "batch", "season", or "complete" in title)
+                const isBatchA = isTVShow && /\b(batch|season|complete|s\d{2}|1080p.*(?:season|complete))\b/i.test(a.title);
+                const isBatchB = isTVShow && /\b(batch|season|complete|s\d{2}|1080p.*(?:season|complete))\b/i.test(b.title);
+                const batchBonusA = isBatchA ? 1.5 : 1;
+                const batchBonusB = isBatchB ? 1.5 : 1;
+                
+                const aPopularity = ((a.seeds * 2) + a.peers + (parseSize(a.size) / (1024**3)) * 0.1) * aSeedPenalty * batchBonusA;
+                const bPopularity = ((b.seeds * 2) + b.peers + (parseSize(b.size) / (1024**3)) * 0.1) * bSeedPenalty * batchBonusB;
+                comparison = bPopularity - aPopularity;
             } else if (sortBy === "seeds") {
                 comparison = b.seeds - a.seeds;
             } else if (sortBy === "peers") {
@@ -99,11 +115,13 @@
     }
 
     function selectTorrent(torrent) {
-        if (loading) return;
+        if (loading || isSelectingTorrent) return;
+        isSelectingTorrent = true;
         dispatch("select", torrent);
     }
 
     function close() {
+        if (isSelectingTorrent) return;
         dispatch("close");
     }
 
@@ -533,6 +551,16 @@
             </div>
         </div>
     </div>
+    
+    {#if isSelectingTorrent}
+        <div class="selection-loading-overlay" transition:fade={{ duration: 150 }}>
+            <div class="selection-loading-content">
+                <div class="spinner"></div>
+                <p>Loading torrent metadata...</p>
+                <span class="loading-subtext">Please wait...</span>
+            </div>
+        </div>
+    {/if}
 </div>
 
 <style>

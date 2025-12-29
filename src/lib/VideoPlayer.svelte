@@ -54,14 +54,15 @@
   const VOLUME_STEP_SMALL = 0.1;
   const VOLUME_STEP_LARGE = 0.2;
   const CONTROLS_HIDE_TIMEOUT = 2000;
-  const REFRESH_INTERVAL = 2000;
+  const REFRESH_INTERVAL = 1000;
 
   let videoElement;
   let subtitleCanvas;
   let playing = false;
   let currentTime = 0;
   let duration = 0;
-  let buffered = 0;
+  let bufferedRanges = [];
+  let torrentProgress = 0;
   let torrentBufferRanges = [];
   let volume = 1;
   let muted = false;
@@ -92,6 +93,23 @@
   let showPlayerMenu = false;
   let showAudioSubmenu = false;
   let showSubtitleSubmenu = false;
+  let showSubtitleSettings = false;
+  let subtitleSettingsElement = null;
+  let subtitleSettingsX = 0;
+  let subtitleSettingsY = 0;
+  
+  const defaultSubtitleSettings = {
+    fontSize: 24,
+    backgroundOpacity: 0.5,
+    color: '#ffffff',
+    textShadow: true,
+    textShadowColor: '#000000',
+    windowMargin: 60
+  };
+  
+  // Subtitle customization settings
+  let subtitleSettings = { ...defaultSubtitleSettings };
+
   let playerMenuElement = null;
   let audioSubmenuElement = null;
   let subtitleSubmenuElement = null;
@@ -102,6 +120,7 @@
   let selectedAudioTrack = 0;
   let audioTrackSwitchingSupported = false;
   let selectedSubtitleTrack = -1;
+  let subtitleOffset = 0;
   let chapters = [];
   let externalSubtitles = [];
   let loadingExternalSubs = false;
@@ -120,6 +139,7 @@
   let torrentFileId = null;
   let torrentHttpPort = null;
   let watchHistoryAdded = false;
+  let saveTimeout;
   
   // Extract info hash from magnet link for stable caching
   function getStableCacheId() {
@@ -179,6 +199,18 @@
           }
         }
       }
+
+      // Apply subtitle offset
+      if (prefs.subtitle_offset !== null && prefs.subtitle_offset !== undefined) {
+        subtitleOffset = prefs.subtitle_offset;
+        if (srtRenderer) {
+          srtRenderer.setOffset(subtitleOffset);
+        }
+        if (subtitleRenderer) {
+          subtitleRenderer.setOffset(subtitleOffset);
+        }
+        console.log(`[track prefs] applied subtitle offset: ${subtitleOffset}s`);
+      }
     } catch (error) {
       console.error('[track prefs] error loading preferences:', error);
     }
@@ -209,13 +241,15 @@
         magnetLink,
         audioTrackIndex: selectedAudioTrack > 0 ? selectedAudioTrack : null,
         subtitleTrackIndex: subtitleIndex >= 0 ? subtitleIndex : null,
-        subtitleLanguage
+        subtitleLanguage,
+        subtitleOffset: subtitleOffset !== 0 ? subtitleOffset : null
       });
       
       console.log('[track prefs] saved preferences:', {
         audio: selectedAudioTrack,
         subtitle: subtitleIndex,
-        language: subtitleLanguage
+        language: subtitleLanguage,
+        offset: subtitleOffset
       });
     } catch (error) {
       console.error('[track prefs] error saving preferences:', error);
@@ -369,6 +403,21 @@
   let skipTimerActive = false; // True during 8-second countdown
   let skipAnimationKey = 0; // Force animation restart
   let showNextEpisodeButton = false;
+
+  $: hasNextEpisode = (() => {
+    if (!metadata || !metadata.seasons || seasonNum === null || episodeNum === null) return false;
+    
+    const currentSeason = metadata.seasons.find(s => s.season_number === seasonNum);
+    if (!currentSeason) return false;
+    
+    if (episodeNum < currentSeason.episode_count) {
+      return true;
+    }
+    
+    // Check next season
+    const nextSeason = metadata.seasons.find(s => s.season_number === seasonNum + 1);
+    return !!nextSeason;
+  })();
 
   $: if (videoElement && !useMkvDemuxer) {
     videoElement.volume = volume;
@@ -815,6 +864,11 @@
 
         loadingStatus.progress = status.progress_bytes || 0;
         loadingStatus.total = status.total_bytes || 0;
+        
+        if (loadingStatus.total > 0) {
+            torrentProgress = (loadingStatus.progress / loadingStatus.total) * 100;
+        }
+
         loadingStatus.peers = status.peers || 0;
         loadingStatus.speed = status.download_speed
           ? status.download_speed * 125000
@@ -965,28 +1019,48 @@
   }
 
   function handleTimeUpdate() {
-    if (videoElement) {
-      if (isFinite(videoElement.currentTime)) {
-        currentTime = videoElement.currentTime;
-      } else {
-        console.warn("Video currentTime is not finite:", videoElement.currentTime);
-      }
-      
-      if (isFinite(videoElement.duration)) {
-        if (duration !== videoElement.duration) {
-          console.log("Duration updated:", videoElement.duration);
-        }
-        duration = videoElement.duration;
-      } else {
-        console.warn("Video duration is not finite:", videoElement.duration);
+    if (!videoElement) return;
+
+    if (isFinite(videoElement.currentTime)) {
+      currentTime = videoElement.currentTime;
+    } else {
+      console.warn("Video currentTime is not finite:", videoElement.currentTime);
+    }
+    
+    // Calculate effective duration from multiple sources
+    let effectiveDuration = 0;
+    if (isFinite(videoElement.duration)) {
+      effectiveDuration = videoElement.duration;
+    }
+    
+    // Prefer metadata duration if available and significantly larger
+    // This fixes issues where browser reports partial duration for streamed content
+    const metaDuration = demuxer?.mediaInfo?.duration || videoMetadata?.duration;
+    if (metaDuration && metaDuration > effectiveDuration + 1) {
+      effectiveDuration = metaDuration;
+    }
+
+    if (effectiveDuration > 0) {
+      if (duration !== effectiveDuration) {
+        duration = effectiveDuration;
       }
     }
 
     // SubtitlesOctopus updates automatically via video element binding
     // SRT renderer auto-updates via timeupdate event listener
 
-    if (videoElement.buffered.length > 0) {
-      buffered = videoElement.buffered.end(videoElement.buffered.length - 1);
+    if (videoElement.buffered.length > 0 && duration > 0) {
+      bufferedRanges = [];
+      for (let i = 0; i < videoElement.buffered.length; i++) {
+        const start = videoElement.buffered.start(i);
+        const end = videoElement.buffered.end(i);
+        bufferedRanges.push({
+          start: (start / duration) * 100,
+          width: ((end - start) / duration) * 100
+        });
+      }
+    } else {
+      bufferedRanges = [];
     }
     
     // Sync HTML5 Audio playback with video (for extracted/transcoded audio tracks)
@@ -1104,11 +1178,14 @@
   }
 
   function handleWaitingEvent() {
+    // Always show buffering indicator when video is waiting
+    console.log('Video waiting - showing buffer indicator');
+    showBufferingIndicator = true;
+
     if (needsAudioTranscoding && audioPlayer instanceof Audio) {
       console.log('Video waiting - checking audio state');
       isBufferingSeek = true;
       waitingForAudio = true;
-      showBufferingIndicator = true;
       
       // Pause video to wait for audio
       if (videoElement && !videoElement.paused) {
@@ -1118,6 +1195,12 @@
   }
 
   function handleCanPlayEvent() {
+    // Always hide buffering indicator when video can play
+    // Unless we are specifically waiting for audio
+    if (!waitingForAudio) {
+        showBufferingIndicator = false;
+    }
+
     if (!isBufferingSeek && !waitingForAudio) return;
 
     console.log('Video can play - checking audio state');
@@ -1216,21 +1299,35 @@
 
     // Check for next episode button (ending section)
     if (duration > 0 && seasonNum !== null && episodeNum !== null) {
-      const endingThreshold = duration * 0.85; // Last 15% of video
-      const lastChapter = chapters[chapters.length - 1];
-      
-      // Check if last chapter is in ending section AND duration is less than 15% of total
-      if (lastChapter && lastChapter.start_time >= endingThreshold) {
-        const lastChapterDuration = duration - lastChapter.start_time;
-        const isShortEnding = lastChapterDuration <= (duration * 0.15);
+      let shouldShowNext = false;
+
+      // Check if current chapter indicates ending
+      if (currentChapter && currentChapter.title) {
+        const title = currentChapter.title.toLowerCase();
+        if (title.includes('ending') || title.includes('credits') || title === 'end') {
+           shouldShowNext = true;
+        }
+      }
+
+      // Fallback to existing logic: last chapter is short and at the end
+      if (!shouldShowNext) {
+        const endingThreshold = duration * 0.85; // Last 15% of video
+        const lastChapter = chapters[chapters.length - 1];
         
-        if (isShortEnding && currentTime >= lastChapter.start_time) {
-          // In the short ending section
-          if (!showNextEpisodeButton) {
-            showNextEpisodeButton = true;
+        // Check if last chapter is in ending section AND duration is less than 15% of total
+        if (lastChapter && lastChapter.start_time >= endingThreshold) {
+          const lastChapterDuration = duration - lastChapter.start_time;
+          const isShortEnding = lastChapterDuration <= (duration * 0.15);
+          
+          if (isShortEnding && currentTime >= lastChapter.start_time) {
+            shouldShowNext = true;
           }
-        } else if (showNextEpisodeButton && currentTime < lastChapter.start_time) {
-          showNextEpisodeButton = false;
+        }
+      }
+      
+      if (shouldShowNext) {
+        if (!showNextEpisodeButton) {
+          showNextEpisodeButton = true;
         }
       } else if (showNextEpisodeButton) {
         showNextEpisodeButton = false;
@@ -1251,6 +1348,17 @@
 
   async function goToNextEpisode() {
     if (seasonNum === null || episodeNum === null) return;
+
+    // Update progress before switching
+    if (mediaId && mediaType && currentTime > 0) {
+      const progressData = {
+        currentTimestamp: Math.floor(currentTime),
+        duration: Math.floor(duration),
+        currentSeason: seasonNum,
+        currentEpisode: episodeNum
+      };
+      watchProgressStore.updateProgress(mediaId, mediaType, progressData);
+    }
 
     const nextEpisode = episodeNum + 1;
     
@@ -1387,6 +1495,328 @@
     }, CONTROLS_HIDE_TIMEOUT);
   }
 
+
+  function getCountryCode(languageCode) {
+    if (!languageCode) return null;
+    const code = languageCode.toLowerCase();
+    const map = {
+      'en': 'US', 'eng': 'US',
+      'ja': 'JP', 'jpn': 'JP',
+      'fr': 'FR', 'fra': 'FR', 'fre': 'FR',
+      'de': 'DE', 'deu': 'DE', 'ger': 'DE',
+      'es': 'ES', 'spa': 'ES',
+      'it': 'IT', 'ita': 'IT',
+      'pt': 'PT', 'por': 'PT',
+      'ru': 'RU', 'rus': 'RU',
+      'zh': 'CN', 'zho': 'CN', 'chi': 'CN',
+      'ko': 'KR', 'kor': 'KR',
+      'hi': 'IN', 'hin': 'IN',
+      'ar': 'SA', 'ara': 'SA',
+      'tr': 'TR', 'tur': 'TR',
+      'pl': 'PL', 'pol': 'PL',
+      'nl': 'NL', 'nld': 'NL', 'dut': 'NL',
+      'sv': 'SE', 'swe': 'SE',
+      'no': 'NO', 'nor': 'NO',
+      'da': 'DK', 'dan': 'DK',
+      'fi': 'FI', 'fin': 'FI',
+      'vi': 'VN', 'vie': 'VN',
+      'th': 'TH', 'tha': 'TH',
+      'id': 'ID', 'ind': 'ID',
+      'ms': 'MY', 'msa': 'MY', 'may': 'MY',
+      'uk': 'UA', 'ukr': 'UA',
+      'cs': 'CZ', 'ces': 'CZ', 'cze': 'CZ',
+      'hu': 'HU', 'hun': 'HU',
+      'ro': 'RO', 'ron': 'RO', 'rum': 'RO',
+      'bg': 'BG', 'bul': 'BG',
+      'el': 'GR', 'ell': 'GR', 'gre': 'GR',
+      'he': 'IL', 'heb': 'IL',
+      'fa': 'IR', 'fas': 'IR', 'per': 'IR',
+      'ur': 'PK', 'urd': 'PK',
+      'bn': 'BD', 'ben': 'BD',
+      'ta': 'IN', 'tam': 'IN',
+      'te': 'IN', 'tel': 'IN',
+      'mr': 'IN', 'mar': 'IN',
+      'gu': 'IN', 'guj': 'IN',
+      'kn': 'IN', 'kan': 'IN',
+      'ml': 'IN', 'mal': 'IN',
+      'pa': 'IN', 'pan': 'IN',
+      'sr': 'RS', 'srp': 'RS',
+      'hr': 'HR', 'hrv': 'HR',
+      'sl': 'SI', 'slv': 'SI',
+      'sk': 'SK', 'slk': 'SK', 'slo': 'SK',
+      'et': 'EE', 'est': 'EE',
+      'lv': 'LV', 'lav': 'LV',
+      'lt': 'LT', 'lit': 'LT',
+      'ca': 'ES', 'cat': 'ES',
+      'eu': 'ES', 'eus': 'ES', 'baq': 'ES',
+      'gl': 'ES', 'glg': 'ES',
+      'tl': 'PH', 'tgl': 'PH',
+      'is': 'IS', 'isl': 'IS', 'ice': 'IS',
+      'ga': 'IE', 'gle': 'IE',
+      'cy': 'GB', 'cym': 'GB', 'wel': 'GB',
+      'sq': 'AL', 'sqi': 'AL', 'alb': 'AL',
+      'mk': 'MK', 'mkd': 'MK', 'mac': 'MK',
+      'bs': 'BA', 'bos': 'BA',
+      'az': 'AZ', 'aze': 'AZ',
+      'kk': 'KZ', 'kaz': 'KZ',
+      'uz': 'UZ', 'uzb': 'UZ',
+      'hy': 'AM', 'hye': 'AM', 'arm': 'AM',
+      'ka': 'GE', 'kat': 'GE', 'geo': 'GE',
+      'be': 'BY', 'bel': 'BY',
+      'mn': 'MN', 'mon': 'MN',
+      'ne': 'NP', 'nep': 'NP',
+      'si': 'LK', 'sin': 'LK',
+      'km': 'KH', 'khm': 'KH',
+      'lo': 'LA', 'lao': 'LA',
+      'my': 'MM', 'mya': 'MM', 'bur': 'MM',
+      'am': 'ET', 'amh': 'ET',
+      'sw': 'TZ', 'swa': 'TZ',
+      'af': 'ZA', 'afr': 'ZA',
+      'zu': 'ZA', 'zul': 'ZA',
+      'xh': 'ZA', 'xho': 'ZA',
+      'st': 'ZA', 'sot': 'ZA',
+      'tn': 'ZA', 'tsn': 'ZA',
+      'ts': 'ZA', 'tso': 'ZA',
+      'ss': 'ZA', 'ssw': 'ZA',
+      've': 'ZA', 'ven': 'ZA',
+      'nr': 'ZA', 'nbl': 'ZA',
+      'ny': 'MW', 'nya': 'MW',
+      'mg': 'MG', 'mlg': 'MG',
+      'so': 'SO', 'som': 'SO',
+      'ha': 'NG', 'hau': 'NG',
+      'ig': 'NG', 'ibo': 'NG',
+      'yo': 'NG', 'yor': 'NG',
+      'rw': 'RW', 'kin': 'RW',
+      'lg': 'UG', 'lug': 'UG',
+      'ln': 'CD', 'lin': 'CD',
+      'wo': 'SN', 'wol': 'SN',
+      'ff': 'SN', 'ful': 'SN',
+      'bm': 'ML', 'bam': 'ML',
+      'dy': 'SN', 'dyu': 'SN',
+      'ak': 'GH', 'aka': 'GH',
+      'ee': 'GH', 'ewe': 'GH',
+      'gaa': 'GH',
+      'kri': 'SL',
+      'men': 'SL',
+      'tem': 'SL',
+      'vai': 'LR',
+      'kpe': 'LR',
+      'man': 'GM',
+      'sus': 'GN',
+      'pulaar': 'SN',
+      'soninke': 'ML',
+      'zarma': 'NE',
+      'hausa': 'NG',
+      'kanuri': 'NG',
+      'fulfulde': 'NG',
+      'tamasheq': 'ML',
+      'songhay': 'ML',
+      'dogon': 'ML',
+      'bambara': 'ML',
+      'malinke': 'ML',
+      'senufo': 'CI',
+      'baoule': 'CI',
+      'bete': 'CI',
+      'dioula': 'CI',
+      'yacouba': 'CI',
+      'gueres': 'CI',
+      'dida': 'CI',
+      'abey': 'CI',
+      'abidji': 'CI',
+      'adoukrou': 'CI',
+      'alladian': 'CI',
+      'attie': 'CI',
+      'ebrie': 'CI',
+      'nzima': 'CI',
+      'agni': 'CI',
+      'abron': 'CI',
+      'kulango': 'CI',
+      'lobi': 'CI',
+      'birifor': 'CI',
+      'djimini': 'CI',
+      'tagbana': 'CI',
+      'jamala': 'CI',
+      'nafana': 'CI',
+      'koulango': 'CI',
+      'ligbi': 'CI',
+      'numu': 'CI',
+      'humburi': 'ML',
+      'koroboro': 'ML',
+      'koyraboro': 'ML',
+      'koyra': 'ML',
+      'chiini': 'ML',
+      'tasawaq': 'NE',
+      'tedaga': 'TD',
+      'dazaga': 'TD',
+      'buduma': 'TD',
+      'kotoko': 'CM',
+      'mousgoum': 'CM',
+      'massa': 'CM',
+      'tupuri': 'CM',
+      'mundang': 'CM',
+      'gidar': 'CM',
+      'fali': 'CM',
+      'daba': 'CM',
+      'guiziga': 'CM',
+      'mofu': 'CM',
+      'mafa': 'CM',
+      'kapsiki': 'CM',
+      'bana': 'CM',
+      'zizilivakan': 'CM',
+      'podoko': 'CM',
+      'mandara': 'CM',
+      'glavda': 'NG',
+      'guduf': 'NG',
+      'lamang': 'NG',
+      'hide': 'NG',
+      'vizik': 'NG',
+      'vemgo': 'NG',
+      'mabas': 'NG',
+      'xedi': 'NG',
+      'hdi': 'CM',
+      'marga': 'NG',
+      'kilba': 'NG',
+      'bura': 'NG',
+      'pabir': 'NG',
+      'cibak': 'NG',
+      'kamwe': 'NG',
+      'margi': 'NG',
+      'nggam': 'TD',
+      'sar': 'TD',
+      'mbay': 'TD',
+      'ngambay': 'TD',
+      'laka': 'TD',
+      'kaba': 'TD',
+      'gula': 'TD',
+      'tumak': 'TD',
+      'nancere': 'TD',
+      'gabri': 'TD',
+      'kwang': 'TD',
+      'lele': 'TD',
+      'kim': 'TD',
+      'besme': 'TD',
+      'mesme': 'TD',
+      'masa': 'TD',
+      'musey': 'TD',
+      'marba': 'TD',
+      'monogoy': 'TD',
+      'kera': 'TD',
+      'wina': 'CM',
+      'giziga': 'CM',
+      'north': 'CM',
+      'south': 'CM',
+      'baldemu': 'CM',
+      'zulgwa': 'CM',
+      'gemzek': 'CM',
+      'minew': 'CM',
+      'dugwor': 'CM',
+      'mikiri': 'CM',
+      'cuvok': 'CM',
+      'merey': 'CM',
+      'dugwur': 'CM',
+      'mofu-gudur': 'CM',
+      'mofu-north': 'CM',
+      'mofu-south': 'CM',
+      'tshang': 'CM',
+      'gude': 'NG',
+      'nzanyi': 'NG',
+      'holma': 'NG',
+      'bacama': 'NG',
+      'bata': 'NG',
+      'fali-mubi': 'NG',
+      'fali-kiria': 'NG',
+      'fali-jilbu': 'NG',
+      'fali-gili': 'NG',
+      'fali-bwahara': 'NG',
+      'higi': 'NG',
+      'bana': 'CM',
+      'hya': 'CM',
+      'psikye': 'CM',
+      'kamwe': 'NG',
+      'guduf-gava': 'NG',
+      'glavda': 'NG',
+      'cineni': 'NG',
+      'dghwede': 'NG',
+      'guduf': 'NG',
+      'gava': 'NG',
+      'cikide': 'NG',
+      'chinene': 'NG',
+      'nakatsa': 'NG',
+      'gvoko': 'NG',
+      'htan': 'NG',
+      'tur': 'NG',
+      'vemgo-mabas': 'NG',
+      'lamang': 'NG',
+      'hdi': 'CM',
+      'mafa': 'CM',
+      'matakam': 'CM',
+      'mofu': 'CM',
+      'cuvok': 'CM',
+      'merey': 'CM',
+      'dugwor': 'CM',
+      'zulgwa': 'CM',
+      'gemzek': 'CM',
+      'minew': 'CM',
+      'mikiri': 'CM',
+      'dugwur': 'CM',
+      'giziga': 'CM',
+      'north': 'CM',
+      'south': 'CM',
+      'baldemu': 'CM',
+      'wina': 'CM',
+      'kera': 'TD',
+      'kwang': 'TD',
+      'lele': 'TD',
+      'nancere': 'TD',
+      'gabri': 'TD',
+      'kim': 'TD',
+      'besme': 'TD',
+      'mesme': 'TD',
+      'masa': 'TD',
+      'musey': 'TD',
+      'marba': 'TD',
+      'monogoy': 'TD',
+      'tupuri': 'CM',
+      'mundang': 'CM',
+      'gidar': 'CM',
+      'fali': 'CM',
+      'daba': 'CM',
+      'guiziga': 'CM',
+      'mofu': 'CM',
+      'mafa': 'CM',
+      'kapsiki': 'CM',
+      'bana': 'CM',
+      'zizilivakan': 'CM',
+      'podoko': 'CM',
+      'mandara': 'CM',
+      'glavda': 'NG',
+      'guduf': 'NG',
+      'lamang': 'NG',
+      'hide': 'NG',
+      'vizik': 'NG',
+      'vemgo': 'NG',
+      'mabas': 'NG',
+      'xedi': 'NG',
+      'hdi': 'CM',
+      'marga': 'NG',
+      'kilba': 'NG',
+      'bura': 'NG',
+      'pabir': 'NG',
+      'cibak': 'NG',
+      'kamwe': 'NG',
+      'margi': 'NG',
+      'nggam': 'TD',
+      'sar': 'TD',
+      'mbay': 'TD',
+      'ngambay': 'TD',
+      'laka': 'TD',
+      'kaba': 'TD',
+      'gula': 'TD',
+      'tumak': 'TD',
+    };
+    return map[code] || null;
+  }
+
   async function selectAudioTrack(index) {
     console.log("[Audio] selectAudioTrack called:", { index, currentlySelected: selectedAudioTrack, loading: loadingAudio });
     
@@ -1411,7 +1841,9 @@
           videoElement.muted = false;
         }
         
-        selectedAudioTrack = index;
+        // Check if selection changed while we were working
+        if (selectedAudioTrack !== index) return;
+
         showAudioMenu = false;
         loadingAudio = false;
         saveTrackPreferences();
@@ -1428,7 +1860,9 @@
           if (videoElement.audioTracks[index]) {
             videoElement.audioTracks[index].enabled = true;
             console.log(`switched to native audio track ${index}`);
-            selectedAudioTrack = index;
+            
+            if (selectedAudioTrack !== index) return;
+
             showAudioMenu = false;
             loadingAudio = false;
             saveTrackPreferences();
@@ -1476,6 +1910,12 @@
       // Check filesystem cache
       const cachedAudio = await loadCachedAudio(stableCacheId, fileIndex, index);
       
+      // Check if selection changed while we were awaiting
+      if (selectedAudioTrack !== index) {
+        console.log('Audio selection changed during load, aborting');
+        return;
+      }
+      
       if (cachedAudio) {
         console.log(`[Audio Cache] Filesystem HIT - Loaded from disk`);
         // Use MKV container format (all audio is now extracted as MKV)
@@ -1505,6 +1945,8 @@
         showBufferingIndicator = true;
         await ensureTranscodedAudioPrepared(blobUrl, videoElement?.currentTime || 0, audioPlayer);
         
+        if (selectedAudioTrack !== index) return;
+
         // Sync and play
         syncExternalAudio(videoElement?.currentTime || 0);
         if (!videoElement.paused) {
@@ -1525,6 +1967,8 @@
             trackIndex: index
           });
           
+          if (selectedAudioTrack !== index) return;
+
           console.log(`[Audio Cache] Received ${audioData.length} bytes from backend`);
           
           // Convert to Uint8Array (Tauri returns Vec<u8> as regular array)
@@ -1560,6 +2004,8 @@
           // Wait for audio to be ready
           await ensureTranscodedAudioPrepared(blobUrl, videoElement?.currentTime || 0, audioPlayer);
           
+          if (selectedAudioTrack !== index) return;
+
           // Sync and play
           syncExternalAudio(videoElement?.currentTime || 0);
           if (!videoElement.paused) {
@@ -1579,8 +2025,10 @@
       console.error("Failed to switch audio track:", error);
       selectedAudioTrack = previousTrack;
     } finally {
-      loadingAudio = false;
-      showAudioMenu = false;
+      if (selectedAudioTrack === index) {
+        loadingAudio = false;
+        showAudioMenu = false;
+      }
     }
   }
 
@@ -1620,6 +2068,8 @@
         // Initialize fetcher (loads from cache or fetches)
         await streamingSrtFetcher.initialize();
         
+        if (selectedSubtitleTrack !== trackIndex) return;
+
         if (!srtRenderer && videoElement) {
           srtRenderer = new SRTSubtitleRenderer(videoElement);
           srtRenderer.initialize();
@@ -1681,6 +2131,8 @@
             // Check filesystem cache
             subtitleData = await loadCachedSubtitle(stableCacheId, fileIndex, trackIndex);
             
+            if (selectedSubtitleTrack !== trackIndex) return;
+
             if (subtitleData) {
               console.log(`[Subtitle Cache] Filesystem HIT - Loaded from disk for key: ${cacheKey}`);
               // Store in memory cache for faster access
@@ -1690,6 +2142,8 @@
               // Extract subtitle from demuxer
               subtitleData = await demuxer.extractSubtitleTrack(trackIndex);
               
+              if (selectedSubtitleTrack !== trackIndex) return;
+
               if (!subtitleData) {
                 throw new Error('No subtitle data extracted');
               }
@@ -1749,13 +2203,16 @@
     } catch (error) {
       console.error("Failed to load subtitle:", error);
     } finally {
-      loadingSubtitle = false;
-      showSubtitleMenu = false;
+      if (selectedSubtitleTrack === trackIndex) {
+        loadingSubtitle = false;
+        showSubtitleMenu = false;
+      }
     }
   }
 
   function disableSubtitles() {
     selectedSubtitleTrack = -1;
+    loadingSubtitle = false;
 
     if (subtitleRenderer) {
       subtitleRenderer.hide();
@@ -1869,6 +2326,7 @@
     const wasOpen = showSubtitleSubmenu;
     showSubtitleSubmenu = !showSubtitleSubmenu;
     showAudioSubmenu = false;
+    showSubtitleSettings = false;
     
     if (showSubtitleSubmenu) {
       const button = event.currentTarget;
@@ -1896,6 +2354,74 @@
         }
       }, 0);
     }
+  }
+
+  function toggleSubtitleSettings(event) {
+    showSubtitleSettings = !showSubtitleSettings;
+    
+    if (showSubtitleSettings) {
+      const button = event.currentTarget;
+      const buttonRect = button.getBoundingClientRect();
+      
+      // Initial position
+      subtitleSettingsX = buttonRect.left - 436; // Adjusted for wider menu (420px + padding)
+      subtitleSettingsY = buttonRect.top - 8;
+      
+      setTimeout(() => {
+        if (subtitleSettingsElement) {
+          const width = subtitleSettingsElement.offsetWidth;
+          const height = subtitleSettingsElement.offsetHeight;
+          
+          subtitleSettingsX = buttonRect.left - width - 16;
+          
+          const minY = 20;
+          const maxY = window.innerHeight - height - 20;
+          subtitleSettingsY = Math.max(minY, Math.min(buttonRect.top, maxY)) - 8;
+        }
+      }, 0);
+    }
+  }
+
+  function handleGlobalClick(event) {
+    if (showSubtitleSettings && subtitleSettingsElement && !subtitleSettingsElement.contains(event.target)) {
+      showSubtitleSettings = false;
+    }
+  }
+
+  function updateSubtitleSettings(key, value) {
+    subtitleSettings = { ...subtitleSettings, [key]: value };
+    localStorage.setItem('subtitleSettings', JSON.stringify(subtitleSettings));
+    if (srtRenderer) {
+      srtRenderer.setStyles(subtitleSettings);
+    }
+  }
+
+  function updateSubtitleOffset(delta) {
+    subtitleOffset = parseFloat((subtitleOffset + delta).toFixed(1));
+    if (srtRenderer) {
+      srtRenderer.setOffset(subtitleOffset);
+    }
+    if (subtitleRenderer) {
+      subtitleRenderer.setOffset(subtitleOffset);
+    }
+    // Debounce saving preferences
+    if (saveTimeout) clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(() => saveTrackPreferences(), 1000);
+  }
+
+  function resetSubtitleOffset() {
+    subtitleOffset = 0;
+    if (srtRenderer) {
+      srtRenderer.setOffset(subtitleOffset);
+    }
+    if (subtitleRenderer) {
+      subtitleRenderer.setOffset(subtitleOffset);
+    }
+    saveTrackPreferences();
+  }
+
+  function resetSubtitleSetting(key) {
+    updateSubtitleSettings(key, defaultSubtitleSettings[key]);
   }
 
   async function toggleSkipPrompts() {
@@ -2172,10 +2698,22 @@
     window.addEventListener("mousemove", handleDrag);
     window.addEventListener("mouseup", stopDrag);
     window.addEventListener("keydown", handleKeyPress);
+    window.addEventListener("click", handleGlobalClick);
+
+    // Load global subtitle settings
+    const savedSubtitleSettings = localStorage.getItem('subtitleSettings');
+    if (savedSubtitleSettings) {
+      try {
+        subtitleSettings = { ...defaultSubtitleSettings, ...JSON.parse(savedSubtitleSettings) };
+      } catch (e) {
+        console.error('Failed to parse saved subtitle settings:', e);
+      }
+    }
 
     // Initialize SRT subtitle renderer for non-demuxer playback
     if (videoElement) {
       srtRenderer = new SRTSubtitleRenderer(videoElement);
+      srtRenderer.setStyles(subtitleSettings);
       srtRenderer.initialize();
     }
 
@@ -2230,6 +2768,7 @@
     window.removeEventListener("mousemove", handleDrag);
     window.removeEventListener("mouseup", stopDrag);
     window.removeEventListener("keydown", handleKeyPress);
+    window.removeEventListener("click", handleGlobalClick);
     clearTimeout(controlsTimeout);
     clearTimeout(indicatorTimeout);
 
@@ -2238,9 +2777,9 @@
       try {
         await invoke("stop_stream", {
           handleId: handleId,
-          deleteFiles: false // Cache the torrent instead of deleting
+          deleteFiles: true // Delete files to save space
         });
-        console.log("Torrent stream cached on component destroy");
+        console.log("Torrent stream stopped and files deleted on component destroy");
       } catch (error) {
         console.error("Failed to stop stream on destroy:", error);
       }
@@ -2478,7 +3017,7 @@
   {/if}
 
   <!-- Next Episode Button -->
-  {#if chapters && chapters.length > 0 && showNextEpisodeButton && seasonNum !== null && episodeNum !== null}
+  {#if chapters && chapters.length > 0 && showNextEpisodeButton && seasonNum !== null && episodeNum !== null && hasNextEpisode}
     <button class="skip-button next-episode" on:click={goToNextEpisode}>
       <span class="skip-text">Next Episode</span>
       <kbd class="skip-kbd">
@@ -2497,9 +3036,17 @@
       on:mouseleave={handleProgressLeave}
     >
       <div
-        class="progress-buffered"
-        style="width: {(buffered / duration) * 100}%"
+        class="progress-torrent"
+        style="width: {torrentProgress}%"
       ></div>
+      <!-- Segmented buffer hidden due to visual bugs
+      {#each bufferedRanges as range}
+        <div
+          class="progress-buffered"
+          style="left: {range.start}%; width: {range.width}%"
+        ></div>
+      {/each}
+      -->
       <div
         class="progress-filled"
         style="width: {((isSeeking ? seekPreviewTime : currentTime) /
@@ -2699,11 +3246,19 @@
               <button
                 class="player-track-option menu-item"
                 class:active={selectedAudioTrack === i}
-                disabled={loadingAudio}
+                disabled={loadingAudio && selectedAudioTrack !== i}
                 on:click={() => selectAudioTrack(i)}
               >
                 <span class="player-track-info">
                   {#if track.language}
+                    {@const countryCode = getCountryCode(track.language)}
+                    {#if countryCode}
+                      <img 
+                        src="https://flagcdn.com/w40/{countryCode.toLowerCase()}.png" 
+                        alt={track.language}
+                        class="track-flag"
+                      />
+                    {/if}
                     <span class="player-track-lang">{track.language.toUpperCase()}</span>
                   {:else}
                     Track {i + 1}
@@ -2726,6 +3281,17 @@
         {#if showSubtitleSubmenu && ((videoMetadata?.subtitle_tracks && videoMetadata.subtitle_tracks.length > 0) || externalSubtitles.length > 0)}
           <div class="submenu" style="left: {subtitleSubmenuX}px; top: {subtitleSubmenuY}px;" bind:this={subtitleSubmenuElement}>
             <button
+              class="player-track-option menu-item submenu-trigger"
+              on:click|stopPropagation={toggleSubtitleSettings}
+            >
+              <span class="player-track-info">
+                <i class="ri-settings-4-line"></i> Customize
+              </span>
+              <i class="ri-arrow-right-s-line"></i>
+            </button>
+            <div class="menu-divider"></div>
+
+            <button
               class="player-track-option menu-item"
               class:active={selectedSubtitleTrack === -1}
               on:click={disableSubtitles}
@@ -2734,23 +3300,37 @@
             </button>
             {#if videoMetadata?.subtitle_tracks && videoMetadata.subtitle_tracks.length > 0}
               {#each videoMetadata.subtitle_tracks as track, i}
-                <button
-                  class="player-track-option menu-item"
-                  class:active={selectedSubtitleTrack === i}
-                  on:click={() => selectSubtitle(track, i)}
-                  disabled={loadingSubtitle}
-                >
-                  <span class="player-track-info">
-                    <span class="player-track-lang">{track.language ? track.language.toUpperCase() : `Subtitle ${i + 1}`}</span>
-                    {#if track.name}
-                      <span class="player-track-detail">{track.name}</span>
+                {#if (track.codec || '').toLowerCase() !== 'hdmv_pgs_subtitle'}
+                  <button
+                    class="player-track-option menu-item"
+                    class:active={selectedSubtitleTrack === i}
+                    on:click={() => selectSubtitle(track, i)}
+                    disabled={loadingSubtitle && selectedSubtitleTrack !== i}
+                  >
+                    <span class="player-track-info">
+                      {#if track.language}
+                        {@const countryCode = getCountryCode(track.language)}
+                        {#if countryCode}
+                          <img 
+                            src="https://flagcdn.com/w40/{countryCode.toLowerCase()}.png" 
+                            alt={track.language}
+                            class="track-flag"
+                          />
+                        {/if}
+                        <span class="player-track-lang">{track.language.toUpperCase()}</span>
+                      {:else}
+                        <span class="player-track-lang">Subtitle {i + 1}</span>
+                      {/if}
+                      {#if track.name}
+                        <span class="player-track-detail">{track.name}</span>
+                      {/if}
+                    </span>
+                    <span class="player-track-badge">{track.codec || 'MKV'}</span>
+                    {#if loadingSubtitle && selectedSubtitleTrack === i}
+                      <span class="loading-spinner-small"></span>
                     {/if}
-                  </span>
-                  <span class="player-track-badge">{track.codec || 'MKV'}</span>
-                  {#if loadingSubtitle && selectedSubtitleTrack === i}
-                    <span class="loading-spinner-small"></span>
-                  {/if}
-                </button>
+                  </button>
+                {/if}
               {/each}
             {/if}
             {#if externalSubtitles.length > 0}
@@ -2759,15 +3339,155 @@
                   class="player-track-option menu-item"
                   class:active={selectedSubtitleTrack === `external-${i}`}
                   on:click={() => selectSubtitle(track, `external-${i}`)}
-                  disabled={loadingSubtitle}
+                  disabled={loadingSubtitle && selectedSubtitleTrack !== `external-${i}`}
                 >
                   <span class="player-track-info">
-                    <span class="player-track-lang">{track.language ? track.language.toUpperCase() : `External ${i + 1}`}</span>
+                    {#if track.language}
+                      {@const countryCode = getCountryCode(track.language)}
+                      {#if countryCode}
+                        <img 
+                          src="https://flagsapi.com/{countryCode}/flat/64.png" 
+                          alt={track.language}
+                          class="track-flag"
+                        />
+                      {/if}
+                      <span class="player-track-lang">{track.language.toUpperCase()}</span>
+                    {:else}
+                      <span class="player-track-lang">External {i + 1}</span>
+                    {/if}
                   </span>
-                  <span class="player-track-badge">SRT</span>
+                  {#if track.source === 'wyzie'}
+                    <span class="player-track-badge wyzie-badge">WYZIE</span>
+                  {:else}
+                    <span class="player-track-badge">SRT</span>
+                  {/if}
                 </button>
               {/each}
             {/if}
+          </div>
+        {/if}
+
+        <!-- Subtitle Settings Submenu -->
+        {#if showSubtitleSettings}
+          <div class="submenu settings-submenu" style="left: {subtitleSettingsX}px; top: {subtitleSettingsY}px;" bind:this={subtitleSettingsElement}>
+            <div class="settings-preview-container">
+              <div class="settings-preview-text" style="
+                font-size: {subtitleSettings.fontSize}px;
+                background: rgba(0, 0, 0, {subtitleSettings.backgroundOpacity});
+                color: {subtitleSettings.color};
+                text-shadow: {subtitleSettings.textShadow ? `2px 2px 2px ${subtitleSettings.textShadowColor}` : 'none'};
+              ">
+                Preview Text
+              </div>
+            </div>
+            
+            <div class="settings-group">
+              <label>Size</label>
+              <div class="settings-controls-wrapper">
+                <div class="settings-controls">
+                  <button class="settings-btn" on:click|stopPropagation={() => updateSubtitleSettings('fontSize', Math.max(12, subtitleSettings.fontSize - 2))}>-</button>
+                  <span class="settings-value">{subtitleSettings.fontSize}px</span>
+                  <button class="settings-btn" on:click|stopPropagation={() => updateSubtitleSettings('fontSize', Math.min(48, subtitleSettings.fontSize + 2))}>+</button>
+                </div>
+                <button class="settings-reset-btn" title="Reset" on:click|stopPropagation={() => resetSubtitleSetting('fontSize')}>
+                  <i class="ri-refresh-line"></i>
+                </button>
+              </div>
+            </div>
+            
+            <div class="settings-group">
+              <label>Color</label>
+              <div class="settings-controls-wrapper">
+                <div class="settings-controls">
+                  <input 
+                    type="color" 
+                    class="settings-color-input"
+                    value={subtitleSettings.color} 
+                    on:input={(e) => updateSubtitleSettings('color', e.target.value)}
+                  />
+                </div>
+                <button class="settings-reset-btn" title="Reset" on:click|stopPropagation={() => resetSubtitleSetting('color')}>
+                  <i class="ri-refresh-line"></i>
+                </button>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <label>Shadow</label>
+              <div class="settings-controls-wrapper">
+                <div class="settings-controls">
+                  <button 
+                    class="settings-btn toggle-btn" 
+                    class:active={subtitleSettings.textShadow}
+                    on:click|stopPropagation={() => updateSubtitleSettings('textShadow', !subtitleSettings.textShadow)}
+                  >
+                    <i class={subtitleSettings.textShadow ? "ri-checkbox-circle-fill" : "ri-checkbox-blank-circle-line"}></i>
+                  </button>
+                  {#if subtitleSettings.textShadow}
+                    <input 
+                      type="color" 
+                      class="settings-color-input"
+                      value={subtitleSettings.textShadowColor} 
+                      on:input={(e) => updateSubtitleSettings('textShadowColor', e.target.value)}
+                    />
+                  {/if}
+                </div>
+                <button class="settings-reset-btn" title="Reset" on:click|stopPropagation={() => {
+                  resetSubtitleSetting('textShadow');
+                  resetSubtitleSetting('textShadowColor');
+                }}>
+                  <i class="ri-refresh-line"></i>
+                </button>
+              </div>
+            </div>
+            
+            <div class="settings-group">
+              <label>Background</label>
+              <div class="settings-controls-wrapper">
+                <div class="settings-controls">
+                  <button class="settings-btn" on:click|stopPropagation={() => updateSubtitleSettings('backgroundOpacity', Math.max(0, parseFloat((subtitleSettings.backgroundOpacity - 0.1).toFixed(1))))}>-</button>
+                  <span class="settings-value">{Math.round(subtitleSettings.backgroundOpacity * 100)}%</span>
+                  <button class="settings-btn" on:click|stopPropagation={() => updateSubtitleSettings('backgroundOpacity', Math.min(1, parseFloat((subtitleSettings.backgroundOpacity + 0.1).toFixed(1))))}>+</button>
+                </div>
+                <button class="settings-reset-btn" title="Reset" on:click|stopPropagation={() => resetSubtitleSetting('backgroundOpacity')}>
+                  <i class="ri-refresh-line"></i>
+                </button>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <label>Offset</label>
+              <div class="settings-controls-wrapper">
+                <div class="settings-controls">
+                  <button class="settings-btn wide-btn" on:click|stopPropagation={() => updateSubtitleOffset(-0.1)}>
+                    <i class="ri-subtract-line"></i> Sub First
+                  </button>
+                  <span class="settings-value" style="min-width: 50px;">
+                    {Math.abs(subtitleOffset).toFixed(1)}s
+                  </span>
+                  <button class="settings-btn wide-btn" on:click|stopPropagation={() => updateSubtitleOffset(0.1)}>
+                    Audio First <i class="ri-add-line"></i>
+                  </button>
+                </div>
+                <button class="settings-reset-btn" title="Reset" on:click|stopPropagation={() => resetSubtitleOffset()}>
+                  <i class="ri-refresh-line"></i>
+                </button>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <label>Position</label>
+              <div class="settings-controls-wrapper">
+                <div class="settings-controls">
+                  <button class="settings-btn" on:click|stopPropagation={() => updateSubtitleSettings('windowMargin', Math.max(0, subtitleSettings.windowMargin - 10))}>↓</button>
+                  <span class="settings-value">{subtitleSettings.windowMargin}px</span>
+                  <button class="settings-btn" on:click|stopPropagation={() => updateSubtitleSettings('windowMargin', Math.min(200, subtitleSettings.windowMargin + 10))}>↑</button>
+                </div>
+                <button class="settings-reset-btn" title="Reset" on:click|stopPropagation={() => resetSubtitleSetting('windowMargin')}>
+                  <i class="ri-refresh-line"></i>
+                </button>
+              </div>
+            </div>
           </div>
         {/if}
       </div>

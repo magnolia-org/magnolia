@@ -140,6 +140,63 @@ async fn ensure_ffmpeg_installed() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tauri::command]
+fn check_ffmpeg() -> bool {
+    is_ffmpeg_installed()
+}
+
+#[tauri::command]
+async fn install_ffmpeg(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Emitter;
+    use std::io::Write;
+    
+    if is_ffmpeg_installed() {
+        return Ok(());
+    }
+
+    let sidecar_dir = ffmpeg_sidecar::paths::sidecar_dir()
+        .map_err(|e| e.to_string())?;
+    
+    std::fs::create_dir_all(&sidecar_dir)
+        .map_err(|e| e.to_string())?;
+
+    let download_url = check_latest_version()
+        .map_err(|e| e.to_string())?;
+    
+    let destination = sidecar_dir.join("ffmpeg-download.zip");
+    
+    // Download with progress
+    let client = reqwest::Client::new();
+    let mut response = client.get(&download_url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+        
+    let total_size = response.content_length().unwrap_or(0);
+    let mut file = std::fs::File::create(&destination).map_err(|e| e.to_string())?;
+    let mut downloaded: u64 = 0;
+    
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        file.write_all(&chunk).map_err(|e| e.to_string())?;
+        downloaded += chunk.len() as u64;
+        
+        if total_size > 0 {
+            let progress = (downloaded as f64 / total_size as f64) * 100.0;
+            let _ = app.emit("ffmpeg-install-progress", progress);
+        }
+    }
+    
+    let _ = app.emit("ffmpeg-install-progress", 100.0); // Download complete
+    
+    // Unpack
+    unpack_ffmpeg(&destination, &sidecar_dir)
+        .map_err(|e| e.to_string())?;
+        
+    let _ = std::fs::remove_file(&destination);
+    
+    Ok(())
+}
+
+#[tauri::command]
 async fn search_nyaa(query: String) -> Result<Vec<search::SearchResult>, String> {
     let provider = NyaaProvider::new();
     provider.search(&query).await.map_err(|e| e.to_string())
@@ -437,6 +494,25 @@ async fn get_saved_selection(
 }
 
 #[tauri::command]
+async fn get_all_torrent_selections(
+    tracking: State<'_, TrackingManager>,
+    #[allow(non_snake_case)] showId: u32,
+) -> Result<Option<tracking::ShowHistory>, String> {
+    Ok(tracking.get_all_selections(showId).await)
+}
+
+#[tauri::command]
+async fn remove_saved_selection(
+    tracking: State<'_, TrackingManager>,
+    show_id: u32,
+    season: u32,
+    episode: u32,
+) -> Result<(), String> {
+    tracking.remove_selection(show_id, season, episode).await;
+    Ok(())
+}
+
+#[tauri::command]
 async fn save_subtitle_cache(
     cache: State<'_, MediaCache>,
     cache_id: String,
@@ -583,8 +659,9 @@ async fn save_track_preference(
     audio_track_index: Option<usize>,
     subtitle_track_index: Option<i32>,
     subtitle_language: Option<String>,
+    subtitle_offset: Option<f64>,
 ) -> Result<(), String> {
-    track_prefs.save_preference(magnet_link, audio_track_index, subtitle_track_index, subtitle_language).await;
+    track_prefs.save_preference(magnet_link, audio_track_index, subtitle_track_index, subtitle_language, subtitle_offset).await;
     Ok(())
 }
 
@@ -809,6 +886,8 @@ fn main() {
             search_eztv_by_imdb,
             save_torrent_selection,
             get_saved_selection,
+            get_all_torrent_selections,
+            remove_saved_selection,
             save_subtitle_cache,
             load_subtitle_cache,
             clear_subtitle_cache,
@@ -830,7 +909,9 @@ fn main() {
             save_settings,
             get_settings,
             check_external_player,
-            open_in_external_player
+            open_in_external_player,
+            check_ffmpeg,
+            install_ffmpeg
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

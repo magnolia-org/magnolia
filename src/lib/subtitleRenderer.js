@@ -5,11 +5,23 @@ export class SubtitleRenderer {
     this.videoElement = videoElement;
     this.octopus = null;
     this.customFonts = [];
+    this.offset = 0;
+    this.lastSubtitleData = null;
+    this.lastCodec = null;
   }
 
   setFonts(fontPaths) {
     this.customFonts = fontPaths || [];
     console.log('[SubtitleRenderer] Set custom fonts:', this.customFonts);
+  }
+
+  setOffset(offset) {
+    if (this.offset === offset) return;
+    this.offset = offset;
+    console.log('[SubtitleRenderer] Setting offset:', offset);
+    if (this.lastSubtitleData) {
+      this.loadSubtitleTrack(this.lastSubtitleData, this.lastCodec);
+    }
   }
 
   async initialize() {
@@ -43,9 +55,13 @@ export class SubtitleRenderer {
   }
 
   async loadSubtitleTrack(subtitleData, codec = 'ass') {
+    // Store for re-initialization on offset change
+    this.lastSubtitleData = subtitleData;
+    this.lastCodec = codec;
+
     // Reinitialize SubtitlesOctopus for each new track to avoid corruption
     // This is needed because setTrack() doesn't properly reset internal state
-    console.log(`Loading ${codec} subtitles (${subtitleData.length} bytes) - reinitializing renderer`);
+    console.log(`Loading ${codec} subtitles (${subtitleData.length} bytes) - reinitializing renderer with offset ${this.offset}`);
     
     // Store video element reference before dispose
     const videoEl = this.videoElement;
@@ -77,6 +93,7 @@ export class SubtitleRenderer {
       fonts: fontList,
       workerUrl: '/subtitles-octopus-worker.js',
       legacyWorkerUrl: '/subtitles-octopus-worker-legacy.js',
+      timeOffset: this.offset,
     });
 
     console.log('SubtitleRenderer reinitialized with new track');

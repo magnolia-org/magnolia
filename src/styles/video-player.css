@@ -144,6 +144,17 @@
 }
 
 /* Buffered Progress */
+.progress-torrent {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 3px;
+    pointer-events: none;
+    z-index: 0;
+}
+
 .progress-buffered {
     position: absolute;
     top: 0;
@@ -152,6 +163,7 @@
     background: rgba(255, 255, 255, 0.35);
     border-radius: 3px;
     pointer-events: none;
+    z-index: 1;
 }
 
 /* Filled Progress */
@@ -167,6 +179,7 @@
     align-items: center;
     justify-content: flex-end;
     box-shadow: 0 0 12px color-mix(in srgb, var(--accent-color) 40%, transparent);
+    z-index: 2;
 }
 
 /* Progress Handle */
@@ -486,9 +499,18 @@
 .player-track-info {
     display: flex;
     align-items: center;
-    gap: var(--spacing-sm);
+    gap: 6px;
     flex: 1;
     min-width: 0;
+}
+
+.track-flag {
+    width: 24px;
+    height: 18px;
+    border-radius: 3px;
+    object-fit: cover;
+    flex-shrink: 0;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 .player-track-lang {
@@ -521,6 +543,12 @@
     border-radius: var(--border-radius-sm);
     white-space: nowrap;
     flex-shrink: 0;
+}
+
+.player-track-badge.wyzie-badge {
+    background: rgba(59, 130, 246, 0.15);
+    color: #60a5fa;
+    border: 1px solid rgba(59, 130, 246, 0.2);
 }
 
 .chapter-time {
@@ -1357,3 +1385,175 @@
 .external-actions .btn-standard i {
     margin-right: 8px;
 }
+/* Subtitle Settings */
+.settings-submenu {
+    width: 420px;
+    padding: 20px;
+    background: var(--bg-primary);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    box-shadow: var(--shadow-highlight), var(--shadow-depth);
+    border-radius: var(--border-radius-md);
+    z-index: 100;
+}
+
+.settings-header {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    margin-bottom: 20px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding-bottom: var(--spacing-sm);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.settings-preview-container {
+    width: 100%;
+    height: 80px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: var(--border-radius-sm);
+    margin-bottom: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.settings-preview-text {
+    padding: 4px 8px;
+    border-radius: 4px;
+    white-space: nowrap;
+    line-height: 1.4;
+}
+
+.settings-group {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+}
+
+.settings-group:last-child {
+    margin-bottom: 0;
+}
+
+.settings-group label {
+    font-size: 14px;
+    color: var(--text-primary);
+    font-weight: 500;
+    flex-shrink: 0;
+    margin-right: 16px;
+}
+
+.settings-controls-wrapper {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+}
+
+.settings-controls {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+    padding: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.settings-btn {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: 16px;
+    line-height: 1;
+    transition: all 0.2s ease;
+}
+
+.settings-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.settings-btn:active {
+    transform: scale(0.95);
+}
+
+.settings-btn.wide-btn {
+    width: auto;
+    padding: 0 8px;
+    font-size: 11px;
+    font-weight: 600;
+    gap: 4px;
+    text-transform: uppercase;
+}
+
+.settings-btn.toggle-btn {
+    color: var(--text-secondary);
+}
+
+.settings-btn.toggle-btn.active {
+    color: var(--accent-color);
+}
+
+.settings-color-input {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    cursor: pointer;
+}
+
+.settings-color-input::-webkit-color-swatch-wrapper {
+    padding: 0;
+}
+
+.settings-color-input::-webkit-color-swatch {
+    border: none;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.settings-value {
+    font-size: 13px;
+    color: var(--text-primary);
+    min-width: 44px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+}
+
+.settings-reset-btn {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.2s ease;
+}
+
+.settings-reset-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-primary);
+}
+
+.settings-reset-btn i {
+    font-size: 16px;
+}
+

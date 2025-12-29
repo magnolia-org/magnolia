@@ -19,6 +19,15 @@ export class SRTSubtitleRenderer {
     this.seekListener = null;
     this.lastFetchTime = 0;
     this.lastPlayheadTime = 0;
+    this.offset = 0;
+    this.styles = {
+      fontSize: 24,
+      backgroundOpacity: 0.5,
+      color: '#ffffff',
+      textShadow: true,
+      textShadowColor: '#000000',
+      windowMargin: 60
+    };
   }
 
   initialize() {
@@ -27,13 +36,14 @@ export class SRTSubtitleRenderer {
     this.container.className = 'srt-subtitle-overlay';
     this.container.style.cssText = `
       position: absolute;
-      bottom: 60px;
+      bottom: ${this.styles.windowMargin}px;
       left: 0;
       right: 0;
       text-align: center;
       pointer-events: none;
       z-index: 10;
       padding: 0 20px;
+      transition: bottom 0.3s ease;
     `;
     
     const playerContainer = this.videoElement.closest('.video-player');
@@ -43,6 +53,22 @@ export class SRTSubtitleRenderer {
 
     // Update subtitles on timeupdate
     this.videoElement.addEventListener('timeupdate', () => this.updateSubtitles());
+  }
+
+  setStyles(styles) {
+    this.styles = { ...this.styles, ...styles };
+    if (this.container) {
+      this.container.style.bottom = `${this.styles.windowMargin}px`;
+      // Re-render current subtitle if visible
+      if (this.currentCue) {
+        this.displaySubtitle(this.currentCue.text);
+      }
+    }
+  }
+
+  setOffset(offset) {
+    this.offset = offset;
+    this.updateSubtitles();
   }
 
   /**
@@ -265,10 +291,11 @@ export class SRTSubtitleRenderer {
     }
     
     const currentTime = this.videoElement.currentTime;
+    const adjustedTime = currentTime - this.offset;
     
     // Use HTTP streaming if available
     if (this.httpPort && this.sessionId !== null && this.fileId !== null && this.trackIndex !== null) {
-      await this.updateFromHttpStream(currentTime);
+      await this.updateFromHttpStream(adjustedTime);
       return;
     }
     
@@ -283,15 +310,15 @@ export class SRTSubtitleRenderer {
     }
     
     const activeSub = subtitles.find(
-      sub => currentTime >= sub.start && currentTime <= sub.end
+      sub => adjustedTime >= sub.start && adjustedTime <= sub.end
     );
     
     if (activeSub && activeSub !== this.currentCue) {
-      console.log('[SRTRenderer] Showing subtitle at', currentTime.toFixed(2), ':', activeSub.text);
+      console.log('[SRTRenderer] Showing subtitle at', adjustedTime.toFixed(2), ':', activeSub.text);
       this.currentCue = activeSub;
       this.displaySubtitle(activeSub.text);
     } else if (!activeSub && this.currentCue) {
-      console.log('[SRTRenderer] Hiding subtitle at', currentTime.toFixed(2));
+      console.log('[SRTRenderer] Hiding subtitle at', adjustedTime.toFixed(2));
       this.currentCue = null;
       this.hideSubtitle();
     }
@@ -470,13 +497,13 @@ export class SRTSubtitleRenderer {
     this.container.innerHTML = `
       <div style="
         display: inline-block;
-        background: rgba(0, 0, 0, 0.8);
+        background: rgba(0, 0, 0, ${this.styles.backgroundOpacity});
         padding: 8px 16px;
         border-radius: 4px;
-        font-size: 18px;
+        font-size: ${this.styles.fontSize}px;
         font-weight: 500;
-        color: white;
-        text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.9);
+        color: ${this.styles.color};
+        text-shadow: ${this.styles.textShadow ? `2px 2px 2px ${this.styles.textShadowColor}` : 'none'};
         line-height: 1.4;
         max-width: 80%;
         ${positionStyle}
@@ -500,13 +527,14 @@ export class SRTSubtitleRenderer {
     text = text.replace(/\{b\}/g, '<b>').replace(/\{\/b\}/g, '</b>');
     text = text.replace(/\{u\}/g, '<u>').replace(/\{\/u\}/g, '</u>');
     
-    // Support <font color=#xxxxxx> tags
-    text = text.replace(/<font color="?(#[0-9a-fA-F]{6})"?>/gi, (match, color) => {
+    // Support <font color="..."> tags
+    // Handles: color="#hex", color="name", color=#hex, color=name
+    text = text.replace(/<font\s+color=["']?((?:#[0-9a-fA-F]{3,6})|[a-zA-Z]+)["']?>/gi, (match, color) => {
       return `<span style="color: ${color}">`;
     });
     text = text.replace(/<\/font>/gi, '</span>');
     
-    // Ensure standard tags are preserved: <i>, <b>, <u>
+    // Ensure standard tags are preserved: <i>, <b>, <u>, <span>
     // These are already HTML tags, so they'll work as-is
     
     // Escape other potentially dangerous characters while preserving our formatting tags

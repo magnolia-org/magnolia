@@ -26,6 +26,15 @@ function createWatchProgressStore() {
           ...data,
           updatedAt: Date.now()
         };
+
+        // Also store episode-specific progress if available
+        if (data.currentSeason && data.currentEpisode) {
+          const episodeKey = `${mediaId}-${mediaType}-S${data.currentSeason}-E${data.currentEpisode}`;
+          progress[episodeKey] = {
+            ...data,
+            updatedAt: Date.now()
+          };
+        }
         
         if (typeof window !== 'undefined') {
           localStorage.setItem('watchProgress', JSON.stringify(progress));
@@ -34,6 +43,12 @@ function createWatchProgressStore() {
         console.log('📊 Updated watch progress:', key, data);
         return progress;
       });
+    },
+
+    getEpisodeProgress: (mediaId, mediaType, season, episode) => {
+      const progress = loadFromLocalStorage();
+      const key = `${mediaId}-${mediaType}-S${season}-E${episode}`;
+      return progress[key] || null;
     },
 
     getProgress: (mediaId, mediaType) => {

@@ -73,13 +73,10 @@ body {
 /* macOS specific styles */
 @supports (-webkit-backdrop-filter: blur(10px)) {
   :global(html) {
-    /* Enable rounded corners on macOS */
-    border-radius: 12px;
     overflow: hidden;
   }
   
   :global(body) {
-    border-radius: 12px;
     overflow: hidden;
   }
 }
@@ -90,8 +87,6 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  /* Rounded corners for the app container on macOS */
-  border-radius: 12px;
 }
 
 main {
@@ -307,7 +302,6 @@ pre {
   position: sticky;
   top: 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--border-radius-sm) var(--border-radius-sm) 0 0;
   padding: 0 0 0 var(--spacing-md);
   gap: var(--spacing-md);
   box-shadow: var(--shadow-inset-highlight), var(--shadow-inset-depth);
@@ -700,26 +694,30 @@ pre {
 }
 
 .settings-button {
-  width: 38px;
-  height: 38px;
+  width: 34px;
+  height: 34px;
   border: none;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 50%;
+  border-radius: var(--border-radius-md);
   color: var(--text-secondary);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.15s ease;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   font-size: 18px;
   margin-right: 8px;
+  box-shadow: var(--shadow-highlight), var(--shadow-depth);
+  backdrop-filter: blur(10px);
 }
 
 .settings-button:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.2);
   color: var(--text-primary);
+  transform: scale(1.05);
+  box-shadow: var(--shadow-highlight), 0 8px 20px rgba(0, 0, 0, 0.4);
 }
 
 .settings-panel {

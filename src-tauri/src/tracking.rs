@@ -78,4 +78,24 @@ impl TrackingManager {
             .and_then(|season_data| season_data.episodes.get(&episode))
             .cloned()
     }
+
+    pub async fn get_all_selections(&self, show_id: u32) -> Option<ShowHistory> {
+        let data = self.data.read().await;
+        data.shows.get(&show_id).cloned()
+    }
+
+    pub async fn remove_selection(&self, show_id: u32, season: u32, episode: u32) {
+        let mut data = self.data.write().await;
+        
+        if let Some(show) = data.shows.get_mut(&show_id) {
+            if let Some(season_data) = show.seasons.get_mut(&season) {
+                season_data.episodes.remove(&episode);
+            }
+        }
+
+        // Persist to disk
+        if let Ok(content) = serde_json::to_string_pretty(&*data) {
+            let _ = fs::write(&self.file_path, content);
+        }
+    }
 }

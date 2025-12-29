@@ -164,6 +164,44 @@
     cursor: pointer;
     transition: background 0.1s ease;
     border: 1px solid transparent;
+    position: relative;
+    overflow: hidden;
+}
+
+.file-selector-modal .file-row::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-image: var(--episode-bg);
+    background-size: cover;
+    background-position: center;
+    opacity: 0.15;
+    z-index: 0;
+    transition: opacity 0.2s ease;
+}
+
+.file-selector-modal .file-row:hover::before {
+    opacity: 0.25;
+}
+
+.file-selector-modal .file-row.assigned::after,
+.file-selector-modal .file-row.has-preview::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(90deg, rgba(0, 0, 0, 0.7) 0%, rgba(0, 0, 0, 0.4) 60%, transparent 100%);
+    z-index: 1;
+}
+
+.file-selector-modal .file-row > * {
+    position: relative;
+    z-index: 2;
 }
 
 .file-selector-modal .file-row:hover {
@@ -223,8 +261,29 @@
 .file-selector-modal .assignment-group {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 8px;
     flex-shrink: 0;
+}
+
+.file-selector-modal .episode-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    align-items: flex-end;
+}
+
+.file-selector-modal .episode-name {
+    font-size: 10px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    max-width: 200px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.file-selector-modal .episode-name.preview {
+    color: var(--text-tertiary);
 }
 
 .file-selector-modal .episode-tag {
@@ -338,6 +397,8 @@
     transition: all 0.15s ease;
     font-family: inherit;
     padding: 4px;
+    position: relative;
+    overflow: visible;
 }
 
 .file-selector-modal .episode-cell:hover:not(:disabled) {
@@ -388,6 +449,35 @@
 .file-selector-modal .ep-file.preview {
     color: var(--accent-color);
     opacity: 0.7;
+}
+
+.file-selector-modal .ep-torrent-name {
+    display: none;
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-bottom: 8px;
+    padding: 6px 10px;
+    background: rgba(0, 0, 0, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: var(--border-radius-sm);
+    font-size: 11px;
+    color: var(--text-primary);
+    white-space: nowrap;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    z-index: 1000;
+    pointer-events: none;
+}
+
+.file-selector-modal .episode-cell:hover .ep-torrent-name {
+    display: block;
+}
+
+.file-selector-modal .ep-torrent-name.preview {
+    color: var(--accent-color);
 }
 
 .file-selector-modal .picker-hint {

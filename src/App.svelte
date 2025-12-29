@@ -7,6 +7,7 @@
   import RecommendationsCarousel from "./lib/RecommendationsCarousel.svelte";
   import TorrentDebug from "./lib/TorrentDebug.svelte";
   import VideoPlayer from "./lib/VideoPlayer.svelte";
+  import Onboarding from "./lib/Onboarding.svelte";
   import { myListStore } from "./lib/stores/listStore.js";
   import { watchHistoryStore } from "./lib/stores/watchHistoryStore.js";
   import { watchProgressStore } from "./lib/stores/watchProgressStore.js";
@@ -224,6 +225,7 @@
 </script>
 
 <main>
+  <Onboarding />
   <div class="titlebar-wrapper" class:hidden={showVideoPlayer && !videoControlsVisible}>
     <TitleBar 
       bind:searchActive 

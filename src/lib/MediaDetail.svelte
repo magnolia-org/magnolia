@@ -19,6 +19,7 @@
   import TorrentSelector from "./TorrentSelector.svelte";
   import FileSelector from "./FileSelector.svelte";
   import ErrorModal from "./ErrorModal.svelte";
+  import TorrentManager from "./TorrentManager.svelte";
 
   import { createEventDispatcher } from "svelte";
 
@@ -40,6 +41,7 @@
   let activeTab = "";
   let availableTabs = [];
   let viewMode = "list"; // 'list' or 'grid'
+  let episodeSearchQuery = "";
 
   // Torrent Search State
   let showTorrentSelector = false;
@@ -62,6 +64,11 @@
   let showErrorModal = false;
   let errorMessage = "";
   let errorTitle = "Error";
+
+  // Torrent manager state
+  let showTorrentManager = false;
+  let showMoreMenu = false;
+  let torrentManagerRefresh = 0;
 
   $: {
     if (media) {
@@ -93,6 +100,16 @@
       return decodeURIComponent(dnMatch[1].replace(/\+/g, ' '));
     }
     return "";
+  }
+
+  function hasMatchingEpisodes(seasonNumber, query) {
+    if (!query) return true;
+    const seasonData = allSeasonsData[seasonNumber];
+    if (!seasonData || !seasonData.episodes) return false;
+    return seasonData.episodes.some(e => 
+      e.name.toLowerCase().includes(query.toLowerCase()) || 
+      e.episode_number.toString().includes(query)
+    );
   }
 
   $: {
@@ -145,7 +162,6 @@
   }
 
   onMount(() => {
-    // Check for autoplay after details load
     if (media && media.autoPlay && !autoPlayTriggered) {
       autoPlayTriggered = true;
       setTimeout(() => {
@@ -158,25 +174,6 @@
     const handleKeyDown = (e) => {
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")
         return;
-      if (e.key === "Tab" && availableTabs.length > 0) {
-        e.preventDefault();
-        const currentIndex = availableTabs.indexOf(activeTab);
-        if (e.shiftKey) {
-          activeTab =
-            availableTabs[
-              (currentIndex - 1 + availableTabs.length) % availableTabs.length
-            ];
-        } else {
-          activeTab = availableTabs[(currentIndex + 1) % availableTabs.length];
-        }
-      }
-      if (e.key >= "1" && e.key <= "9") {
-        const index = parseInt(e.key) - 1;
-        if (index < availableTabs.length) {
-          e.preventDefault();
-          activeTab = availableTabs[index];
-        }
-      }
 
       if (e.key === "Escape" && selectedEpisode) {
         e.preventDefault();
@@ -185,10 +182,18 @@
       }
     };
 
+    const handleClickOutside = (e) => {
+      if (showMoreMenu && !e.target.closest('.more-menu-container')) {
+        showMoreMenu = false;
+      }
+    };
+
     window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("click", handleClickOutside);
 
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("click", handleClickOutside);
     };
   });
 
@@ -420,6 +425,10 @@
     if (isMovie) {
       // For movies, show timestamp if we have progress
       if (progress.currentTimestamp && progress.currentTimestamp > 60) {
+        // Check if finished (>95%)
+        const isFinished = progress.duration && (progress.currentTimestamp / progress.duration > 0.95);
+        if (isFinished) return null; // Don't show resume if finished
+
         return {
           label: `Resume from ${formatTime(progress.currentTimestamp)}`,
           season: null,
@@ -428,14 +437,44 @@
         };
       }
     } else {
-      // For TV shows, show last episode watched
+      // For TV shows, show last episode watched OR next episode if finished
       if (progress.currentSeason && progress.currentEpisode) {
-        const hasTimestamp = progress.currentTimestamp && progress.currentTimestamp > 60;
+        let season = progress.currentSeason;
+        let episode = progress.currentEpisode;
+        let timestamp = progress.currentTimestamp || 0;
+        let label = `S${season}E${episode}`;
+        
+        // Check if finished (>90%)
+        const isFinished = progress.duration && (progress.currentTimestamp / progress.duration > 0.9);
+        
+        if (isFinished && details.seasons) {
+            // Find next episode
+            const currentSeasonInfo = details.seasons.find(s => s.season_number === season);
+            
+            if (currentSeasonInfo) {
+                if (episode < currentSeasonInfo.episode_count) {
+                    episode++;
+                    timestamp = 0;
+                    label = `S${season}E${episode}`;
+                } else {
+                    // Next season?
+                    const nextSeason = details.seasons.find(s => s.season_number === season + 1);
+                    if (nextSeason) {
+                        season++;
+                        episode = 1;
+                        timestamp = 0;
+                        label = `S${season}E${episode}`;
+                    }
+                }
+            }
+        }
+        
+        const hasTimestamp = timestamp > 60;
         return {
-          label: `S${progress.currentSeason}E${progress.currentEpisode}${hasTimestamp ? ` • ${formatTime(progress.currentTimestamp)}` : ''}`,
-          season: progress.currentSeason,
-          episode: progress.currentEpisode,
-          timestamp: progress.currentTimestamp || 0
+          label: `${label}${hasTimestamp ? ` • ${formatTime(timestamp)}` : ''}`,
+          season: season,
+          episode: episode,
+          timestamp: timestamp
         };
       }
     }
@@ -498,7 +537,13 @@
 
         if (saved) {
           console.log("Found saved torrent:", saved);
-          startStream(saved.magnet_link, saved.file_index);
+          const success = await startStream(saved.magnet_link, saved.file_index);
+          if (!success) {
+             // If startStream failed (and cleared selection), we should probably stop here
+             // The user saw an error modal.
+             // If they click Play again, it will fall through to selector.
+             return;
+          }
           return;
         }
       } catch (err) {
@@ -607,17 +652,24 @@
 
   function reselectTorrent() {
     if (details.seasons && details.seasons.length > 0) {
-      // For TV shows, we need to know which episode.
-      // If we have a selected episode, use that. Otherwise default to S1E1.
       if (selectedEpisode) {
         handlePlay(selectedSeason, selectedEpisode.episode_number, true);
       } else {
         handlePlay(1, 1, true);
       }
     } else {
-      // Movie
       handlePlay(0, 0, true);
     }
+  }
+
+  function handleTorrentManagerSelect(event) {
+    const { season, episode } = event.detail;
+    showTorrentManager = false;
+    handlePlay(season, episode, true);
+  }
+
+  function handleTorrentManagerClose() {
+    showTorrentManager = false;
   }
 
   async function onTorrentSelect(event) {
@@ -694,6 +746,8 @@
           fileIndex: matchedFile.index,
         });
 
+        torrentManagerRefresh++;
+
         // 4. Auto-assign ALL other video files that have episode numbers
         if (videoFiles.length > 1 && !isMovie) {
           console.log("Multi-episode torrent detected, auto-assigning all episodes");
@@ -767,6 +821,8 @@
             fileIndex: singleFile.index,
           });
           
+          torrentManagerRefresh++;
+          
           startStream(torrent.magnet_link, singleFile.index, handleId);
           showTorrentSelector = false;
         } else {
@@ -831,9 +887,28 @@
           },
         }),
       );
+      return true;
     } catch (err) {
       console.error("Error preparing stream:", err);
-      showError("Failed to prepare stream. Please try again.");
+      
+      // If we failed to add the torrent (e.g. metadata fetch failed), clear the saved selection
+      // This allows the user to pick a new torrent next time instead of getting stuck
+      if (pendingPlayRequest && pendingPlayRequest.season && pendingPlayRequest.episode) {
+        try {
+          console.log("Clearing saved selection due to error");
+          await invoke("remove_saved_selection", {
+            show_id: details.id,
+            season: pendingPlayRequest.season,
+            episode: pendingPlayRequest.episode
+          });
+          torrentManagerRefresh++;
+        } catch (removeErr) {
+          console.warn("Failed to remove saved selection:", removeErr);
+        }
+      }
+      
+      showError("Failed to prepare stream. The saved torrent might be unavailable. Please try again to select a new source.");
+      return false;
     }
   }
 
@@ -968,9 +1043,8 @@
     }
 
     try {
-      // Save all assignments
       for (const { file, season, episode } of assignments) {
-        console.log(`Saving S${season}E${episode} for file: ${file.name}`);
+        console.log(`saving S${season}E${episode} for file: ${file.name}`);
         await invoke("save_torrent_selection", {
           showId: details.id,
           season: season,
@@ -980,22 +1054,21 @@
         });
       }
 
-      // Find the assignment that matches the pending play request, or use first one
+      torrentManagerRefresh++;
+
       let playAssignment = assignments.find(
         a => a.season === pendingPlayRequest.season && a.episode === pendingPlayRequest.episode
       );
       
       if (!playAssignment) {
         playAssignment = assignments[0];
-        // Update pending request to match what we're actually playing
         pendingPlayRequest = { season: playAssignment.season, episode: playAssignment.episode };
       }
 
-      // Start stream with the selected file
       startStream(selectedTorrentForManual.magnet_link, playAssignment.file.index, manualHandleId);
       closeFileSelector();
     } catch (err) {
-      console.error("Error saving file selections:", err);
+      console.error("error saving file selections:", err);
       showError("Failed to save selections.");
     }
   }
@@ -1137,13 +1210,27 @@
                   <i class={isInMyList ? "ri-check-line" : "ri-add-line"}></i>
                   {isInMyList ? "In My List" : "My List"}
                 </button>
-                <button
-                  class="btn-standard btn-icon-only"
-                  on:click={reselectTorrent}
-                  title="Reselect Torrent"
-                >
-                  <i class="ri-more-fill"></i>
-                </button>
+                <div class="more-menu-container">
+                  <button
+                    class="btn-standard btn-icon-only"
+                    on:click={() => showMoreMenu = !showMoreMenu}
+                    title="More Options"
+                  >
+                    <i class="ri-more-fill"></i>
+                  </button>
+                  {#if showMoreMenu}
+                    <div class="more-menu">
+                      <button class="menu-item" on:click={() => { showTorrentManager = true; showMoreMenu = false; }}>
+                        <i class="ri-folder-download-line"></i>
+                        <span>Manage Torrents</span>
+                      </button>
+                      <button class="menu-item" on:click={() => { reselectTorrent(); showMoreMenu = false; }}>
+                        <i class="ri-refresh-line"></i>
+                        <span>Reselect Torrent</span>
+                      </button>
+                    </div>
+                  {/if}
+                </div>
               </div>
             </div>
           </div>
@@ -1178,6 +1265,19 @@
         <div class="tab-content">
           {#if activeTab === "seasons" && details.seasons && details.seasons.length > 0}
             <div class="seasons-header">
+              <div class="episode-search">
+                <i class="ri-search-line"></i>
+                <input 
+                  type="text" 
+                  placeholder="Search episodes..." 
+                  bind:value={episodeSearchQuery}
+                />
+                {#if episodeSearchQuery}
+                  <button class="clear-search" on:click={() => episodeSearchQuery = ""}>
+                    <i class="ri-close-line"></i>
+                  </button>
+                {/if}
+              </div>
               <div class="view-toggle">
                 <button
                   class="toggle-btn"
@@ -1200,10 +1300,10 @@
 
             {#if viewMode === "list"}
               <div class="seasons-accordion">
-                {#each details.seasons.filter((s) => s.season_number > 0) as season}
+                {#each details.seasons.filter((s) => s.season_number > 0 && hasMatchingEpisodes(s.season_number, episodeSearchQuery)) as season}
                   <div
                     class="accordion-item"
-                    class:expanded={selectedSeason === season.season_number}
+                    class:expanded={selectedSeason === season.season_number || !!episodeSearchQuery}
                   >
                     <button
                       class="accordion-header"
@@ -1220,37 +1320,28 @@
                       <i class="ri-arrow-down-s-line accordion-icon"></i>
                     </button>
 
-                    {#if selectedSeason === season.season_number}
+                    {#if selectedSeason === season.season_number || !!episodeSearchQuery}
                       <div class="accordion-content">
                         {#if allSeasonsData[season.season_number]}
                           <div class="episodes-list">
-                            {#each allSeasonsData[season.season_number].episodes as episode}
-                              {@const progressKey = `${details.id}-${media.media_type}`}
-                              {@const progress = $watchProgressStore[progressKey]}
-                              {@const hasProgress = progress && progress.currentSeason === season.season_number && progress.currentEpisode === episode.episode_number}
-                              {@const progressText = hasProgress ? (() => {
-                                const timestamp = progress.currentTimestamp || 0;
-                                const hours = Math.floor(timestamp / 3600);
-                                const minutes = Math.floor((timestamp % 3600) / 60);
-                                const seconds = Math.floor(timestamp % 60);
-                                if (hours > 0) return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-                                return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-                              })() : ''}
+                            {#each allSeasonsData[season.season_number].episodes.filter(e => !episodeSearchQuery || e.name.toLowerCase().includes(episodeSearchQuery.toLowerCase()) || e.episode_number.toString().includes(episodeSearchQuery)) as episode}
+                              {@const episodeKey = `${details.id}-${media.media_type}-S${season.season_number}-E${episode.episode_number}`}
+                              {@const episodeProgress = $watchProgressStore[episodeKey]}
+                              {@const percentage = episodeProgress && episodeProgress.duration ? (episodeProgress.currentTimestamp / episodeProgress.duration) * 100 : 0}
+                              {@const isWatched = percentage > 85}
+                              
                               <!-- svelte-ignore a11y-click-events-have-key-events -->
                               <!-- svelte-ignore a11y-no-static-element-interactions -->
                               <div
                                 class="episode-list-item"
-                                class:selected={selectedEpisode?.episode_number ===
-                                  episode.episode_number}
+                                class:selected={selectedEpisode?.episode_number === episode.episode_number}
+                                class:watched={isWatched}
                                 on:click={() => (selectedEpisode = episode)}
                               >
                                 <div class="episode-still">
                                   {#if episode.still_path}
                                     <img
-                                      src={getImageUrl(
-                                        episode.still_path,
-                                        "w300",
-                                      )}
+                                      src={getImageUrl(episode.still_path, "w300")}
                                       alt={episode.name}
                                     />
                                   {:else}
@@ -1258,39 +1349,34 @@
                                       <i class="ri-film-line"></i>
                                     </div>
                                   {/if}
-                                  {#if hasProgress}
-                                    <span class="progress-badge">{progressText}</span>
+                                  
+                                  {#if isWatched}
+                                    <div class="watched-overlay">
+                                      <i class="ri-check-line"></i>
+                                    </div>
+                                  {:else if percentage > 0}
+                                    <div class="progress-bar-container">
+                                      <div class="progress-bar" style="width: {percentage}%"></div>
+                                    </div>
                                   {/if}
                                 </div>
                                 <div class="episode-details">
                                   <div class="episode-top">
-                                    <span class="episode-num"
-                                      >E{episode.episode_number}</span
-                                    >
-                                    <span class="episode-name"
-                                      >{episode.name}</span
-                                    >
+                                    <span class="episode-num">E{episode.episode_number}</span>
+                                    <span class="episode-name">{episode.name}</span>
                                   </div>
                                   <div class="episode-meta">
                                     {#if episode.vote_average}
-                                      <span
-                                        class="episode-rating {getRatingClass(
-                                          episode.vote_average,
-                                        )}"
-                                      >
+                                      <span class="episode-rating {getRatingClass(episode.vote_average)}">
                                         {episode.vote_average.toFixed(1)}
                                       </span>
                                     {/if}
-                                    <span class="episode-date"
-                                      >{formatDate(episode.air_date)}</span
-                                    >
+                                    <span class="episode-date">{formatDate(episode.air_date)}</span>
                                     {#if episode.runtime}
                                       <span>{episode.runtime}m</span>
                                     {/if}
                                   </div>
-                                  <p class="episode-overview">
-                                    {episode.overview}
-                                  </p>
+                                  <p class="episode-overview">{episode.overview}</p>
                                 </div>
                               </div>
                             {/each}
@@ -1347,25 +1433,62 @@
           {/if}
 
           {#if activeTab === "cast" && credits}
-            <div class="cast-grid">
-              {#each credits.cast.slice(0, 20) as person}
-                <div class="cast-card">
-                  {#if person.profile_path}
-                    <img
-                      src={getImageUrl(person.profile_path, "w185")}
-                      alt={person.name}
-                    />
-                  {:else}
-                    <div class="cast-placeholder">
-                      <i class="ri-user-line"></i>
+            <div class="cast-crew-container">
+              <div class="cast-section">
+                <h3 class="section-subtitle">Cast</h3>
+                <div class="cast-grid">
+                  {#each credits.cast.slice(0, 20) as person}
+                    <div class="cast-card">
+                      {#if person.profile_path}
+                        <img
+                          src={getImageUrl(person.profile_path, "w185")}
+                          alt={person.name}
+                        />
+                      {:else}
+                        <div class="cast-placeholder">
+                          <i class="ri-user-line"></i>
+                        </div>
+                      {/if}
+                      <div class="cast-info">
+                        <h4>{person.name}</h4>
+                        <p>{person.character}</p>
+                        {#if person.episode_count}
+                          <span class="episode-count">{person.episode_count} episodes</span>
+                        {/if}
+                      </div>
                     </div>
-                  {/if}
-                  <div class="cast-info">
-                    <h4>{person.name}</h4>
-                    <p>{person.character}</p>
+                  {/each}
+                </div>
+              </div>
+
+              {#if credits.crew && credits.crew.length > 0}
+                <div class="crew-section">
+                  <h3 class="section-subtitle">Crew</h3>
+                  <div class="crew-grid">
+                    {#each credits.crew.slice(0, 20) as person}
+                      <div class="crew-card">
+                        {#if person.profile_path}
+                          <img
+                            src={getImageUrl(person.profile_path, "w185")}
+                            alt={person.name}
+                          />
+                        {:else}
+                          <div class="crew-placeholder">
+                            <i class="ri-user-line"></i>
+                          </div>
+                        {/if}
+                        <div class="crew-info">
+                          <h4>{person.name}</h4>
+                          <p class="crew-job">{person.job}</p>
+                          {#if person.episode_count}
+                            <span class="episode-count">{person.episode_count} episodes</span>
+                          {/if}
+                        </div>
+                      </div>
+                    {/each}
                   </div>
                 </div>
-              {/each}
+              {/if}
             </div>
           {/if}
 
@@ -1449,23 +1572,28 @@
                       new CustomEvent("openMediaDetail", { detail: rec }),
                     )}
                 >
-                  {#if rec.poster_path}
-                    <img
-                      src={getImageUrl(rec.poster_path, "w342")}
-                      alt={rec.title || rec.name}
-                    />
-                  {:else}
-                    <div class="poster-placeholder">
-                      <i class="ri-film-line"></i>
-                    </div>
-                  {/if}
-                  <div class="recommendation-info">
-                    <h4>{rec.title || rec.name}</h4>
+                  <div class="rec-poster">
+                    {#if rec.poster_path}
+                      <img
+                        src={getImageUrl(rec.poster_path, "w342")}
+                        alt={rec.title || rec.name}
+                      />
+                    {:else}
+                      <div class="poster-placeholder">
+                        <i class="ri-film-line"></i>
+                      </div>
+                    {/if}
                     {#if rec.vote_average}
-                      <span
-                        class="rec-rating {getRatingClass(rec.vote_average)}"
-                      >
+                      <div class="rec-rating-badge {getRatingClass(rec.vote_average)}">
                         {rec.vote_average.toFixed(1)}
+                      </div>
+                    {/if}
+                  </div>
+                  <div class="recommendation-info">
+                    <h4 class="rec-title">{rec.title || rec.name}</h4>
+                    {#if rec.release_date || rec.first_air_date}
+                      <span class="rec-year">
+                        {(rec.release_date || rec.first_air_date).split('-')[0]}
                       </span>
                     {/if}
                   </div>
@@ -1482,14 +1610,6 @@
     <div class="shortcut-item">
       <kbd>ESC</kbd>
       <span>Close</span>
-    </div>
-    <div class="shortcut-item">
-      <kbd>Tab</kbd>
-      <span>Switch Tab</span>
-    </div>
-    <div class="shortcut-item">
-      <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd>
-      <span>Go to Tab</span>
     </div>
   </div>
 </div>
@@ -1601,6 +1721,7 @@
     selectedTorrentName={selectedTorrentName}
     isAnime={isAnime()}
     hasImdbId={!!currentImdbId}
+    isTVShow={media.media_type === 'tv'}
     on:select={onTorrentSelect}
     on:close={closeTorrentSelector}
     on:research={handleResearch}
@@ -1611,8 +1732,19 @@
   <FileSelector
     files={availableFiles}
     showName={details.title || details.name}
-    seasons={details.seasons?.filter(s => s.season_number > 0) || []}
+    seasons={Object.keys(allSeasonsData).length > 0 ? Object.values(allSeasonsData) : (details.seasons || [])}
     on:confirm={handleFileSelectorConfirm}
     on:close={closeFileSelector}
+  />
+{/if}
+
+{#if showTorrentManager}
+  <TorrentManager
+    {media}
+    {details}
+    {allSeasonsData}
+    refreshTrigger={torrentManagerRefresh}
+    on:selectTorrent={handleTorrentManagerSelect}
+    on:close={handleTorrentManagerClose}
   />
 {/if}

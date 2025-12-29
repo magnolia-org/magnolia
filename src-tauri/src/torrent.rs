@@ -76,6 +76,8 @@ pub struct MkvMetadata {
     pub needs_audio_transcoding: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transcoded_audio_url: Option<String>,
+    #[serde(default)]
+    pub duration: Option<f64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1526,6 +1528,11 @@ async fn extract_mkv_metadata_ffprobe(file_path: &std::path::Path) -> Result<Mkv
             track.index, track.codec, track.needs_transcoding);
     }
     
+    let duration = probe_data.get("format")
+        .and_then(|f| f.get("duration"))
+        .and_then(|d| d.as_str())
+        .and_then(|s| s.parse::<f64>().ok());
+
     if needs_audio_transcoding {
         tracing::info!("Audio transcoding required - at least one track has unsupported codec");
     } else {
@@ -1538,6 +1545,7 @@ async fn extract_mkv_metadata_ffprobe(file_path: &std::path::Path) -> Result<Mkv
         chapters,
         needs_audio_transcoding,
         transcoded_audio_url: None,
+        duration,
     })
 }
 
