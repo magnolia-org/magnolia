@@ -6,7 +6,7 @@
   
   const dispatch = createEventDispatcher();
   
-  let externalPlayer = 'mpv';
+  let externalPlayer = 'vlc';
   let rememberPreferences = true;
   let showSkipPrompts = true;
   let settingsPanel;
@@ -103,10 +103,6 @@
   
   {#if settingsActive}
     <div class="settings-panel">
-      <div class="settings-header">
-        <h3>Settings</h3>
-      </div>
-      
       <div class="settings-content">
         <div class="setting-item">
           <div class="setting-label">

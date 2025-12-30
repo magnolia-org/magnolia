@@ -5,7 +5,6 @@
 mod search;
 mod torrent;
 mod tracking;
-mod dash;
 mod media_cache;
 mod font_manager;
 mod watch_history;
@@ -15,6 +14,8 @@ mod settings;
 use search::{nyaa::NyaaProvider, limetorrents::LimeTorrentsProvider, piratebay::PirateBayProvider, 
              SearchProvider};
 use std::sync::Arc;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use tauri::{Manager, State};
 use torrent::TorrentManager;
 use tracking::TrackingManager;
@@ -31,6 +32,7 @@ fn is_ffmpeg_installed() -> bool {
     #[cfg(target_os = "windows")]
     let system_check = std::process::Command::new("where")
         .arg("ffmpeg")
+        .creation_flags(0x08000000)
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false);
@@ -148,6 +150,7 @@ fn check_ffmpeg() -> bool {
 async fn install_ffmpeg(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::Emitter;
     use std::io::Write;
+    use std::fs::File;
     
     if is_ffmpeg_installed() {
         return Ok(());
@@ -159,6 +162,11 @@ async fn install_ffmpeg(app: tauri::AppHandle) -> Result<(), String> {
     std::fs::create_dir_all(&sidecar_dir)
         .map_err(|e| e.to_string())?;
 
+    // Use a fixed URL for Windows since check_latest_version returns a version string
+    #[cfg(target_os = "windows")]
+    let download_url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip".to_string();
+    
+    #[cfg(not(target_os = "windows"))]
     let download_url = check_latest_version()
         .map_err(|e| e.to_string())?;
     
@@ -167,29 +175,72 @@ async fn install_ffmpeg(app: tauri::AppHandle) -> Result<(), String> {
     // Download with progress
     let client = reqwest::Client::new();
     let mut response = client.get(&download_url)
+        .header("User-Agent", "Magnolia/1.0")
         .send()
         .await
         .map_err(|e| e.to_string())?;
         
     let total_size = response.content_length().unwrap_or(0);
+    println!("Download started. Total size: {}", total_size);
+
     let mut file = std::fs::File::create(&destination).map_err(|e| e.to_string())?;
     let mut downloaded: u64 = 0;
+    let mut last_emit_time = std::time::Instant::now();
     
     while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
         file.write_all(&chunk).map_err(|e| e.to_string())?;
         downloaded += chunk.len() as u64;
         
-        if total_size > 0 {
-            let progress = (downloaded as f64 / total_size as f64) * 100.0;
-            let _ = app.emit("ffmpeg-install-progress", progress);
+        // Emit progress at most every 100ms to avoid flooding the frontend
+        if last_emit_time.elapsed().as_millis() > 100 {
+            if total_size > 0 {
+                let progress = (downloaded as f64 / total_size as f64) * 100.0;
+                let _ = app.emit("ffmpeg-install-progress", progress);
+            } else {
+                let _ = app.emit("ffmpeg-install-progress", -1.0);
+            }
+            last_emit_time = std::time::Instant::now();
         }
     }
     
     let _ = app.emit("ffmpeg-install-progress", 100.0); // Download complete
     
-    // Unpack
-    unpack_ffmpeg(&destination, &sidecar_dir)
-        .map_err(|e| e.to_string())?;
+    // Unpack manually to ensure we get both ffmpeg and ffprobe
+    println!("Unpacking ffmpeg and ffprobe...");
+    let file = File::open(&destination).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
+        let name = file.name().to_string();
+        
+        // Check for ffmpeg or ffprobe binaries
+        // Windows: bin/ffmpeg.exe, bin/ffprobe.exe
+        // Linux/Mac: bin/ffmpeg, bin/ffprobe
+        let is_bin = if cfg!(target_os = "windows") {
+            name.ends_with("bin/ffmpeg.exe") || name.ends_with("bin/ffprobe.exe")
+        } else {
+            name.ends_with("bin/ffmpeg") || name.ends_with("bin/ffprobe")
+        };
+        
+        if is_bin {
+            let file_name = std::path::Path::new(&name).file_name().unwrap();
+            let out_path = sidecar_dir.join(file_name);
+            
+            println!("Extracting {:?} to {:?}", name, out_path);
+            
+            let mut outfile = File::create(&out_path).map_err(|e| e.to_string())?;
+            std::io::copy(&mut file, &mut outfile).map_err(|e| e.to_string())?;
+            
+            #[cfg(not(target_os = "windows"))]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&out_path).map_err(|e| e.to_string())?.permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&out_path, perms).map_err(|e| e.to_string())?;
+            }
+        }
+    }
         
     let _ = std::fs::remove_file(&destination);
     
@@ -718,6 +769,7 @@ async fn check_external_player(player: String) -> Result<bool, String> {
     #[cfg(target_os = "windows")]
     let check_result = Command::new("where")
         .arg(command_name)
+        .creation_flags(0x08000000)
         .output();
     
     #[cfg(not(target_os = "windows"))]
@@ -764,6 +816,9 @@ async fn open_in_external_player(
     
     let mut cmd = Command::new(&command_name);
     
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+    
     // Add player-specific arguments
     match player.to_lowercase().as_str() {
         "mpv" => {
@@ -786,21 +841,6 @@ async fn open_in_external_player(
 }
 
 fn main() {
-    // Ensure ffmpeg is installed before starting the app
-    println!("checking ffmpeg installation...");
-    tauri::async_runtime::block_on(async {
-        match ensure_ffmpeg_installed().await {
-            Ok(_) => println!("ffmpeg ready"),
-            Err(e) => {
-                eprintln!("============================================");
-                eprintln!("WARNING: Failed to install ffmpeg: {}", e);
-                eprintln!("Audio transcoding features may not work properly");
-                eprintln!("You can manually install ffmpeg to your system PATH");
-                eprintln!("============================================");
-            }
-        }
-    });
-    
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())

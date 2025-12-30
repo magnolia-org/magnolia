@@ -118,7 +118,6 @@ pub struct StreamStatus {
 #[derive(Clone)]
 pub struct AppState {
     pub session: Arc<Session>,
-    pub hls_cache: Arc<Mutex<HashMap<String, PathBuf>>>,
     pub transcode_states: Arc<RwLock<HashMap<(usize, usize), TranscodeState>>>,
     pub metadata_cache: Arc<RwLock<HashMap<(usize, usize), MkvMetadata>>>,
     pub download_dir: PathBuf,
@@ -397,15 +396,18 @@ async fn get_subtitle_track(
     drop(temp_file);
 
     // Extract subtitle using ffmpeg
-    let output = match Command::new("ffmpeg")
-        .args(&[
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(&[
             "-i", temp_file_path.to_str().unwrap(),
             "-map", &format!("0:s:{}", track_index),
             "-f", "ass",
             "-"
-        ])
-        .output()
-        .await {
+        ]);
+
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+
+    let output = match cmd.output().await {
             Ok(out) => out,
             Err(e) => {
                 tracing::error!("Failed to run ffmpeg: {}", e);
@@ -553,7 +555,6 @@ impl TorrentManager {
 
         let state = AppState {
             session: session.clone(),
-            hls_cache: Arc::new(Mutex::new(HashMap::new())),
             transcode_states: transcode_states.clone(),
             metadata_cache: metadata_cache.clone(),
             download_dir: download_dir.clone(),
@@ -567,12 +568,6 @@ impl TorrentManager {
             .route("/torrents/{session_id}/transcoded-audio-stream/{file_id}", get(stream_transcoded_audio))
             .route("/torrents/{session_id}/transcoded-audio/{file_id}", get(serve_transcoded_audio))
             .route("/fonts/{filename}", get(serve_font))
-            .route("/torrents/{session_id}/dash/{file_id}/manifest.mpd", get(crate::dash::dash_manifest))
-            .route("/torrents/{session_id}/dash/{file_id}/video/init.mp4", get(crate::dash::dash_video_init))
-            .route("/torrents/{session_id}/dash/{file_id}/video/segment/{segment_num}", get(crate::dash::dash_video_segment))
-            .route("/torrents/{session_id}/dash/{file_id}/audio/{track_id}/init.mp4", get(crate::dash::dash_audio_init))
-            .route("/torrents/{session_id}/dash/{file_id}/audio/{track_id}/segment/{segment_num}", get(crate::dash::dash_audio_segment))
-            .route("/torrents/{session_id}/dash/{file_id}/subtitles/{track_id}/subtitle.ass", get(crate::dash::dash_subtitle))
             .layer(CorsLayer::permissive())
             .with_state(state);
 
@@ -1378,16 +1373,20 @@ async fn extract_mkv_metadata_ffprobe(file_path: &std::path::Path) -> Result<Mkv
     let file_size = std::fs::metadata(file_path)?.len();
     tracing::info!("File size: {} bytes", file_size);
     
-    let output = Command::new("ffprobe")
-        .args(&[
+    let mut cmd = Command::new("ffprobe");
+    cmd.args(&[
             "-v", "error",
             "-print_format", "json",
             "-show_format",
             "-show_streams",
             "-show_chapters",
             file_path.to_str().unwrap(),
-        ])
-        .output()
+        ]);
+
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+
+    let output = cmd.output()
         .await
         .context("Failed to run ffprobe command")?;
     
@@ -1583,6 +1582,10 @@ async fn transcode_audio_track(
     use tokio::process::Command;
     
     let mut cmd = Command::new(ffmpeg_path());
+    
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+
     cmd.args(&[
         "-y",  // Overwrite output
         "-i", input_path.to_str().unwrap(),
@@ -1649,14 +1652,18 @@ async fn transcode_audio_track(
 async fn get_media_duration(path: &std::path::Path) -> Result<f64> {
     use tokio::process::Command;
     
-    let output = Command::new("ffprobe")
-        .args(&[
+    let mut cmd = Command::new("ffprobe");
+    cmd.args(&[
             "-v", "error",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
             path.to_str().unwrap(),
-        ])
-        .output()
+        ]);
+
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+
+    let output = cmd.output()
         .await
         .context("Failed to run ffprobe")?;
     
@@ -1727,6 +1734,9 @@ async fn stream_transcoded_audio(
     // Start ffmpeg transcoding from seek position
     let mut cmd = Command::new(ffmpeg_path());
     
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+    
     if seek_time > 0.0 {
         cmd.args(&["-ss", &seek_time.to_string()]);
     }
@@ -1774,6 +1784,10 @@ async fn stream_transcoded_audio(
         
         tokio::spawn(async move {
             let mut cmd = Command::new(ffmpeg_path());
+            
+            #[cfg(target_os = "windows")]
+            cmd.creation_flags(0x08000000);
+
             cmd.args(&[
                 "-i", file_path_clone.to_str().unwrap(),
                 "-map", "0:a:0",
@@ -1894,6 +1908,9 @@ async fn stream_srt_subtitles(
     // Extract subtitle track using ffmpeg
     let mut cmd = Command::new(ffmpeg_path());
     
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+
     cmd.args(&[
         "-ss", &start_time.to_string(),
         "-t", &(end_time - start_time).to_string(),
@@ -2237,14 +2254,18 @@ pub async fn extract_subtitle(
             tracing::info!("File fully downloaded, extracting complete subtitles from disk");
             
             // Extract subtitle using ffmpeg directly from file
-            let output = Command::new(ffmpeg_path())
-                .args(&[
+            let mut cmd = Command::new(ffmpeg_path());
+            cmd.args(&[
                     "-i", file_path.to_str().unwrap(),
                     "-map", &format!("0:s:{}", track_index),
                     "-f", "srt",
                     "-"
-                ])
-                .output()
+                ]);
+
+            #[cfg(target_os = "windows")]
+            cmd.creation_flags(0x08000000);
+
+            let output = cmd.output()
                 .await
                 .map_err(|e| format!("Failed to run ffmpeg: {}", e))?;
             
@@ -2308,14 +2329,18 @@ pub async fn extract_subtitle(
     tracing::info!("Finished reading {} bytes, extracting subtitles with ffmpeg", total_read);
     
     // Extract subtitle using ffmpeg
-    let output = Command::new(ffmpeg_path())
-        .args(&[
+    let mut cmd = Command::new(ffmpeg_path());
+    cmd.args(&[
             "-i", temp_file_path.to_str().unwrap(),
             "-map", &format!("0:s:{}", track_index),
             "-f", "srt",
             "-"
-        ])
-        .output()
+        ]);
+
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+
+    let output = cmd.output()
         .await
         .map_err(|e| format!("Failed to run ffmpeg: {}", e))?;
     
@@ -2447,14 +2472,18 @@ async fn extract_complete_subtitle_background(
     tracing::info!("[Background] Extracting complete subtitles with ffmpeg");
     
     // Extract complete subtitle
-    let output = Command::new(ffmpeg_path())
-        .args(&[
+    let mut cmd = Command::new(ffmpeg_path());
+    cmd.args(&[
             "-i", temp_file_path.to_str().unwrap(),
             "-map", &format!("0:s:{}", track_index),
             "-f", "srt",
             "-"
-        ])
-        .output()
+        ]);
+
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+
+    let output = cmd.output()
         .await
         .map_err(|e| format!("Failed to run ffmpeg: {}", e))?;
     
@@ -2592,15 +2621,19 @@ async fn extract_audio_from_file(file_path: &std::path::Path, track_index: usize
     
     // Use ffmpeg to extract and remux audio track
     // Output to matroska format which can contain any codec properly
-    let output = Command::new(ffmpeg_path())
-        .args(&[
+    let mut cmd = Command::new(ffmpeg_path());
+    cmd.args(&[
             "-i", file_path.to_str().unwrap(),
             "-map", &format!("0:a:{}", track_index),
             "-c:a", "copy", // Copy codec without re-encoding
             "-f", "matroska", // Output as MKV which supports all codecs
             "-"
-        ])
-        .output()
+        ]);
+
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+
+    let output = cmd.output()
         .await
         .map_err(|e| format!("Failed to run ffmpeg: {}", e))?;
     

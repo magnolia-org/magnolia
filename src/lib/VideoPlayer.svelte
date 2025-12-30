@@ -102,7 +102,7 @@
     fontSize: 24,
     backgroundOpacity: 0.5,
     color: '#ffffff',
-    textShadow: true,
+    textShadow: false,
     textShadowColor: '#000000',
     windowMargin: 60
   };
@@ -185,8 +185,10 @@
               sub.language === prefs.subtitle_language
             );
             if (matchingSub) {
-              const trackIndex = externalSubtitles.indexOf(matchingSub);
-              console.log(`[track prefs] auto-selecting external subtitle: ${matchingSub.language}`);
+              const externalIndex = externalSubtitles.indexOf(matchingSub);
+              const totalEmbedded = videoMetadata?.subtitle_tracks?.length || 0;
+              const trackIndex = totalEmbedded + externalIndex;
+              console.log(`[track prefs] auto-selecting external subtitle: ${matchingSub.language} (index ${trackIndex})`);
               await selectSubtitle(matchingSub, trackIndex);
             }
           }
@@ -240,7 +242,7 @@
       await invoke('save_track_preference', {
         magnetLink,
         audioTrackIndex: selectedAudioTrack > 0 ? selectedAudioTrack : null,
-        subtitleTrackIndex: subtitleIndex >= 0 ? subtitleIndex : null,
+        subtitleTrackIndex: subtitleIndex,
         subtitleLanguage,
         subtitleOffset: subtitleOffset !== 0 ? subtitleOffset : null
       });
@@ -388,6 +390,9 @@
   let seekAccumulator = 0; // Accumulates seek time for stacking
   let lastSeekDirection = null; // 'forward' or 'backward'
   let lastIndicatorType = null; // Track last indicator for nudge detection
+  let isExiting = false;
+  let exitTimeout;
+  let indicatorPosition = 'center';
   let progressTrackingInterval = null;
   let hasAddedToHistory = false;
   let hasSeekedToInitial = false;
@@ -477,6 +482,13 @@
     
     try {
       const subs = await fetchSubtitles(mediaId, mediaType, seasonNum, episodeNum);
+      // Sort subtitles alphabetically by language
+      subs.sort((a, b) => {
+        const langA = (a.language || "").toLowerCase();
+        const langB = (b.language || "").toLowerCase();
+        return langA.localeCompare(langB);
+      });
+      
       externalSubtitles = subs;
       console.log("loaded external subtitles:", externalSubtitles.length);
       
@@ -2496,30 +2508,33 @@
   }
 
   function showShortcutIndicator(type, value, icon, seekAmount = 0, volumeDirection = null) {
-    // Clear existing timeout to prevent overlays
-    if (indicatorTimeout) {
-      clearTimeout(indicatorTimeout);
-    }
+    // Clear existing timeouts
+    if (indicatorTimeout) clearTimeout(indicatorTimeout);
+    if (exitTimeout) clearTimeout(exitTimeout);
     
     // Determine if this is a repeated action (nudge) or new action (appear)
-    const isRepeatedAction = showIndicator && lastIndicatorType === type;
+    const isRepeatedAction = showIndicator && lastIndicatorType === type && !isExiting;
     
     // Handle seek stacking
     if (type === 'seek-forward' || type === 'seek-backward') {
       const direction = type === 'seek-forward' ? 'forward' : 'backward';
       
       // Reset accumulator if direction changed or indicator was hidden
-      if (!showIndicator || lastSeekDirection !== direction) {
+      if (!showIndicator || lastSeekDirection !== direction || isExiting) {
         seekAccumulator = 0;
         lastSeekDirection = direction;
       }
       
       seekAccumulator += seekAmount;
       value = `${seekAccumulator >= 0 ? '+' : ''}${seekAccumulator}s`;
+      
+      // Set position for seek indicators
+      indicatorPosition = type === 'seek-backward' ? 'left' : 'right';
     } else {
       // Reset seek accumulator for non-seek indicators
       seekAccumulator = 0;
       lastSeekDirection = null;
+      indicatorPosition = 'center';
     }
     
     // For volume, use direction-specific type for proper animation
@@ -2528,9 +2543,14 @@
     } else {
       indicatorType = type;
     }
+    
     indicatorValue = value;
     indicatorIcon = icon;
     lastIndicatorType = type;
+    
+    // Reset exiting state if we're showing a new indicator
+    isExiting = false;
+    showIndicator = true;
     
     if (isRepeatedAction) {
       // Just nudge, don't restart appear animation
@@ -2540,14 +2560,18 @@
       indicatorAnimationKey++;
     }
     
-    showIndicator = true;
-    
-    // Auto-hide after 600ms
+    // Start exit animation after delay
     indicatorTimeout = setTimeout(() => {
-      showIndicator = false;
-      seekAccumulator = 0;
-      lastSeekDirection = null;
-      lastIndicatorType = null;
+      isExiting = true;
+      
+      // Remove from DOM after exit animation completes
+      exitTimeout = setTimeout(() => {
+        showIndicator = false;
+        isExiting = false;
+        seekAccumulator = 0;
+        lastSeekDirection = null;
+        lastIndicatorType = null;
+      }, 200); // Match CSS animation duration
     }, 600);
   }
 
@@ -2668,6 +2692,24 @@
           fullscreen ? "exit-fullscreen" : "fullscreen",
           fullscreen ? "Exit Fullscreen" : "Fullscreen",
           fullscreen ? "ri-fullscreen-exit-fill" : "ri-fullscreen-fill"
+        );
+        break;
+      case "a":
+        event.preventDefault();
+        updateSubtitleOffset(-0.1);
+        showShortcutIndicator(
+          "subtitle-offset",
+          `${subtitleOffset > 0 ? '+' : ''}${subtitleOffset.toFixed(1)}s`,
+          "ri-closed-captioning-line"
+        );
+        break;
+      case "d":
+        event.preventDefault();
+        updateSubtitleOffset(0.1);
+        showShortcutIndicator(
+          "subtitle-offset",
+          `${subtitleOffset > 0 ? '+' : ''}${subtitleOffset.toFixed(1)}s`,
+          "ri-closed-captioning-line"
         );
         break;
       case "enter":
@@ -2978,7 +3020,7 @@
 
   <!-- Keyboard shortcut indicator -->
   {#if showIndicator}
-    <div class="shortcut-indicator {indicatorType}">
+    <div class="shortcut-indicator {indicatorType} {indicatorPosition}" class:exiting={isExiting}>
       {#key indicatorAnimationKey}
         <div class="indicator-content">
           {#key indicatorNudgeKey}
@@ -3334,12 +3376,14 @@
               {/each}
             {/if}
             {#if externalSubtitles.length > 0}
+              {@const embeddedCount = videoMetadata?.subtitle_tracks?.length || 0}
               {#each externalSubtitles as track, i}
+                {@const trackIndex = embeddedCount + i}
                 <button
                   class="player-track-option menu-item"
-                  class:active={selectedSubtitleTrack === `external-${i}`}
-                  on:click={() => selectSubtitle(track, `external-${i}`)}
-                  disabled={loadingSubtitle && selectedSubtitleTrack !== `external-${i}`}
+                  class:active={selectedSubtitleTrack === trackIndex}
+                  on:click={() => selectSubtitle(track, trackIndex)}
+                  disabled={loadingSubtitle && selectedSubtitleTrack !== trackIndex}
                 >
                   <span class="player-track-info">
                     {#if track.language}
@@ -3460,13 +3504,13 @@
               <div class="settings-controls-wrapper">
                 <div class="settings-controls">
                   <button class="settings-btn wide-btn" on:click|stopPropagation={() => updateSubtitleOffset(-0.1)}>
-                    <i class="ri-subtract-line"></i> Sub First
+                    <i class="ri-subtract-line"></i> Audio First
                   </button>
                   <span class="settings-value" style="min-width: 50px;">
                     {Math.abs(subtitleOffset).toFixed(1)}s
                   </span>
                   <button class="settings-btn wide-btn" on:click|stopPropagation={() => updateSubtitleOffset(0.1)}>
-                    Audio First <i class="ri-add-line"></i>
+                    Sub First <i class="ri-add-line"></i>
                   </button>
                 </div>
                 <button class="settings-reset-btn" title="Reset" on:click|stopPropagation={() => resetSubtitleOffset()}>

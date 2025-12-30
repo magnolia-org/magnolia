@@ -319,7 +319,19 @@
         const [r, g, b] = dominantColor.split(",").map(Number);
         prominentColor = `rgb(${r}, ${g}, ${b})`;
 
-        const hexColor = rgbToHex(r, g, b);
+        // Calculate darker color for titlebar to prevent it from being too vibrant/bright
+        let tr = r, tg = g, tb = b;
+        const brightness = (tr * 299 + tg * 587 + tb * 114) / 1000;
+        const MAX_TITLEBAR_BRIGHTNESS = 40; // Keep it relatively dark
+
+        if (brightness > MAX_TITLEBAR_BRIGHTNESS) {
+            const factor = MAX_TITLEBAR_BRIGHTNESS / brightness;
+            tr = Math.floor(tr * factor);
+            tg = Math.floor(tg * factor);
+            tb = Math.floor(tb * factor);
+        }
+
+        const hexColor = rgbToHex(tr, tg, tb);
         window.dispatchEvent(
           new CustomEvent("updateTitleBarColor", {
             detail: { color: hexColor },
@@ -1732,7 +1744,8 @@
   <FileSelector
     files={availableFiles}
     showName={details.title || details.name}
-    seasons={Object.keys(allSeasonsData).length > 0 ? Object.values(allSeasonsData) : (details.seasons || [])}
+    seasons={details.seasons || []}
+    isMovie={media.media_type === 'movie'}
     on:confirm={handleFileSelectorConfirm}
     on:close={closeFileSelector}
   />

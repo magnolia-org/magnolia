@@ -27,6 +27,7 @@
   let showVideoPlayer = false;
   let videoPlayerProps = null;
   let videoControlsVisible = true;
+  let onboardingVisible = false;
 
   $: myList = $myListStore;
   $: watchHistory = $watchHistoryStore;
@@ -225,13 +226,13 @@
 </script>
 
 <main>
-  <Onboarding />
+  <Onboarding bind:visible={onboardingVisible} />
   <div class="titlebar-wrapper" class:hidden={showVideoPlayer && !videoControlsVisible}>
     <TitleBar 
       bind:searchActive 
       bind:settingsActive
       accentColor={showVideoPlayer ? null : titleBarAccentColor} 
-      immersive={showVideoPlayer}
+      immersive={showVideoPlayer || onboardingVisible}
     />
   </div>
   {#if showVideoPlayer}

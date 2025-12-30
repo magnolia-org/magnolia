@@ -1,11 +1,11 @@
 [package]
 name = "magnolia-tauri-app"
-version = "0.0.0"
-description = "A Tauri App"
-authors = ["you"]
-license = ""
+version = "1.0.0"
+description = "Media torrent client"
+authors = ["chair"]
+license = "MIT"
 repository = ""
-edition = "2021"
+edition = "2025"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -44,6 +44,7 @@ md5 = "0.7"
 ffmpeg-sidecar = "2.3.0"
 dirs = "5.0"
 fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
+zip = "7.0.0"
 
 
 [features]

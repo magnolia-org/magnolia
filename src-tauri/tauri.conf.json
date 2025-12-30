@@ -1,6 +1,6 @@
 {
   "productName": "Magnolia",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "identifier": "com.chair.magnolia",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -37,6 +37,13 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "icons/nsis/headerimage.bmp",
+        "sidebarImage": "icons/nsis/sidebarimage.bmp"
+      }
+    }
   }
 }

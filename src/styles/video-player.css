@@ -567,15 +567,41 @@
 .shortcut-indicator {
     position: absolute;
     top: 50%;
-    left: 50%;
     z-index: 25;
     pointer-events: none;
     will-change: opacity, transform;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.shortcut-indicator.center {
+    left: 50%;
+    transform: translate(-50%, -50%);
+}
+
+.shortcut-indicator.left {
+    left: 15%;
+    transform: translate(-50%, -50%);
+}
+
+.shortcut-indicator.right {
+    right: 15%;
+    left: auto;
+    transform: translate(50%, -50%);
 }
 
 .shortcut-indicator .indicator-content {
-    animation: indicatorFadeInOut 0.6s cubic-bezier(0.4, 0, 0.2, 1);
-    transform: translate(-50%, -50%);
+    /* Default state: Visible */
+    opacity: 1;
+    transform: scale(1);
+    
+    /* Enter animation */
+    animation: indicatorEnter 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.shortcut-indicator.exiting .indicator-content {
+    animation: indicatorExit 0.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
 
 .indicator-content {
@@ -675,43 +701,25 @@
     }
 }
 
-@keyframes nudgeUp {
-    0% {
-        transform: translateY(-6px);
+@keyframes indicatorEnter {
+    from {
+        opacity: 0;
+        transform: scale(0.85);
     }
-    100% {
-        transform: translateY(0);
+    to {
+        opacity: 1;
+        transform: scale(1);
     }
 }
 
-@keyframes nudgeDown {
-    0% {
-        transform: translateY(6px);
-    }
-    100% {
-        transform: translateY(0);
-    }
-}
-
-@keyframes indicatorFadeInOut {
-    0% {
-        opacity: 0;
-        transform: translate(-50%, -50%) scale(0.85);
-    }
-    
-    20% {
+@keyframes indicatorExit {
+    from {
         opacity: 1;
-        transform: translate(-50%, -50%) scale(1);
+        transform: scale(1);
     }
-    
-    80% {
-        opacity: 1;
-        transform: translate(-50%, -50%) scale(1);
-    }
-    
-    100% {
+    to {
         opacity: 0;
-        transform: translate(-50%, -50%) scale(0.85);
+        transform: scale(0.85);
     }
 }
 

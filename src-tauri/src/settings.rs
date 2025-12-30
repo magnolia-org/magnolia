@@ -14,7 +14,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            external_player: "mpv".to_string(),
+            external_player: "vlc".to_string(),
             remember_preferences: true,
             show_skip_prompts: true,
         }

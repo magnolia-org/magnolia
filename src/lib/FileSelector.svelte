@@ -14,6 +14,7 @@
     export let files = [];
     export let showName = "";
     export let seasons = [];
+    export let isMovie = false;
 
     const dispatch = createEventDispatcher();
 
@@ -34,11 +35,11 @@
         selectedSeason = availableSeasons[0];
     }
     $: currentSeasonData = seasons.find(s => s.season_number === selectedSeason);
-    $: episodeCount = currentSeasonData?.episode_count || 24;
+    $: episodeCount = currentSeasonData?.episode_count || currentSeasonData?.episodes?.length || 24;
     
     $: hasSelection = selectedFiles.size > 0;
     $: assignedCount = Object.keys(assignments).length;
-    $: canConfirm = assignedCount > 0;
+    $: canConfirm = isMovie ? selectedFiles.size === 1 : assignedCount > 0;
 
     $: assignedEpisodesForSeason = Object.values(assignments)
         .filter(a => a.season === selectedSeason)
@@ -90,6 +91,12 @@
         
         const fileIndex = sortedFiles[index].index;
         
+        if (isMovie) {
+            selectedFiles = new Set([fileIndex]);
+            selectionOrder = [fileIndex];
+            return;
+        }
+
         if (assignedFileIndices.has(fileIndex)) return;
         
         if (selectedFiles.has(fileIndex)) {
@@ -185,6 +192,15 @@
     }
 
     function confirm() {
+        if (isMovie) {
+            if (selectedFiles.size === 1) {
+                const fileIndex = [...selectedFiles][0];
+                const file = files.find(f => f.index === fileIndex);
+                dispatch("confirm", [{ file, season: 0, episode: 0 }]);
+            }
+            return;
+        }
+
         const result = Object.entries(assignments).map(([fileIndex, assignment]) => {
             const file = files.find(f => f.index === parseInt(fileIndex));
             return { file, season: assignment.season, episode: assignment.episode };
@@ -278,7 +294,7 @@
                                         <i class="ri-close-line"></i>
                                     </button>
                                 </div>
-                            {:else if hasPreview}
+                            {:else if hasPreview && !isMovie}
                                 <div class="assignment-group preview">
                                     <span class="episode-tag preview">S{previewAssignment.season}E{previewAssignment.episode}</span>
                                 </div>
@@ -288,7 +304,7 @@
                 </div>
             </div>
 
-            {#if hasSelection}
+            {#if hasSelection && !isMovie}
                 <div class="episode-picker-section" transition:slide={{ duration: 200, axis: 'x', easing: cubicOut }}>
                     <div class="section-header">
                         <span class="section-title">Assign to Episode</span>
@@ -357,7 +373,12 @@
 
         <div class="modal-footer">
             <div class="footer-left">
-                {#if assignedCount > 0}
+                {#if isMovie}
+                    <span class="status-text">
+                        <i class="ri-information-line"></i>
+                        Select the movie file to play.
+                    </span>
+                {:else if assignedCount > 0}
                     <button class="status-text success clickable" on:click={() => showPreviewModal = true}>
                         <i class="ri-checkbox-circle-fill"></i>
                         {assignedCount} file{assignedCount !== 1 ? 's' : ''} mapped
