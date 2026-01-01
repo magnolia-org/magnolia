@@ -4,6 +4,9 @@
   "description": "Capability for the main window",
   "windows": ["main"],
   "permissions": [
+    "core:default",
+    "core:app:default",
+    "core:app:allow-version",
     "core:window:default",
     "core:window:allow-close",
     "core:window:allow-minimize",
@@ -14,6 +17,7 @@
     "dialog:default",
     "dialog:allow-open",
     "fs:default",
-    "fs:allow-read"
+    "fs:allow-read",
+    "shell:allow-open"
   ]
 }

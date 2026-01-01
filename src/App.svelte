@@ -8,10 +8,19 @@
   import TorrentDebug from "./lib/TorrentDebug.svelte";
   import VideoPlayer from "./lib/VideoPlayer.svelte";
   import Onboarding from "./lib/Onboarding.svelte";
+  import CacheManager from "./lib/CacheManager.svelte";
+  import AboutModal from "./lib/AboutModal.svelte";
+  import Updater from "./lib/Updater.svelte";
   import { myListStore } from "./lib/stores/listStore.js";
   import { watchHistoryStore } from "./lib/stores/watchHistoryStore.js";
   import { watchProgressStore } from "./lib/stores/watchProgressStore.js";
+  import { modalStore, closeModal } from "./lib/stores/modalStore.js";
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { invoke } from "@tauri-apps/api/core";
+  import { setupLogging } from "./lib/consoleLogger.js";
+  
+  // Initialize console logging to disk
+  setupLogging();
 
   let searchActive = false;
   let settingsActive = false;
@@ -22,6 +31,7 @@
   let historyIndex = -1;
   let showTorrentDebug = false;
   let savedScrollPosition = 0;
+  let hideRecommendations = false;
 
   // Video Player State
   let showVideoPlayer = false;
@@ -32,8 +42,23 @@
   $: myList = $myListStore;
   $: watchHistory = $watchHistoryStore;
   $: watchProgress = $watchProgressStore;
+  $: activeModal = $modalStore.activeModal;
 
-  onMount(() => {
+  onMount(async () => {
+    try {
+      const settings = await invoke('get_settings');
+      hideRecommendations = settings.hide_recommendations;
+    } catch (e) {
+      console.error('Failed to load settings', e);
+    }
+
+    // Listen for settings changes
+    window.addEventListener('settingsChanged', async (e) => {
+      if (e.detail && e.detail.hide_recommendations !== undefined) {
+        hideRecommendations = e.detail.hide_recommendations;
+      }
+    });
+
     window.addEventListener("openMediaDetail", (e) => {
       openMedia(e.detail);
     });
@@ -227,6 +252,15 @@
 
 <main>
   <Onboarding bind:visible={onboardingVisible} />
+  
+  {#if activeModal === 'cache'}
+    <CacheManager on:close={closeModal} />
+  {/if}
+  
+  {#if activeModal === 'about'}
+    <AboutModal on:close={closeModal} />
+  {/if}
+
   <div class="titlebar-wrapper" class:hidden={showVideoPlayer && !videoControlsVisible}>
     <TitleBar 
       bind:searchActive 
@@ -254,7 +288,9 @@
         }} />
       {:else}
         <div class="dashboard">
-          <RecommendationsCarousel />
+          {#if !hideRecommendations}
+            <RecommendationsCarousel />
+          {/if}
 
           {#if watchHistory.length > 0}
             <MediaCarousel
@@ -323,6 +359,8 @@
       <TorrentDebug />
     {/if}
   {/if}
+  
+  <Updater />
 </main>
 
 <style>

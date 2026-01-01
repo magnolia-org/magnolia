@@ -9,6 +9,16 @@ pub struct Settings {
     pub external_player: String,
     pub remember_preferences: bool,
     pub show_skip_prompts: bool,
+    #[serde(default)]
+    pub hide_recommendations: bool,
+    #[serde(default)]
+    pub clear_cache_after_watch: bool,
+    #[serde(default = "default_true")]
+    pub check_for_updates: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -17,6 +27,9 @@ impl Default for Settings {
             external_player: "vlc".to_string(),
             remember_preferences: true,
             show_skip_prompts: true,
+            hide_recommendations: false,
+            clear_cache_after_watch: false,
+            check_for_updates: true,
         }
     }
 }

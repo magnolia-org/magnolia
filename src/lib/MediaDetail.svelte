@@ -43,40 +43,32 @@
   let viewMode = "list"; // 'list' or 'grid'
   let episodeSearchQuery = "";
 
-  // Torrent Search State
   let showTorrentSelector = false;
   let searchResults = [];
   let isSearching = false;
   let currentSearchQuery = "";
-  let originalSearchQuery = ""; // The original auto-generated query for revert
-  let pendingPlayRequest = null; // { season, episode }
-  let currentImdbId = null; // IMDB ID for EZTV search
+  let originalSearchQuery = "";
+  let pendingPlayRequest = null;
+  let currentImdbId = null;
   
-  // Manual file selection state
   let showFileSelector = false;
   let availableFiles = [];
   let selectedTorrentForManual = null;
-  let selectedTorrentName = ""; // For display in TorrentSelector
+  let selectedTorrentName = "";
   let manualHandleId = null;
   let autoPlayTriggered = false;
 
-  // Error modal state
   let showErrorModal = false;
   let errorMessage = "";
   let errorTitle = "Error";
 
-  // Torrent manager state
   let showTorrentManager = false;
   let showMoreMenu = false;
   let torrentManagerRefresh = 0;
 
   $: {
-    if (media) {
-      // Ensure media_type is set
-      if (!media.media_type) {
-        // If it has 'name' field (TMDB TV show), it's tv, otherwise movie
-        media.media_type = media.name && !media.title ? "tv" : "movie";
-      }
+    if (media && !media.media_type) {
+      media.media_type = media.name && !media.title ? "tv" : "movie";
     }
   }
 
@@ -86,13 +78,11 @@
       (item) => item.id === media.id && item.media_type === media.media_type,
     );
 
-  // Helper function to detect anime (Animation genre ID is 16 in TMDB)
   const isAnime = () => {
     if (!details || !details.genres) return false;
     return details.genres.some(genre => genre.id === 16);
   };
 
-  // Helper function to extract torrent name from magnet link
   function extractTorrentNameFromMagnet(magnetLink) {
     if (!magnetLink) return "";
     const dnMatch = magnetLink.match(/dn=([^&]+)/);
@@ -144,7 +134,6 @@
 
     if (details.seasons && details.seasons.length > 0) {
       activeTab = "seasons";
-      // Skip specials (season 0) when selecting default
       const firstSeason = details.seasons.find((s) => s.season_number > 0);
       if (firstSeason) {
         selectedSeason = firstSeason.season_number;
@@ -199,7 +188,7 @@
 
   async function loadDetails() {
     loading = true;
-    details = null; // Clear previous details to prevent stale data
+    details = null;
     try {
       if (media.media_type === "movie") {
         details = await getMovieDetails(media.id);
@@ -214,7 +203,7 @@
       }
     } catch (err) {
       console.error("Error loading details:", err);
-      details = null; // Ensure details is null on error
+      details = null;
     }
     loading = false;
   }
@@ -258,7 +247,6 @@
         response = await getTVRecommendations(media.id);
       }
       recommendations = (response?.results?.slice(0, 10) || []).map((rec) => {
-        // Ensure media_type is set for recommendations
         if (!rec.media_type) {
           rec.media_type = media.media_type;
         }
@@ -590,17 +578,8 @@
 
     // Build search query - just the name, no season/episode
     let searchQuery = showName;
-    if (isMovie) {
-      const year = (details.release_date || "").split("-")[0];
-      if (year) {
-        searchQuery = `${showName} ${year}`;
-      }
-      currentSearchQuery = searchQuery;
-      originalSearchQuery = searchQuery;
-    } else {
-      currentSearchQuery = showName;
-      originalSearchQuery = showName;
-    }
+    currentSearchQuery = searchQuery;
+    originalSearchQuery = searchQuery;
 
     console.log("Starting search:", searchQuery);
 
@@ -671,6 +650,19 @@
       }
     } else {
       handlePlay(0, 0, true);
+    }
+  }
+
+  async function openTmdbPage() {
+    if (!media || !media.id) return;
+    
+    const mediaType = media.media_type === 'movie' ? 'movie' : 'tv';
+    const tmdbUrl = `https://www.themoviedb.org/${mediaType}/${media.id}`;
+    
+    try {
+      await invoke('open_external_url', { url: tmdbUrl });
+    } catch (error) {
+      console.error('Failed to open TMDB page:', error);
     }
   }
 
@@ -1239,6 +1231,10 @@
                       <button class="menu-item" on:click={() => { reselectTorrent(); showMoreMenu = false; }}>
                         <i class="ri-refresh-line"></i>
                         <span>Reselect Torrent</span>
+                      </button>
+                      <button class="menu-item" on:click={() => { openTmdbPage(); showMoreMenu = false; }}>
+                        <i class="ri-external-link-line"></i>
+                        <span>View on TMDB</span>
                       </button>
                     </div>
                   {/if}

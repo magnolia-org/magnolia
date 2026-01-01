@@ -15,14 +15,13 @@
   import { createEventDispatcher } from "svelte";
 
   export let src = "";
-  export let metadata = null; // TMDB metadata for watch history
+  export let metadata = null;
   export let title = "";
   export let handleId = null;
   export let fileIndex = null;
   export let magnetLink = null;
   export let initialTimestamp = 0;
   
-  // Track when we should reset state (only on actual new sources, not internal src updates)
   let lastInitializedSrc = null;
   
   export let mediaId = null;
@@ -30,10 +29,10 @@
   export let seasonNum = null;
   export let episodeNum = null;
   
-  let videoMetadata = null; // Video file metadata (tracks, chapters, etc.)
+  let videoMetadata = null;
 
   let loading = true;
-  let loadingPhase = "initializing"; // "initializing" | "buffering" | "metadata" | "transcoding" | "demuxing" | "ready"
+  let loadingPhase = "initializing";
   let loadingStatus = {
     progress: 0,
     total: 0,
@@ -41,11 +40,11 @@
     peers: 0,
     status: "Initializing stream...",
     state: "checking",
-    phaseProgress: 0, // 0-100 for current phase
+    phaseProgress: 0,
   };
   let pollInterval;
-  let needsAudioTranscoding = false; // Track if audio transcoding is required
-  let metadataFetched = false; // Track if we've already fetched metadata during polling
+  let needsAudioTranscoding = false;
+  let metadataFetched = false;
 
   const dispatch = createEventDispatcher();
 
@@ -107,7 +106,6 @@
     windowMargin: 60
   };
   
-  // Subtitle customization settings
   let subtitleSettings = { ...defaultSubtitleSettings };
 
   let playerMenuElement = null;
@@ -130,6 +128,8 @@
   
   let playingInExternal = false;
   let showSkipPrompts = true;
+  let clearCacheAfterWatch = false;
+  let cacheCleared = false;
   
   let subtitleCache = {};
   let audioCache = {};
@@ -141,20 +141,31 @@
   let watchHistoryAdded = false;
   let saveTimeout;
   
-  // Extract info hash from magnet link for stable caching
   function getStableCacheId() {
     if (magnetLink) {
-      // Extract info hash from magnet link (xt=urn:btih:HASH)
       const match = magnetLink.match(/xt=urn:btih:([a-fA-F0-9]+)/);
       if (match && match[1]) {
         return match[1].toLowerCase();
       }
     }
-    // Fallback to handleId if magnet link not available
     return handleId ? String(handleId) : '0';
   }
   
-  // Load and apply track preferences for current torrent
+  async function saveCacheMetadata(cacheId) {
+    if (mediaId && mediaType && cacheId) {
+      try {
+        await invoke('save_cache_metadata', {
+          hash: cacheId,
+          tmdbId: Number(mediaId),
+          mediaType: mediaType
+        });
+        console.log(`[cache metadata] saved mapping ${cacheId.substring(0, 8)}... -> ${mediaType}/${mediaId}`);
+      } catch (error) {
+        console.error('[cache metadata] failed to save mapping:', error);
+      }
+    }
+  }
+  
   async function loadTrackPreferences() {
     if (!magnetLink) return;
     
@@ -164,7 +175,6 @@
       
       console.log('[track prefs] loaded preferences:', prefs);
       
-      // Apply audio track preference
       if (prefs.audio_track_index !== null && prefs.audio_track_index !== undefined) {
         const audioIndex = prefs.audio_track_index;
         if (videoMetadata?.audio_tracks?.[audioIndex]) {
@@ -173,13 +183,10 @@
         }
       }
       
-      // Apply subtitle preference
       if (prefs.subtitle_track_index !== null && prefs.subtitle_track_index !== undefined) {
         const subIndex = prefs.subtitle_track_index;
         
-        // Check if it's an external subtitle (negative index for Wyzie)
         if (subIndex < 0) {
-          // Wait for external subtitles to load
           if (externalSubtitles.length > 0 && prefs.subtitle_language) {
             const matchingSub = externalSubtitles.find(sub => 
               sub.language === prefs.subtitle_language
@@ -193,7 +200,6 @@
             }
           }
         } else {
-          // Embedded subtitle
           if (videoMetadata?.subtitle_tracks?.[subIndex]) {
             const track = videoMetadata.subtitle_tracks[subIndex];
             console.log(`[track prefs] auto-selecting embedded subtitle track ${subIndex}`);
@@ -218,15 +224,12 @@
     }
   }
   
-  // Save current track selection as preference
   async function saveTrackPreferences() {
     if (!magnetLink) return;
     
     try {
       let subtitleLanguage = null;
       let subtitleIndex = selectedSubtitleTrack;
-      
-      // Determine if selected subtitle is external (Wyzie)
       if (selectedSubtitleTrack >= 0) {
         const totalEmbedded = videoMetadata?.subtitle_tracks?.length || 0;
         if (selectedSubtitleTrack >= totalEmbedded) {
@@ -258,7 +261,6 @@
     }
   }
   
-  // Load subtitle from Tauri filesystem cache
   async function loadCachedSubtitle(cacheId, fileIndex, trackIndex) {
     try {
       const result = await invoke('load_subtitle_cache', { 
@@ -286,16 +288,16 @@
         trackIndex: Number(trackIndex),
         data: data
       });
+      
+      await saveCacheMetadata(cacheId);
     } catch (error) {
       console.error('[subtitle cache] failed to save to filesystem:', error);
     }
   }
 
-  // Background task to extract complete subtitle file for caching
   async function extractCompleteSubtitleInBackground(cacheId, fileIndex, trackIndex) {
     console.log('[subtitle background] starting complete extraction for caching');
     
-    // Wait a bit to let initial playback start
     await new Promise(resolve => setTimeout(resolve, 2000));
     
     try {
@@ -314,7 +316,6 @@
     }
   }
 
-  // Load audio from Tauri filesystem cache
   async function loadCachedAudio(cacheId, fileIndex, trackIndex) {
     try {
       const base64Data = await invoke('load_audio_cache', { 
@@ -334,7 +335,6 @@
     }
   }
   
-  // Helper to convert Uint8Array to base64
   function uint8ArrayToBase64(uint8Array) {
     let binary = '';
     const chunkSize = 8192;
@@ -367,12 +367,13 @@
         data: base64Data
       });
       console.log(`[audio cache] saved ${audioBuffer.length} bytes to filesystem`);
+      
+      await saveCacheMetadata(cacheId);
     } catch (error) {
       console.error('[audio cache] failed to save to filesystem:', error);
     }
   }
 
-  // Smooth seeking
   let isSeeking = false;
   let seekPreviewTime = 0;
   let seekTimeout;
@@ -398,15 +399,14 @@
   let hasSeekedToInitial = false;
   let skipSectionCheckInterval = null;
 
-  // Skip section functionality
   const skipFilters = ['intro', 'op', 'opening', 'recap', 're-cap', 'eyecatch'];
   let currentSkipSection = null;
   let showSkipButton = false;
   let skipButtonTimeout = null;
   let skipTimeRemaining = 8;
   let skipTimerInterval = null;
-  let skipTimerActive = false; // True during 8-second countdown
-  let skipAnimationKey = 0; // Force animation restart
+  let skipTimerActive = false;
+  let skipAnimationKey = 0;
   let showNextEpisodeButton = false;
 
   $: hasNextEpisode = (() => {
@@ -1086,6 +1086,14 @@
       }
     }
     
+    // Check for cache clearing on completion
+    if (duration > 0 && currentTime / duration > 0.9 && clearCacheAfterWatch && !cacheCleared && mediaId) {
+      cacheCleared = true;
+      invoke('clear_cache_item', { id: mediaId.toString() })
+        .then(() => console.log('Cleared cache for watched item:', mediaId))
+        .catch(e => console.error('Failed to clear cache', e));
+    }
+
     // Check for skip sections in chapters
     checkSkipSections();
     
@@ -2730,7 +2738,8 @@
     try {
       const settings = await invoke('get_settings');
       showSkipPrompts = settings.show_skip_prompts;
-      console.log('Loaded showSkipPrompts from backend:', showSkipPrompts);
+      clearCacheAfterWatch = settings.clear_cache_after_watch;
+      console.log('Loaded settings from backend:', settings);
     } catch (error) {
       console.error('Failed to load settings:', error);
     }

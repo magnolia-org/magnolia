@@ -47,6 +47,24 @@ impl FontManager {
         println!("saved font: {} ({} bytes)", sanitized_name, data.len());
         Ok(font_path)
     }
+
+    pub fn get_stats(&self) -> Result<(usize, u64), String> {
+        let mut count = 0;
+        let mut size = 0;
+        
+        if let Ok(entries) = fs::read_dir(&self.fonts_dir) {
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_file() {
+                        count += 1;
+                        size += metadata.len();
+                    }
+                }
+            }
+        }
+        
+        Ok((count, size))
+    }
     
     pub fn list_fonts(&self) -> Result<Vec<FontInfo>, String> {
         let mut fonts = Vec::new();

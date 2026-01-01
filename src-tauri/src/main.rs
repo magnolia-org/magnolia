@@ -10,6 +10,8 @@ mod font_manager;
 mod watch_history;
 mod track_preferences;
 mod settings;
+mod logger;
+mod cache_metadata;
 
 use search::{nyaa::NyaaProvider, limetorrents::LimeTorrentsProvider, piratebay::PirateBayProvider, 
              SearchProvider};
@@ -24,11 +26,11 @@ use font_manager::FontManager;
 use watch_history::{WatchHistoryManager, WatchHistoryItem};
 use track_preferences::TrackPreferencesManager;
 use settings::{SettingsManager, Settings};
+use logger::Logger;
+use cache_metadata::CacheMetadataManager;
 use ffmpeg_sidecar::download::{check_latest_version, download_ffmpeg_package, unpack_ffmpeg};
 
-// Check if ffmpeg is installed on system or via sidecar
 fn is_ffmpeg_installed() -> bool {
-    // First check if ffmpeg is in system PATH
     #[cfg(target_os = "windows")]
     let system_check = std::process::Command::new("where")
         .arg("ffmpeg")
@@ -49,7 +51,6 @@ fn is_ffmpeg_installed() -> bool {
         return true;
     }
     
-    // Check if sidecar ffmpeg exists
     let sidecar_exists = ffmpeg_sidecar::paths::ffmpeg_path().exists();
     if sidecar_exists {
         println!("ffmpeg found in sidecar directory");
@@ -58,7 +59,7 @@ fn is_ffmpeg_installed() -> bool {
     sidecar_exists
 }
 
-// Check and install ffmpeg if not present
+#[allow(dead_code)]
 async fn ensure_ffmpeg_installed() -> Result<(), Box<dyn std::error::Error>> {
     if is_ffmpeg_installed() {
         println!("ffmpeg is already available");
@@ -70,9 +71,7 @@ async fn ensure_ffmpeg_installed() -> Result<(), Box<dyn std::error::Error>> {
     println!("this may take a few minutes (approximately 80MB download)");
     println!("============================================");
     
-    // Run all blocking operations in spawn_blocking
     tokio::task::spawn_blocking(|| {
-        // Get sidecar directory first
         let sidecar_dir = ffmpeg_sidecar::paths::sidecar_dir()
             .map_err(|e| {
                 eprintln!("failed to get sidecar directory: {}", e);
@@ -81,7 +80,6 @@ async fn ensure_ffmpeg_installed() -> Result<(), Box<dyn std::error::Error>> {
         
         println!("sidecar directory: {:?}", sidecar_dir);
         
-        // Create sidecar directory if it doesn't exist
         std::fs::create_dir_all(&sidecar_dir)
             .map_err(|e| {
                 eprintln!("failed to create sidecar directory: {}", e);
@@ -117,12 +115,10 @@ async fn ensure_ffmpeg_installed() -> Result<(), Box<dyn std::error::Error>> {
                 format!("failed to unpack ffmpeg: {}", e)
             })?;
         
-        // Clean up downloaded archive
         let _ = std::fs::remove_file(&destination);
         
         println!("ffmpeg installed successfully to {:?}", sidecar_dir);
         
-        // Verify installation
         let ffmpeg_exe = ffmpeg_sidecar::paths::ffmpeg_path();
         if ffmpeg_exe.exists() {
             println!("ffmpeg installation verified at: {:?}", ffmpeg_exe);
@@ -161,8 +157,6 @@ async fn install_ffmpeg(app: tauri::AppHandle) -> Result<(), String> {
     
     std::fs::create_dir_all(&sidecar_dir)
         .map_err(|e| e.to_string())?;
-
-    // Use a fixed URL for Windows since check_latest_version returns a version string
     #[cfg(target_os = "windows")]
     let download_url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip".to_string();
     
@@ -172,7 +166,6 @@ async fn install_ffmpeg(app: tauri::AppHandle) -> Result<(), String> {
     
     let destination = sidecar_dir.join("ffmpeg-download.zip");
     
-    // Download with progress
     let client = reqwest::Client::new();
     let mut response = client.get(&download_url)
         .header("User-Agent", "Magnolia/1.0")
@@ -203,9 +196,8 @@ async fn install_ffmpeg(app: tauri::AppHandle) -> Result<(), String> {
         }
     }
     
-    let _ = app.emit("ffmpeg-install-progress", 100.0); // Download complete
+    let _ = app.emit("ffmpeg-install-progress", 100.0);
     
-    // Unpack manually to ensure we get both ffmpeg and ffprobe
     println!("Unpacking ffmpeg and ffprobe...");
     let file = File::open(&destination).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
@@ -214,9 +206,6 @@ async fn install_ffmpeg(app: tauri::AppHandle) -> Result<(), String> {
         let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
         let name = file.name().to_string();
         
-        // Check for ffmpeg or ffprobe binaries
-        // Windows: bin/ffmpeg.exe, bin/ffprobe.exe
-        // Linux/Mac: bin/ffmpeg, bin/ffprobe
         let is_bin = if cfg!(target_os = "windows") {
             name.ends_with("bin/ffmpeg.exe") || name.ends_with("bin/ffprobe.exe")
         } else {
@@ -279,13 +268,10 @@ async fn search_nyaa_filtered(
     
     let is_anime = media_type.as_deref() == Some("anime");
     
-    // Determine which trackers to use
     let trackers: Vec<String> = if let Some(prefs) = tracker_preference {
         if prefs.is_empty() {
-            // Empty array means auto mode
             match media_type.as_deref() {
                 Some("anime") => vec!["nyaa".to_string()],
-                // For regular TV/movies: use limetorrents, thepiratebay, and eztv (if imdb available)
                 _ => {
                     let mut t = vec!["limetorrents".to_string(), "thepiratebay".to_string()];
                     if imdb_id.is_some() {
@@ -295,7 +281,6 @@ async fn search_nyaa_filtered(
                 }
             }
         } else {
-            // Use specified trackers
             prefs
         }
     } else {
@@ -383,10 +368,8 @@ async fn search_nyaa_filtered(
         all_results
     }
     
-    // Search with primary trackers
     let mut all_results = search_trackers(trackers, normalized_query.clone(), imdb_id.clone()).await;
     
-    // If anime auto mode returned no results, fallback to regular trackers
     if is_auto_mode && is_anime && all_results.is_empty() {
         println!("Anime search returned no results, falling back to regular trackers");
         let mut fallback_trackers = vec!["limetorrents".to_string(), "thepiratebay".to_string()];
@@ -398,32 +381,16 @@ async fn search_nyaa_filtered(
     
     println!("Total results before deduplication: {}", all_results.len());
     
-    // Deduplicate by info hash (from magnet link)
     let mut seen_hashes = std::collections::HashSet::new();
     all_results.retain(|result| {
         if let Some(hash) = extract_info_hash(&result.magnet_link) {
             seen_hashes.insert(hash)
         } else {
-            true // Keep if can't extract hash
+            true
         }
     });
     
     println!("Total results after deduplication: {}", all_results.len());
-    
-    // Don't filter out results - just sort by relevance score
-    // This allows all EZTV results (and others) to be shown
-    // Matching season/episode will be prioritized via scoring
-
-    // Sort by relevance score
-    all_results.sort_by(|a, b| {
-        let score_a = calculate_relevance_score(a, season, episode, &normalized_query);
-        let score_b = calculate_relevance_score(b, season, episode, &normalized_query);
-        match score_b.cmp(&score_a) {
-            std::cmp::Ordering::Equal => b.seeds.cmp(&a.seeds),
-            other => other,
-        }
-    });
-
     Ok(all_results)
 }
 
@@ -444,17 +411,16 @@ fn calculate_relevance_score(
 ) -> i32 {
     let mut score = 0;
 
-    // Exact season/episode match is highly relevant
     if let (Some(req_s), Some(req_e)) = (requested_season, requested_episode) {
         if let Some(s) = result.season {
             if s == req_s {
-                score += 100; // Correct season
+                score += 100;
                 
                 if let Some(e) = result.episode {
                     if e == req_e {
-                        score += 100; // Exact episode match - highest priority
+                        score += 100;
                     } else {
-                        score -= 50; // Wrong episode in correct season
+                        score -= 50;
                     }
                 } else if result.is_batch {
                     score += 50; // Batch for correct season - good fallback
@@ -476,26 +442,23 @@ fn calculate_relevance_score(
             } else if quality.contains("720") {
                 score += 10;
             } else if quality.contains("2160") || quality.contains("4K") {
-                score += 5; // 4K is good but might be too large
+                score += 5;
             }
         }
     }
 
-    // Encode detection adds relevance
     if result.encode.is_some() {
         score += 5;
         
-        // Prefer modern codecs
         if let Some(ref encode) = result.encode {
             if encode.contains("265") || encode.contains("HEVC") {
-                score += 10; // Modern efficient codec
+                score += 10;
             } else if encode.contains("264") || encode.contains("AVC") {
-                score += 5; // Standard codec
+                score += 5;
             }
         }
     }
 
-    // Title similarity to query (simple word matching)
     let title_lower = result.title.to_lowercase();
     let query_lower = query.to_lowercase();
     let query_words: Vec<&str> = query_lower.split_whitespace().collect();
@@ -505,9 +468,8 @@ fn calculate_relevance_score(
     // Seed count contributes to relevance (but less than exact matches)
     score += (result.seeds.min(100) / 10) as i32; // Max 10 points from seeds
 
-    // Penalize if it's marked as batch when we want a specific episode
     if requested_episode.is_some() && result.is_batch && result.episode.is_none() {
-        score -= 30; // Batch without specific episode when we want one episode
+        score -= 30;
     }
 
     score
@@ -840,6 +802,138 @@ async fn open_in_external_player(
     Ok(())
 }
 
+#[tauri::command]
+async fn get_cache_stats(state: State<'_, MediaCache>) -> Result<Vec<media_cache::CacheGroup>, String> {
+    state.get_cache_stats().await
+}
+
+#[tauri::command]
+async fn get_font_stats(state: State<'_, FontManager>) -> Result<(usize, u64), String> {
+    state.get_stats()
+}
+
+#[tauri::command]
+async fn clear_cache_item(
+    id: String, 
+    state: State<'_, MediaCache>,
+    metadata_manager: State<'_, std::sync::Mutex<cache_metadata::CacheMetadataManager>>
+) -> Result<(), String> {
+    if id.starts_with("torrent_") {
+        state.clear_cache_by_id(&id).await?;
+        return Ok(());
+    }
+    
+    let tmdb_id: u32 = id.parse().map_err(|_| "invalid TMDB ID".to_string())?;
+    
+    let hashes_to_delete: Vec<String> = {
+        let mgr = metadata_manager.lock().unwrap();
+        mgr.mappings
+            .iter()
+            .filter(|(_, metadata)| metadata.tmdb_id == tmdb_id)
+            .map(|(hash, _)| hash.clone())
+            .collect()
+    };
+    
+    println!("[cache cleanup] found {} cache hashes for TMDB ID {}", hashes_to_delete.len(), tmdb_id);
+    
+    for hash in hashes_to_delete {
+        state.clear_cache_by_id(&hash).await?;
+        println!("[cache cleanup] cleared cache for hash: {}", &hash[..8.min(hash.len())]);
+    }
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn download_update(url: String, app_handle: tauri::AppHandle) -> Result<String, String> {
+    let temp_dir = std::env::temp_dir();
+    let file_name = url.split('/').last().unwrap_or("magnolia-installer.exe");
+    let dest_path = temp_dir.join(file_name);
+
+    println!("downloading update from: {}", url);
+    println!("saving to: {:?}", dest_path);
+
+    let response = reqwest::get(&url)
+        .await
+        .map_err(|e| format!("failed to download: {}", e))?;
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("failed to read response: {}", e))?;
+
+    std::fs::write(&dest_path, bytes)
+        .map_err(|e| format!("failed to write file: {}", e))?;
+
+    println!("download complete: {:?}", dest_path);
+    Ok(dest_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn install_update(installer_path: String, app_handle: tauri::AppHandle) -> Result<(), String> {
+    println!("running installer: {}", installer_path);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        use std::os::windows::process::CommandExt;
+
+        // Run NSIS installer with /S flag for silent install
+        let status = Command::new(&installer_path)
+            .arg("/S")
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .status()
+            .map_err(|e| format!("failed to run installer: {}", e))?;
+
+        if !status.success() {
+            return Err("installer failed".to_string());
+        }
+
+        // Delete the installer after successful install
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        let _ = std::fs::remove_file(&installer_path);
+        println!("installer removed: {}", installer_path);
+
+        // Exit the app so the new version can start
+        std::process::exit(0);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("auto-update only supported on windows".to_string())
+    }
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(&["/C", "start", &url])
+            .creation_flags(0x08000000)
+            .spawn()
+            .map_err(|e| format!("failed to open URL: {}", e))?;
+    }
+    
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("failed to open URL: {}", e))?;
+    }
+    
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("failed to open URL: {}", e))?;
+    }
+    
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -875,6 +969,14 @@ fn main() {
             let font_manager = FontManager::new(&app_handle)
                 .expect("failed to create font manager");
             app.manage(font_manager);
+
+            let logger = Logger::new(&app_handle)
+                .expect("failed to create logger");
+            app.manage(logger);
+
+            let cache_metadata_manager = CacheMetadataManager::new(&app_handle)
+                .expect("failed to create cache metadata manager");
+            app.manage(std::sync::Mutex::new(cache_metadata_manager));
 
             let torrent_dir = app_data_dir.join("torrents");
             let torrent_manager = tauri::async_runtime::block_on(async {
@@ -951,7 +1053,17 @@ fn main() {
             check_external_player,
             open_in_external_player,
             check_ffmpeg,
-            install_ffmpeg
+            install_ffmpeg,
+            get_cache_stats,
+            get_font_stats,
+            clear_cache_item,
+            logger::log_message,
+            cache_metadata::save_cache_metadata,
+            cache_metadata::get_cache_metadata,
+            cache_metadata::get_all_cache_metadata,
+            download_update,
+            install_update,
+            open_external_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

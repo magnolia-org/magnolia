@@ -22,7 +22,6 @@ export class MKVDemuxer {
 
   async initialize(src) {
     try {
-      // Use absolute URL for WASM file
       const wasmUrl = new URL('/web-demuxer.wasm', window.location.origin).href;
       console.log('WASM URL:', wasmUrl);
 
@@ -57,7 +56,6 @@ export class MKVDemuxer {
   }
 
   async processMediaInfo() {
-    // web-demuxer returns streams in a flat array
     const streams = this.mediaInfo.streams || [];
     
     console.log('Processing streams:', streams.length, 'total streams');
@@ -104,11 +102,9 @@ export class MKVDemuxer {
         this.subtitleTracks.push(subtitleTrack);
         console.log('Found subtitle track:', subtitleTrack);
       } else if (codecType === 'attachment') {
-        // Handle embedded fonts
         const filename = stream.tags?.filename || stream.filename;
         const mimetype = stream.tags?.mimetype || stream.mimetype;
         
-        // Check if it's a font file
         const isFontFile = mimetype?.startsWith('font/') || 
                           mimetype?.includes('ttf') ||
                           mimetype?.includes('otf') ||
@@ -178,7 +174,6 @@ export class MKVDemuxer {
       this.readVideoStream();
     }
 
-    // Only extract the selected audio track using its stream index
     if (this.audioTracks.length > 0 && selectedAudioTrackId < this.audioTracks.length) {
       const track = this.audioTracks[selectedAudioTrackId];
       console.log(`Starting audio extraction for track ${selectedAudioTrackId}, stream index ${track.id}`);

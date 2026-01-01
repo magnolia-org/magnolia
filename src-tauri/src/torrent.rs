@@ -17,19 +17,13 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::sync::Mutex;
+// use tokio::sync::Mutex;
 use ffmpeg_sidecar::paths::ffmpeg_path;
 
-// Unsupported audio codecs that need transcoding for web playback
-// These codecs are typically not supported by web browsers natively
 const UNSUPPORTED_AUDIO_CODECS: &[&str] = &[
-    // Lossless/HD formats
     "truehd", "mlp", "pcm", "dsd",
-    // DTS variants
     "dts", "dca", "dts-hd", "dtshd", "dts_hd", "dtse",
-    // Dolby variants  
     "ac3", "eac3", "ac-3", "e-ac-3", "dolby", "atmos",
-    // Other
     "cook", "ra", "sipr", "wma", "wmav1", "wmav2", "wmapro",
 ];
 

@@ -474,23 +474,9 @@ export class SRTSubtitleRenderer {
   displaySubtitle(text) {
     if (!this.container) return;
     
-    // Parse position tags
-    let positionStyle = '';
-    const posMatch = text.match(/X1:(\d+)\s*X2:(\d+)\s*Y1:(\d+)\s*Y2:(\d+)/);
-    if (posMatch) {
-      const [, x1, x2, y1, y2] = posMatch.map(Number);
-      // Remove position tags from text
-      text = text.replace(/X1:\d+\s*X2:\d+\s*Y1:\d+\s*Y2:\d+/g, '').trim();
-      
-      // Calculate position (assuming video is 100% width/height)
-      const leftPercent = (x1 / 1920) * 100; // Assuming 1920x1080 reference
-      const topPercent = (y1 / 1080) * 100;
-      positionStyle = `left: ${leftPercent}%; top: ${topPercent}%; bottom: auto; transform: none;`;
-    }
+    const parsed = this.parsePositioningTags(text);
     
-    // Convert newlines to <br> and format SRT tags
-    const htmlText = text
-      .split('\n')
+    const htmlText = parsed.lines
       .map(line => this.formatSRT(line))
       .join('<br>');
     
@@ -500,17 +486,141 @@ export class SRTSubtitleRenderer {
         background: rgba(0, 0, 0, ${this.styles.backgroundOpacity});
         padding: 8px 16px;
         border-radius: 4px;
-        font-size: ${this.styles.fontSize}px;
-        font-weight: 500;
-        color: ${this.styles.color};
+        font-size: ${parsed.fontSize || this.styles.fontSize}px;
+        font-weight: ${parsed.bold ? 'bold' : '500'};
+        font-style: ${parsed.italic ? 'italic' : 'normal'};
+        text-decoration: ${parsed.underline ? 'underline' : 'none'};
+        font-family: ${parsed.fontName || 'inherit'};
+        color: ${parsed.color || this.styles.color};
         text-shadow: ${this.styles.textShadow ? `2px 2px 2px ${this.styles.textShadowColor}` : 'none'};
         line-height: 1.4;
         max-width: 80%;
-        ${positionStyle}
+        ${parsed.positionStyle}
       ">
         ${htmlText}
       </div>
     `;
+  }
+
+  parsePositioningTags(text) {
+    const result = {
+      lines: [],
+      positionStyle: '',
+      fontSize: null,
+      bold: false,
+      italic: false,
+      underline: false,
+      color: null,
+      fontName: null
+    };
+    
+    let workingText = text;
+    
+    // Parse {\an1-9} alignment tags (numpad style)
+    const anMatch = workingText.match(/\{\\an(\d)\}/);
+    if (anMatch) {
+      const alignment = parseInt(anMatch[1]);
+      result.positionStyle = this.getAlignmentStyle(alignment);
+      workingText = workingText.replace(/\{\\an\d\}/g, '');
+    }
+    
+    // Parse legacy {\a1-11} alignment tags
+    const aMatch = workingText.match(/\{\\a(\d{1,2})\}/);
+    if (aMatch && !anMatch) {
+      const alignment = parseInt(aMatch[1]);
+      result.positionStyle = this.getLegacyAlignmentStyle(alignment);
+      workingText = workingText.replace(/\{\\a\d{1,2}\}/g, '');
+    }
+    
+    // Parse {\pos(x,y)} absolute positioning
+    const posMatch = workingText.match(/\{\\pos\((\d+(?:\.\d+)?),(\d+(?:\.\d+)?)\)\}/);
+    if (posMatch) {
+      const x = parseFloat(posMatch[1]);
+      const y = parseFloat(posMatch[2]);
+      result.positionStyle = `position: absolute; left: ${x}px; top: ${y}px; transform: none;`;
+      workingText = workingText.replace(/\{\\pos\([^)]+\)\}/g, '');
+    }
+    
+    // Parse legacy X1:Y1:X2:Y2 position tags
+    const legacyPosMatch = workingText.match(/X1:(\d+)\s*X2:(\d+)\s*Y1:(\d+)\s*Y2:(\d+)/);
+    if (legacyPosMatch && !posMatch && !anMatch && !aMatch) {
+      const [, x1, x2, y1, y2] = legacyPosMatch.map(Number);
+      const leftPercent = (x1 / 1920) * 100;
+      const topPercent = (y1 / 1080) * 100;
+      result.positionStyle = `left: ${leftPercent}%; top: ${topPercent}%; bottom: auto; transform: none;`;
+      workingText = workingText.replace(/X1:\d+\s*X2:\d+\s*Y1:\d+\s*Y2:\d+/g, '');
+    }
+    
+    // Parse {\fs<size>} font size
+    const fsMatch = workingText.match(/\{\\fs(\d+)\}/);
+    if (fsMatch) {
+      result.fontSize = parseInt(fsMatch[1]);
+      workingText = workingText.replace(/\{\\fs\d+\}/g, '');
+    }
+    
+    // Parse {\fn<name>} font name
+    const fnMatch = workingText.match(/\{\\fn([^}]+)\}/);
+    if (fnMatch) {
+      result.fontName = fnMatch[1];
+      workingText = workingText.replace(/\{\\fn[^}]+\}/g, '');
+    }
+    
+    // Parse {\c&HBBGGRR&} or {\1c&HBBGGRR&} color (BGR hex format)
+    const colorMatch = workingText.match(/\{\\(?:1?c)&H([0-9A-Fa-f]{6})&\}/);
+    if (colorMatch) {
+      const bgr = colorMatch[1];
+      const b = bgr.substr(0, 2);
+      const g = bgr.substr(2, 2);
+      const r = bgr.substr(4, 2);
+      result.color = `#${r}${g}${b}`;
+      workingText = workingText.replace(/\{\\(?:1?c)&H[0-9A-Fa-f]{6}&\}/g, '');
+    }
+    
+    // Parse {\b1} {\b0} bold
+    if (/\{\\b1\}/.test(workingText)) {
+      result.bold = true;
+      workingText = workingText.replace(/\{\\b[01]\}/g, '');
+    }
+    
+    // Parse {\i1} {\i0} italic
+    if (/\{\\i1\}/.test(workingText)) {
+      result.italic = true;
+      workingText = workingText.replace(/\{\\i[01]\}/g, '');
+    }
+    
+    // Parse {\u1} {\u0} underline
+    if (/\{\\u1\}/.test(workingText)) {
+      result.underline = true;
+      workingText = workingText.replace(/\{\\u[01]\}/g, '');
+    }
+    
+    result.lines = workingText.trim().split('\n');
+    return result;
+  }
+
+  getAlignmentStyle(alignment) {
+    const positions = {
+      1: 'bottom: 20px; left: 20px; right: auto; text-align: left; transform: none;',
+      2: 'bottom: 20px; left: 50%; right: auto; text-align: center; transform: translateX(-50%);',
+      3: 'bottom: 20px; right: 20px; left: auto; text-align: right; transform: none;',
+      4: 'top: 50%; left: 20px; right: auto; bottom: auto; text-align: left; transform: translateY(-50%);',
+      5: 'top: 50%; left: 50%; right: auto; bottom: auto; text-align: center; transform: translate(-50%, -50%);',
+      6: 'top: 50%; right: 20px; left: auto; bottom: auto; text-align: right; transform: translateY(-50%);',
+      7: 'top: 20px; left: 20px; right: auto; bottom: auto; text-align: left; transform: none;',
+      8: 'top: 20px; left: 50%; right: auto; bottom: auto; text-align: center; transform: translateX(-50%);',
+      9: 'top: 20px; right: 20px; left: auto; bottom: auto; text-align: right; transform: none;'
+    };
+    return positions[alignment] || '';
+  }
+
+  getLegacyAlignmentStyle(alignment) {
+    const map = {
+      1: 1, 2: 2, 3: 3,
+      9: 4, 10: 5, 11: 6,
+      5: 7, 6: 8, 7: 9
+    };
+    const modern = map[alignment];
+    return modern ? this.getAlignmentStyle(modern) : '';
   }
 
   hideSubtitle() {
