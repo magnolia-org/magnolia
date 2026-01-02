@@ -496,6 +496,19 @@ async fn save_torrent_selection(
         .await;
     Ok(())
 }
+
+#[tauri::command]
+async fn save_multiple_torrent_selections(
+    tracking: State<'_, TrackingManager>,
+    show_id: u32,
+    selections: Vec<(u32, u32, String, usize)>,
+) -> Result<(), String> {
+    tracking
+        .save_multiple_selections(show_id, selections)
+        .await;
+    Ok(())
+}
+
 #[tauri::command]
 async fn get_saved_selection(
     tracking: State<'_, TrackingManager>,
@@ -1027,6 +1040,7 @@ fn main() {
             search_nyaa_filtered,
             search_eztv_by_imdb,
             save_torrent_selection,
+            save_multiple_torrent_selections,
             get_saved_selection,
             get_all_torrent_selections,
             remove_saved_selection,

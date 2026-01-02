@@ -26,7 +26,6 @@
 
 ## Download
 ### Get the latest build [here](https://github.com/chwair/magnolia/releases/latest)
-Windows
 (Windows only for now, MacOS and Linux support is planned)
 
 ## Building

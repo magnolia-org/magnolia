@@ -359,10 +359,6 @@
     color: var(--text-primary);
 }
 
-.more-menu .menu-item span {
-    flex: 1;
-}
-
 @keyframes slideDown {
     from {
         opacity: 0;

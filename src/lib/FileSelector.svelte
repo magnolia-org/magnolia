@@ -15,6 +15,11 @@
     export let showName = "";
     export let seasons = [];
     export let isMovie = false;
+    export let availableTorrents = [];
+    export let currentTorrentIndex = 0;
+    export let currentAssignments = {};
+    export let isLoading = false;
+    export let isSwitchingTorrent = false;
 
     const dispatch = createEventDispatcher();
 
@@ -27,6 +32,18 @@
     let selectedSeason = 1;
     let selectedStartEpisode = null;
     let showPreviewModal = false;
+    
+    // Initialize assignments from current assignments
+    $: if (currentAssignments && Object.keys(currentAssignments).length > 0) {
+        const newAssignments = {};
+        for (const [key, value] of Object.entries(currentAssignments)) {
+            const fileIndex = files.findIndex(f => f.index === value.fileIndex);
+            if (fileIndex !== -1) {
+                newAssignments[value.fileIndex] = { season: value.season, episode: value.episode };
+            }
+        }
+        assignments = newAssignments;
+    }
 
     $: sortedFiles = sortFiles(files, sortOrder);
     $: highlightPatterns = findDifferingPatterns(sortedFiles.map(f => f.name));
@@ -211,6 +228,10 @@
     function close() {
         dispatch("close");
     }
+    
+    async function switchTorrent(index) {
+        dispatch("switchTorrent", { index });
+    }
 
     function getFileForEpisode(season, episode) {
         const entry = Object.entries(assignments).find(([_, a]) => a.season === season && a.episode === episode);
@@ -243,6 +264,33 @@
                 <span class="header-subtitle">{showName} • {files.length} files</span>
             </div>
         </div>
+        
+        {#if isLoading || isSwitchingTorrent}
+            <div class="loading-overlay">
+                <div>
+                    <div class="loading-spinner"></div>
+                    <p>{isSwitchingTorrent ? 'Loading torrent files...' : 'Loading assignments...'}</p>
+                </div>
+            </div>
+        {/if}
+        
+        {#if availableTorrents && availableTorrents.length > 1}
+            <div class="torrent-switcher">
+                <span class="switcher-label">Torrent:</span>
+                <div class="torrent-tabs">
+                    {#each availableTorrents as torrent, index}
+                        <button 
+                            class="torrent-tab" 
+                            class:active={index === currentTorrentIndex}
+                            on:click={() => switchTorrent(index)}
+                        >
+                            <span class="tab-index">#{index + 1}</span>
+                            <span class="tab-name">{torrent.fileName}</span>
+                        </button>
+                    {/each}
+                </div>
+            </div>
+        {/if}
 
         <div class="main-area">
             <div class="file-list-section">
@@ -452,6 +500,7 @@
         flex-direction: column;
         box-shadow: 0 25px 80px rgba(0, 0, 0, 0.6);
         overflow: hidden;
+        position: relative;
     }
 
     .modal-header {
@@ -1090,6 +1139,122 @@
         background: var(--accent-color);
         border: none;
         border-radius: var(--border-radius-sm);
+    }
+    
+    .torrent-switcher {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-md);
+        padding: var(--spacing-md) var(--spacing-2xl);
+        background: rgba(0, 0, 0, 0.3);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    
+    .switcher-label {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    
+    .torrent-tabs {
+        display: flex;
+        gap: var(--spacing-xs);
+        flex: 1;
+        overflow-x: auto;
+    }
+    
+    .torrent-tab {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-sm);
+        padding: 6px 12px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: var(--border-radius-sm);
+        color: var(--text-secondary);
+        font-size: 12px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        white-space: nowrap;
+        font-family: inherit;
+    }
+    
+    .torrent-tab:hover {
+        background: rgba(255, 255, 255, 0.08);
+        border-color: rgba(255, 255, 255, 0.15);
+        color: var(--text-primary);
+    }
+    
+    .torrent-tab.active {
+        background: rgba(211, 118, 195, 0.2);
+        border-color: rgba(211, 118, 195, 0.4);
+        color: var(--accent-color);
+    }
+    
+    .tab-index {
+        font-weight: 700;
+        font-size: 11px;
+    }
+    
+    .tab-name {
+        max-width: 200px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    
+    .loading-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.92);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 100;
+        backdrop-filter: blur(12px);
+        border-radius: var(--border-radius-lg);
+    }
+    
+    .loading-overlay > div {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: var(--spacing-lg);
+        padding: var(--spacing-3xl);
+        background: var(--bg-primary);
+        border-radius: var(--border-radius-lg);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+    }
+    
+    .loading-spinner {
+        width: 40px;
+        height: 40px;
+        border: 3px solid rgba(255, 255, 255, 0.1);
+        border-top-color: var(--accent-color);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+    }
+    
+    .loading-overlay p {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 500;
+        color: var(--text-primary);
+    }
+    
+    @keyframes spin {
+        to {
+            transform: rotate(360deg);
+        }
+    }
+    
+    .btn-primary {
         color: #000;
         font-size: 13px;
         font-weight: 600;

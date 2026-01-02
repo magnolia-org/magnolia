@@ -70,6 +70,28 @@ impl TrackingManager {
             let _ = fs::write(&self.file_path, content);
         }
     }
+    
+    pub async fn save_multiple_selections(&self, show_id: u32, selections: Vec<(u32, u32, String, usize)>) {
+        let mut data = self.data.write().await;
+        
+        let show = data.shows.entry(show_id).or_default();
+        
+        for (season, episode, magnet_link, file_index) in selections {
+            let season_data = show.seasons.entry(season).or_insert_with(|| SeasonTorrent {
+                episodes: HashMap::new(),
+            });
+            
+            season_data.episodes.insert(episode, EpisodeTorrent {
+                magnet_link,
+                file_index,
+            });
+        }
+
+        // Persist to disk
+        if let Ok(content) = serde_json::to_string_pretty(&*data) {
+            let _ = fs::write(&self.file_path, content);
+        }
+    }
 
     pub async fn get_selection(&self, show_id: u32, season: u32, episode: u32) -> Option<EpisodeTorrent> {
         let data = self.data.read().await;

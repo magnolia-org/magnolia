@@ -2823,16 +2823,16 @@
     clearTimeout(controlsTimeout);
     clearTimeout(indicatorTimeout);
 
-    // Stop and cache the torrent stream when leaving video player
+    // Pause torrent stream when leaving video player (don't delete)
     if (handleId !== null) {
       try {
         await invoke("stop_stream", {
           handleId: handleId,
-          deleteFiles: true // Delete files to save space
+          deleteFiles: false
         });
-        console.log("Torrent stream stopped and files deleted on component destroy");
+        console.log("[torrent] stream paused on component destroy");
       } catch (error) {
-        console.error("Failed to stop stream on destroy:", error);
+        console.error("[torrent] failed to pause stream on destroy:", error);
       }
     }
 

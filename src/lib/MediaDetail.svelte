@@ -65,6 +65,7 @@
   let showTorrentManager = false;
   let showMoreMenu = false;
   let torrentManagerRefresh = 0;
+  let torrentFileCache = {};
 
   $: {
     if (media && !media.media_type) {
@@ -675,6 +676,92 @@
   function handleTorrentManagerClose() {
     showTorrentManager = false;
   }
+  
+  async function handleTorrentManagerManualAssignment(event) {
+    const { torrents, showId } = event.detail;
+    
+    if (!torrents || torrents.length === 0) {
+      showError("No torrents found to assign files from.");
+      return;
+    }
+    
+    // Close torrent manager and show loading
+    showTorrentManager = false;
+    showFileSelector = true;
+    availableFiles = [];
+    
+    // Load files from first torrent initially
+    const firstTorrent = torrents[0];
+    try {
+      // Check cache first
+      let handleId;
+      let files;
+      
+      if (torrentFileCache[firstTorrent.magnetLink]) {
+        console.log('[cache] using cached file list for torrent');
+        files = torrentFileCache[firstTorrent.magnetLink].files;
+        handleId = torrentFileCache[firstTorrent.magnetLink].handleId;
+      } else {
+        console.log('[cache] fetching new file list for torrent');
+        handleId = await invoke("add_torrent", {
+          magnetOrUrl: firstTorrent.magnetLink,
+        });
+        const info = await invoke("get_torrent_info", { handleId });
+        
+        files = info.files.filter(f => {
+          const ext = f.name.toLowerCase();
+          return ext.endsWith('.mkv') || ext.endsWith('.mp4') || 
+                 ext.endsWith('.avi') || ext.endsWith('.mov') || 
+                 ext.endsWith('.webm') || ext.endsWith('.m4v');
+        });
+        
+        // Cache the results
+        torrentFileCache[firstTorrent.magnetLink] = { files, handleId };
+      }
+      
+      availableFiles = files;
+      
+      if (availableFiles.length === 0) {
+        showError("No video files found in torrents.");
+        return;
+      }
+      
+      // Get current assignments
+      const allSelections = await invoke("get_all_torrent_selections", {
+        showId: details.id,
+      });
+      
+      // Build current assignments map
+      const currentAssignmentsMap = {};
+      if (allSelections && allSelections.seasons) {
+        for (const [seasonNum, seasonData] of Object.entries(allSelections.seasons)) {
+          for (const [episodeNum, episodeData] of Object.entries(seasonData.episodes)) {
+            if (episodeData.magnet_link === firstTorrent.magnetLink) {
+              const key = `${seasonNum}-${episodeNum}`;
+              currentAssignmentsMap[key] = {
+                season: parseInt(seasonNum),
+                episode: parseInt(episodeNum),
+                fileIndex: episodeData.file_index
+              };
+            }
+          }
+        }
+      }
+      
+      // Store all torrents for switching
+      selectedTorrentForManual = { 
+        ...firstTorrent,
+        allTorrents: torrents,
+        currentTorrentIndex: 0,
+        currentAssignments: currentAssignmentsMap
+      };
+      manualHandleId = handleId;
+      
+    } catch (err) {
+      console.error("error loading torrent for manual assignment:", err);
+      showError("Failed to load torrent files.");
+    }
+  }
 
   async function onTorrentSelect(event) {
     const torrent = event.detail;
@@ -755,6 +842,8 @@
         // 4. Auto-assign ALL other video files that have episode numbers
         if (videoFiles.length > 1 && !isMovie) {
           console.log("Multi-episode torrent detected, auto-assigning all episodes");
+          const batchSelections = [];
+          
           for (const file of videoFiles) {
             if (file.index === matchedFile.index) continue; // Skip the one we already saved
             
@@ -797,14 +886,16 @@
             
             if (episode && episode > 0) {
               console.log(`Auto-assigning S${season}E${episode} to file: ${filename}`);
-              await invoke("save_torrent_selection", {
-                showId: details.id,
-                season: season,
-                episode: episode,
-                magnetLink: torrent.magnet_link,
-                fileIndex: file.index,
-              });
+              batchSelections.push([season, episode, torrent.magnet_link, file.index]);
             }
+          }
+          
+          // Save all selections in one batch
+          if (batchSelections.length > 0) {
+            await invoke("save_multiple_torrent_selections", {
+              showId: details.id,
+              selections: batchSelections,
+            });
           }
         }
 
@@ -1032,7 +1123,11 @@
       return;
     }
     
-    selectedTorrentForManual = torrent;
+    selectedTorrentForManual = {
+      ...torrent,
+      allTorrents: [{ magnetLink: torrent.magnet_link, fileName: torrent.title }],
+      currentTorrentIndex: 0
+    };
     manualHandleId = handleId;
     showFileSelector = true;
     showTorrentSelector = false;
@@ -1046,6 +1141,8 @@
       return;
     }
 
+    const magnetLink = selectedTorrentForManual.magnet_link || selectedTorrentForManual.magnetLink;
+
     try {
       for (const { file, season, episode } of assignments) {
         console.log(`saving S${season}E${episode} for file: ${file.name}`);
@@ -1053,7 +1150,7 @@
           showId: details.id,
           season: season,
           episode: episode,
-          magnetLink: selectedTorrentForManual.magnet_link,
+          magnetLink: magnetLink,
           fileIndex: file.index,
         });
       }
@@ -1061,15 +1158,19 @@
       torrentManagerRefresh++;
 
       let playAssignment = assignments.find(
-        a => a.season === pendingPlayRequest.season && a.episode === pendingPlayRequest.episode
+        a => a.season === pendingPlayRequest?.season && a.episode === pendingPlayRequest?.episode
       );
       
       if (!playAssignment) {
         playAssignment = assignments[0];
-        pendingPlayRequest = { season: playAssignment.season, episode: playAssignment.episode };
+        if (pendingPlayRequest) {
+          pendingPlayRequest = { season: playAssignment.season, episode: playAssignment.episode };
+        }
       }
 
-      startStream(selectedTorrentForManual.magnet_link, playAssignment.file.index, manualHandleId);
+      if (pendingPlayRequest) {
+        startStream(magnetLink, playAssignment.file.index, manualHandleId);
+      }
       closeFileSelector();
     } catch (err) {
       console.error("error saving file selections:", err);
@@ -1082,6 +1183,91 @@
     availableFiles = [];
     selectedTorrentForManual = null;
     manualHandleId = null;
+  }
+  
+  async function handleFileSelectorSwitchTorrent(event) {
+    const { index } = event.detail;
+    
+    if (!selectedTorrentForManual?.allTorrents || !selectedTorrentForManual.allTorrents[index]) {
+      return;
+    }
+    
+    const newTorrent = selectedTorrentForManual.allTorrents[index];
+    
+    // Set loading state
+    selectedTorrentForManual = {
+      ...selectedTorrentForManual,
+      isSwitchingTorrent: true
+    };
+    
+    try {
+      // Check cache first
+      let handleId;
+      let files;
+      
+      if (torrentFileCache[newTorrent.magnetLink]) {
+        console.log('[cache] using cached file list for torrent');
+        files = torrentFileCache[newTorrent.magnetLink].files;
+        handleId = torrentFileCache[newTorrent.magnetLink].handleId;
+      } else {
+        console.log('[cache] fetching new file list for torrent');
+        handleId = await invoke("add_torrent", {
+          magnetOrUrl: newTorrent.magnetLink,
+        });
+        const info = await invoke("get_torrent_info", { handleId });
+        
+        files = info.files.filter(f => {
+          const ext = f.name.toLowerCase();
+          return ext.endsWith('.mkv') || ext.endsWith('.mp4') || 
+                 ext.endsWith('.avi') || ext.endsWith('.mov') || 
+                 ext.endsWith('.webm') || ext.endsWith('.m4v');
+        });
+        
+        // Cache the results
+        torrentFileCache[newTorrent.magnetLink] = { files, handleId };
+      }
+      
+      availableFiles = files;
+      
+      // Get current assignments for this torrent
+      const allSelections = await invoke("get_all_torrent_selections", {
+        showId: details.id,
+      });
+      
+      // Build current assignments map for this torrent
+      const currentAssignmentsMap = {};
+      if (allSelections && allSelections.seasons) {
+        for (const [seasonNum, seasonData] of Object.entries(allSelections.seasons)) {
+          for (const [episodeNum, episodeData] of Object.entries(seasonData.episodes)) {
+            if (episodeData.magnet_link === newTorrent.magnetLink) {
+              const key = `${seasonNum}-${episodeNum}`;
+              currentAssignmentsMap[key] = {
+                season: parseInt(seasonNum),
+                episode: parseInt(episodeNum),
+                fileIndex: episodeData.file_index
+              };
+            }
+          }
+        }
+      }
+      
+      selectedTorrentForManual = {
+        ...newTorrent,
+        allTorrents: selectedTorrentForManual.allTorrents,
+        currentTorrentIndex: index,
+        currentAssignments: currentAssignmentsMap,
+        isSwitchingTorrent: false
+      };
+      manualHandleId = handleId;
+      
+    } catch (err) {
+      console.error("error switching torrent:", err);
+      showError("Failed to load files from the selected torrent.");
+      selectedTorrentForManual = {
+        ...selectedTorrentForManual,
+        isSwitchingTorrent: false
+      };
+    }
   }
 </script>
 
@@ -1730,6 +1916,8 @@
     isAnime={isAnime()}
     hasImdbId={!!currentImdbId}
     isTVShow={media.media_type === 'tv'}
+    currentSeason={pendingPlayRequest?.season}
+    currentEpisode={pendingPlayRequest?.episode}
     on:select={onTorrentSelect}
     on:close={closeTorrentSelector}
     on:research={handleResearch}
@@ -1742,8 +1930,14 @@
     showName={details.title || details.name}
     seasons={details.seasons || []}
     isMovie={media.media_type === 'movie'}
+    availableTorrents={selectedTorrentForManual?.allTorrents || []}
+    currentTorrentIndex={selectedTorrentForManual?.currentTorrentIndex || 0}
+    currentAssignments={selectedTorrentForManual?.currentAssignments || {}}
+    isLoading={availableFiles.length === 0 && showFileSelector}
+    isSwitchingTorrent={selectedTorrentForManual?.isSwitchingTorrent || false}
     on:confirm={handleFileSelectorConfirm}
     on:close={closeFileSelector}
+    on:switchTorrent={handleFileSelectorSwitchTorrent}
   />
 {/if}
 
@@ -1755,5 +1949,6 @@
     refreshTrigger={torrentManagerRefresh}
     on:selectTorrent={handleTorrentManagerSelect}
     on:close={handleTorrentManagerClose}
+    on:openManualAssignment={handleTorrentManagerManualAssignment}
   />
 {/if}

@@ -378,6 +378,24 @@
   background: rgba(255, 255, 255, 0.08);
 }
 
+.torrent-row.matches-episode {
+  background: linear-gradient(90deg, rgba(211, 118, 195, 0.08) 0%, rgba(211, 118, 195, 0.04) 100%);
+  border-left: 2px solid rgba(211, 118, 195, 0.6);
+  padding-left: calc(var(--spacing-2xl) - 2px);
+}
+
+.torrent-row.matches-episode:hover {
+  background: linear-gradient(90deg, rgba(211, 118, 195, 0.14) 0%, rgba(211, 118, 195, 0.08) 100%);
+}
+
+.torrent-row.matches-episode .torrent-title::after {
+  background: linear-gradient(to right, transparent, #140F13);
+}
+
+.torrent-row.matches-episode:hover .torrent-title::after {
+  background: linear-gradient(to right, transparent, #1D141B);
+}
+
 .col-name {
   flex: 1;
   font-weight: 500;

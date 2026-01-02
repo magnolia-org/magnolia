@@ -1312,6 +1312,17 @@ impl TorrentManager {
                 tracing::error!("Error stopping torrent {}: {}", handle_id, e);
             }
         }
+        
+        // Also delete the cache file
+        let cache_path = self.download_dir.join("torrent_cache.json");
+        if cache_path.exists() {
+            if let Err(e) = std::fs::remove_file(&cache_path) {
+                tracing::error!("Failed to remove cache file: {}", e);
+            } else {
+                tracing::info!("Removed torrent cache file");
+            }
+        }
+        
         Ok(())
     }
 
@@ -1433,20 +1444,23 @@ async fn extract_mkv_metadata_ffprobe(file_path: &std::path::Path) -> Result<Mkv
                     let long_name_lower = codec_long_name.to_lowercase();
                     let profile_lower = profile.to_lowercase();
                     
-                    let needs_transcoding = UNSUPPORTED_AUDIO_CODECS.iter().any(|unsupported| {
+                    // Whitelist of browser-supported codecs
+                    let is_known_supported = matches!(codec_lower.as_str(), 
+                        "aac" | "mp3" | "opus" | "vorbis" | "mp2" | "mp1" | "flac"
+                    ) && !long_name_lower.contains("truehd") 
+                      && !long_name_lower.contains("dts")
+                      && !long_name_lower.contains("atmos");
+                    
+                    // Check against blacklist of known unsupported codecs
+                    let is_known_unsupported = UNSUPPORTED_AUDIO_CODECS.iter().any(|unsupported| {
                         codec_lower == *unsupported 
                             || codec_lower.contains(unsupported)
                             || long_name_lower.contains(unsupported)
                             || profile_lower.contains(unsupported)
                     });
                     
-                    // Also check if it's NOT a known supported codec (whitelist approach as fallback)
-                    let is_known_supported = matches!(codec_lower.as_str(), 
-                        "aac" | "mp3" | "opus" | "vorbis" | "mp2" | "mp1" | "flac"
-                    );
-                    
-                    // If codec is unknown and not in supported list, mark for transcoding
-                    let needs_transcoding = needs_transcoding || (!is_known_supported && codec_lower != "unknown");
+                    // Transcode if explicitly unsupported OR if not in the supported whitelist
+                    let needs_transcoding = is_known_unsupported || !is_known_supported;
                     
                     tracing::info!("Audio track {}: codec='{}' ({}), profile='{}', needs_transcoding={}", 
                         audio_index, codec_name, codec_long_name, profile, needs_transcoding);

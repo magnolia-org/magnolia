@@ -13,6 +13,8 @@
     export let isAnime = false;
     export let hasImdbId = false;
     export let isTVShow = false;
+    export let currentSeason = null;
+    export let currentEpisode = null;
 
     const dispatch = createEventDispatcher();
     
@@ -39,6 +41,7 @@
     let selectedEncode = "all";
     let selectedAudioCodec = "all";
     let hideIncompatible = true;
+    let prioritizeMatching = true;
     let sortBy = "relevance";
     let sortDirection = "desc";
     let searchFilter = "";
@@ -63,6 +66,40 @@
         const compatible = ['AAC', 'MP3', 'Opus', 'Vorbis', 'FLAC'];
         return compatible.includes(codec);
     }
+    
+    function torrentMatchesCurrentEpisode(torrent) {
+        if (!currentSeason || !currentEpisode) return false;
+        
+        // Check if torrent has explicit season/episode info
+        if (torrent.season && torrent.episode) {
+            return torrent.season === currentSeason && torrent.episode === currentEpisode;
+        }
+        
+        // Check title for S01E05 or similar patterns
+        const title = torrent.title.toUpperCase();
+        const s = currentSeason.toString().padStart(2, '0');
+        const e = currentEpisode.toString().padStart(2, '0');
+        
+        if (title.includes(`S${s}E${e}`) || title.includes(`${currentSeason}X${e}`)) {
+            return true;
+        }
+        
+        // Check for batch torrents that cover this season
+        if (torrent.is_batch || title.includes('BATCH') || title.includes('SEASON')) {
+            // If torrent has season info, check if it matches
+            if (torrent.season) {
+                return torrent.season === currentSeason;
+            }
+            // Check title for season number
+            const seasonMatch = title.match(/S(\d{1,2})/i) || title.match(/SEASON[\s._-]*(\d{1,2})/i);
+            if (seasonMatch) {
+                const torrentSeason = parseInt(seasonMatch[1]);
+                return torrentSeason === currentSeason;
+            }
+        }
+        
+        return false;
+    }
 
     $: filteredResults = results
         .filter(torrent => {
@@ -78,6 +115,13 @@
             return true;
         })
         .sort((a, b) => {
+            // Prioritize matching torrents first if enabled
+            if (prioritizeMatching) {
+                const aMatches = torrentMatchesCurrentEpisode(a);
+                const bMatches = torrentMatchesCurrentEpisode(b);
+                if (aMatches && !bMatches) return -1;
+                if (!aMatches && bMatches) return 1;
+            }
             let comparison = 0;
             if (sortBy === "relevance") {
                 const maxSeeds = Math.max(...filteredResults.map(t => t.seeds));
@@ -431,6 +475,17 @@
                         </button>
                     </div>
                 </div>
+                
+                {#if currentSeason && currentEpisode}
+                    <div class="filter-group">
+                        <span class="filter-label">Priority:</span>
+                        <div class="filter-options">
+                            <button class="filter-chip" class:active={prioritizeMatching} on:click={() => prioritizeMatching = !prioritizeMatching} title="Push matching torrents to the top">
+                                <i class="ri-arrow-up-line"></i>
+                            </button>
+                        </div>
+                    </div>
+                {/if}
 
                 <button class="reset-btn" on:click={resetFilters} title="Reset filters">
                     <i class="ri-refresh-line"></i>
@@ -485,7 +540,7 @@
                 </div>
                 <div class="table-body">
                     {#each filteredResults as torrent}
-                        <div class="torrent-row" class:disabled={loading} on:click={() => selectTorrent(torrent)}>
+                        <div class="torrent-row" class:disabled={loading} class:matches-episode={torrentMatchesCurrentEpisode(torrent)} on:click={() => selectTorrent(torrent)}>
                             <div class="col-name">
                                 <div class="torrent-title">{torrent.title}</div>
                                 {#if torrent.quality || torrent.encode || torrent.is_batch || torrent.season || torrent.episode || torrent.provider}

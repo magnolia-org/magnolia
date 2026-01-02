@@ -14,11 +14,28 @@
   let loading = true;
   let selectedSeason = null;
   let expandedSeasons = new Set();
+  let showManualAssignment = false;
+  let uniqueTorrents = [];
 
   $: isMovie = !details?.seasons || details.seasons.length === 0;
 
   $: if (refreshTrigger) {
     loadTorrentData();
+  }
+  
+  // Extract unique torrents from torrentData
+  $: {
+    const seen = new Set();
+    uniqueTorrents = Object.values(torrentData)
+      .filter(t => {
+        if (seen.has(t.magnetLink)) return false;
+        seen.add(t.magnetLink);
+        return true;
+      })
+      .map(t => ({
+        magnetLink: t.magnetLink,
+        fileName: t.fileName
+      }));
   }
 
   onMount(() => {
@@ -88,6 +105,13 @@
   function handleRemoveTorrent(season, episode) {
     dispatch("removeTorrent", { season, episode });
   }
+  
+  function openManualAssignment() {
+    dispatch("openManualAssignment", { 
+      torrents: uniqueTorrents,
+      showId: media.id
+    });
+  }
 
   function close() {
     dispatch("close");
@@ -104,9 +128,17 @@
   <div class="torrent-manager-modal">
     <div class="torrent-manager-header">
       <h2>Torrent Manager</h2>
-      <button class="btn-close" on:click={close}>
-        <i class="ri-close-line"></i>
-      </button>
+      <div class="header-actions">
+        {#if !isMovie}
+          <button class="btn-manual-assign" on:click={openManualAssignment} title="Manually assign files to episodes">
+            <i class="ri-folder-settings-line"></i>
+            <span>Manual Assignment</span>
+          </button>
+        {/if}
+        <button class="btn-close" on:click={close}>
+          <i class="ri-close-line"></i>
+        </button>
+      </div>
     </div>
 
     <div class="torrent-manager-content">
@@ -272,6 +304,37 @@
     font-weight: 600;
     margin: 0;
     color: var(--text-primary);
+  }
+  
+  .header-actions {
+    display: flex;
+    gap: var(--spacing-md);
+    align-items: center;
+  }
+  
+  .btn-manual-assign {
+    background: rgba(74, 144, 226, 0.15);
+    border: 1px solid rgba(74, 144, 226, 0.3);
+    color: #4a90e2;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    border-radius: var(--border-radius-md);
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  
+  .btn-manual-assign:hover {
+    background: rgba(74, 144, 226, 0.25);
+    border-color: rgba(74, 144, 226, 0.5);
+    transform: translateY(-1px);
+  }
+  
+  .btn-manual-assign i {
+    font-size: 16px;
   }
 
   .btn-close {
