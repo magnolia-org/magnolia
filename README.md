@@ -1,10 +1,10 @@
 
 <div align="center">
-  <img src="src/media/magnolia.png" alt="Magnolia Logo" width="150"/>
+  <img src="src/media/magnolia.png" alt="Magnolia Logo" height="110"/>
   <p>
   <h1>Magnolia</h1>
   <p><strong>A beautiful, feature-rich torrent streaming program</strong></p>
-  <p>(image(s) here?)</p>
+  <p><img height=800 alt="Magnolia's home page" src="https://github.com/user-attachments/assets/681eca13-b488-4f2a-aec5-e7f0dfb5426e"/></p>
 </div>
 
 ## Features
