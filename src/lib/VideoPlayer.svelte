@@ -819,8 +819,6 @@
   }
 
   function togglePlay() {
-    if (showBufferingIndicator || waitingForAudio) return; // Ignore during buffering
-    
     console.log("togglePlay called");
     const usingTranscodedAudio = needsAudioTranscoding && audioPlayer instanceof Audio;
 
@@ -2326,6 +2324,12 @@
       if (playing) {
         videoElement?.pause();
       }
+      
+      // Stop audio player if active
+      if (audioPlayer && audioPlayer instanceof Audio) {
+        audioPlayer.pause();
+      }
+      
       showPlayerMenu = false;
       
     } catch (error) {
