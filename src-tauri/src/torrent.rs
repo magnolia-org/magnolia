@@ -43,6 +43,8 @@ pub struct AudioTrack {
     pub name: Option<String>,
     #[serde(default)]
     pub needs_transcoding: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoded_url: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -559,7 +561,8 @@ impl TorrentManager {
             .route("/torrents/{session_id}/metadata/{file_id}", get(get_file_metadata))
             .route("/torrents/{session_id}/subtitles/{file_id}/{track_index}", get(get_subtitle_track))
             .route("/torrents/{session_id}/srt-stream/{file_id}/{track_index}", get(stream_srt_subtitles))
-            .route("/torrents/{session_id}/transcoded-audio-stream/{file_id}", get(stream_transcoded_audio))
+            .route("/torrents/{session_id}/transcoded-audio-stream/{file_id}/{track_index}", get(stream_transcoded_audio))
+            .route("/torrents/{session_id}/transcoded-audio-stream/{file_id}", get(stream_transcoded_audio_default))
             .route("/torrents/{session_id}/transcoded-audio/{file_id}", get(serve_transcoded_audio))
             .route("/fonts/{filename}", get(serve_font))
             .layer(CorsLayer::permissive())
@@ -892,6 +895,8 @@ impl TorrentManager {
     }
 
     pub async fn get_stream_status(&self, handle_id: usize, file_index: usize) -> Result<StreamStatus> {
+        println!("[Transcode] get_stream_status called: handle_id={}, file_index={}", handle_id, file_index);
+        
         let torrents = self.torrents.read().await;
         let entry = torrents
             .get(&handle_id)
@@ -921,7 +926,7 @@ impl TorrentManager {
         // We need to ensure:
         // 1. The stream can be created (handle.stream succeeds)
         // 2. We have enough data for headers (at least 2MB or finished)
-        let is_streamable = handle.stream(file_index).is_ok();
+        let is_streamable = handle.clone().stream(file_index).is_ok();
         let has_buffer = stats.progress_bytes > 2 * 1024 * 1024 || stats.finished;
         
         let is_ready = is_streamable && has_buffer;
@@ -947,69 +952,92 @@ impl TorrentManager {
         let stream_info = if is_ready {
              // Extract metadata for supported video formats
             let lower = file_name.to_lowercase();
+            println!("[Transcode] File name: {}, stats: {}/{} bytes", file_name, stats.progress_bytes, stats.total_bytes);
             let mut metadata = if lower.ends_with(".mkv") || lower.ends_with(".mp4") || lower.ends_with(".avi") || lower.ends_with(".mov") {
                 // If fully downloaded, use the actual file
                 if stats.progress_bytes >= stats.total_bytes && stats.total_bytes > 0 {
+                    println!("[Transcode] File fully downloaded, extracting metadata from disk");
                     let file_path = self.download_dir.join(&file_name_path);
-                    extract_mkv_metadata_ffprobe(&file_path).await.ok()
+                    println!("[Transcode] File path: {:?}", file_path);
+                    println!("[Transcode] File exists: {}", file_path.exists());
+                    if file_path.exists() {
+                        match extract_mkv_metadata_ffprobe(&file_path).await {
+                            Ok(meta) => {
+                                println!("[Transcode] Successfully extracted metadata from file");
+                                Some(meta)
+                            },
+                            Err(e) => {
+                                println!("[Transcode] Failed to extract metadata: {}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        println!("[Transcode] File doesn't exist on disk yet, checking cache");
+                        let cache = self.metadata_cache.read().await;
+                        let cached = cache.get(&(session_id, file_index)).cloned();
+                        println!("[Transcode] Metadata cache contains entry: {}", cached.is_some());
+                        cached
+                    }
                 } else {
+                    println!("[Transcode] File not fully downloaded, checking metadata cache");
                     // Try to get from metadata cache (populated by /metadata/ endpoint)
                     let cache = self.metadata_cache.read().await;
-                    cache.get(&(session_id, file_index)).cloned()
+                    let cached = cache.get(&(session_id, file_index)).cloned();
+                    println!("[Transcode] Metadata cache contains entry: {}", cached.is_some());
+                    cached
                 }
             } else {
+                println!("[Transcode] File format not supported for metadata extraction");
                 None
             };
+            println!("[Transcode] Metadata result: {}", if metadata.is_some() { "Some" } else { "None" });
             
             // If transcoding is needed and not yet started, start it
             if let Some(ref mut meta) = metadata {
+                println!("[Transcode] Metadata needs_audio_transcoding: {}", meta.needs_audio_transcoding);
                 if meta.needs_audio_transcoding {
                     let transcode_key = (session_id, file_index);
                     let states = self.transcode_states.read().await;
                     let transcoding_started = states.contains_key(&transcode_key);
                     drop(states);
                     
-                    // Start transcoding if file is downloaded (finished or has all bytes)
-                    let file_downloaded = stats.finished || 
-                        (stats.total_bytes > 0 && stats.progress_bytes >= stats.total_bytes);
-                    
-                    if !transcoding_started && file_downloaded {
-                        // Start transcoding in background
-                        let file_path = self.download_dir.join(&file_name_path);
-                        let output_path = std::env::temp_dir()
-                            .join(format!("magnolia_audio_{}_{}.aac", session_id, file_index));
-                        
-                        tracing::info!("File path for transcoding: {:?}", file_path);
-                        tracing::info!("File exists: {}", file_path.exists());
-                        
-                        let transcode_states = self.transcode_states.clone();
-                        
-                        tracing::info!("Starting audio transcoding for {}", file_name);
-                        tokio::spawn(async move {
-                            if let Err(e) = transcode_audio_track(
-                                &file_path,
-                                &output_path,
-                                0, // Default to first audio track
-                                transcode_states,
-                                session_id,
-                                file_index,
-                            ).await {
-                                tracing::error!("Transcoding failed: {}", e);
-                            }
+                    if !transcoding_started {
+                        // Mark transcoding as started immediately - no waiting for download
+                        let mut states = self.transcode_states.write().await;
+                        states.insert((session_id, file_index), TranscodeState {
+                            progress: 0.0,
+                            output_path: None,
+                            completed: false,
+                            error: None,
                         });
-                    } else if !transcoding_started {
-                        tracing::info!("Waiting for download to complete before transcoding. finished={}, progress={}/{}", 
-                            stats.finished, stats.progress_bytes, stats.total_bytes);
-                    }
-                    
-                    // Add transcoded audio URL if transcoding is complete
-                    if transcode_completed {
-                        meta.transcoded_audio_url = Some(format!(
-                            "http://{}/torrents/{}/transcoded-audio/{}",
-                            self.http_addr,
-                            session_id,
-                            file_index
-                        ));
+                        drop(states);
+                        
+                        println!("[Transcode] Transcoding ready for immediate on-demand streaming at {}", file_name);
+                        
+                        // Add transcoded URLs for each audio track that needs transcoding
+                        for (track_idx, track) in meta.audio_tracks.iter_mut().enumerate() {
+                            if track.needs_transcoding {
+                                track.transcoded_url = Some(format!(
+                                    "http://{}/torrents/{}/transcoded-audio-stream/{}/{}",
+                                    self.http_addr,
+                                    session_id,
+                                    file_index,
+                                    track_idx
+                                ));
+                                println!("[Transcode] Track {} ({}) ready for immediate piped transcoding", 
+                                    track_idx, track.codec.as_deref().unwrap_or("unknown"));
+                            }
+                        }
+                        
+                        // Keep legacy field for backward compatibility (first track needing transcode)
+                        if meta.audio_tracks.first().map(|t| t.needs_transcoding).unwrap_or(false) {
+                            meta.transcoded_audio_url = Some(format!(
+                                "http://{}/torrents/{}/transcoded-audio-stream/{}/0",
+                                self.http_addr,
+                                session_id,
+                                file_index
+                            ));
+                        }
                     }
                 }
             }
@@ -1053,12 +1081,17 @@ impl TorrentManager {
         
         let needs_audio_transcoding = needs_transcoding_from_stream || needs_transcoding_from_cache;
         
+        // Check if on-demand transcoding is ready (state exists but not completed means streaming is ready)
+        let transcode_streaming_ready = transcode_progress.is_some() && !transcode_completed;
+        
         // Determine status
         let status = if !is_ready {
             "initializing".to_string()
-        } else if needs_audio_transcoding && !transcode_completed {
+        } else if needs_audio_transcoding && !transcode_streaming_ready {
+            // Still waiting for minimum download before transcoding can start
             "transcoding".to_string()
         } else {
+            // Ready means either no transcoding needed, or on-demand transcoding is available
             "ready".to_string()
         };
         
@@ -1444,15 +1477,29 @@ async fn extract_mkv_metadata_ffprobe(file_path: &std::path::Path) -> Result<Mkv
                     let long_name_lower = codec_long_name.to_lowercase();
                     let profile_lower = profile.to_lowercase();
                     
+                    // Special check for AC3/EAC3 variants to ensure proper detection
+                    let is_ac3_variant = codec_lower == "ac3" 
+                        || codec_lower == "eac3" 
+                        || codec_lower == "ac-3" 
+                        || codec_lower == "e-ac-3"
+                        || codec_lower.starts_with("ac3")
+                        || codec_lower.starts_with("eac3")
+                        || long_name_lower.contains("ac-3")
+                        || long_name_lower.contains("ac3")
+                        || long_name_lower.contains("e-ac-3")
+                        || long_name_lower.contains("eac3")
+                        || long_name_lower.contains("dolby digital");
+                    
                     // Whitelist of browser-supported codecs
                     let is_known_supported = matches!(codec_lower.as_str(), 
                         "aac" | "mp3" | "opus" | "vorbis" | "mp2" | "mp1" | "flac"
                     ) && !long_name_lower.contains("truehd") 
                       && !long_name_lower.contains("dts")
-                      && !long_name_lower.contains("atmos");
+                      && !long_name_lower.contains("atmos")
+                      && !is_ac3_variant;
                     
                     // Check against blacklist of known unsupported codecs
-                    let is_known_unsupported = UNSUPPORTED_AUDIO_CODECS.iter().any(|unsupported| {
+                    let is_known_unsupported = is_ac3_variant || UNSUPPORTED_AUDIO_CODECS.iter().any(|unsupported| {
                         codec_lower == *unsupported 
                             || codec_lower.contains(unsupported)
                             || long_name_lower.contains(unsupported)
@@ -1471,6 +1518,7 @@ async fn extract_mkv_metadata_ffprobe(file_path: &std::path::Path) -> Result<Mkv
                         codec: Some(codec_name.to_string()),
                         name: title,
                         needs_transcoding,
+                        transcoded_url: None,
                     });
                     audio_index += 1;
                 }
@@ -1568,12 +1616,24 @@ async fn transcode_audio_track(
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, BufReader};
     
-    tracing::info!("Starting audio transcoding: {:?} -> {:?} (track {})", 
+    println!("[Transcode] Starting audio transcoding: {:?} -> {:?} (track {})", 
         input_path, output_path, audio_track_index);
+    
+    // Verify input file exists
+    if !input_path.exists() {
+        let err = format!("Input file does not exist: {:?}", input_path);
+        println!("[Transcode] ERROR: {}", err);
+        return Err(anyhow::anyhow!(err));
+    }
+    
+    let file_size = std::fs::metadata(input_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    println!("[Transcode] Input file size: {} MB", file_size / 1_048_576);
     
     // Get duration for progress calculation
     let duration = get_media_duration(input_path).await.unwrap_or(0.0);
-    tracing::info!("Media duration: {} seconds", duration);
+    println!("[Transcode] Media duration: {} seconds", duration);
     
     // Initialize transcode state
     {
@@ -1627,9 +1687,10 @@ async fn transcode_audio_track(
                 let mut states = transcode_states.write().await;
                 if let Some(state) = states.get_mut(&(session_id, file_id)) {
                     state.progress = progress as f32;
+                    if progress as u32 % 10 == 0 { // Log every 10%
+                        println!("[Transcode] Progress: {:.1}%", progress);
+                    }
                 }
-                
-                tracing::debug!("Transcode progress: {:.1}%", progress);
             }
         }
     }
@@ -1638,7 +1699,7 @@ async fn transcode_audio_track(
     let status = child.wait().await.context("Failed to wait for ffmpeg")?;
     
     if status.success() {
-        tracing::info!("Audio transcoding completed successfully");
+        println!("[Transcode] Completed successfully!");
         let mut states = transcode_states.write().await;
         if let Some(state) = states.get_mut(&(session_id, file_id)) {
             state.progress = 100.0;
@@ -1647,7 +1708,7 @@ async fn transcode_audio_track(
         Ok(())
     } else {
         let error_msg = "FFmpeg transcoding failed".to_string();
-        tracing::error!("{}", error_msg);
+        println!("[Transcode] ERROR: {}", error_msg);
         let mut states = transcode_states.write().await;
         if let Some(state) = states.get_mut(&(session_id, file_id)) {
             state.error = Some(error_msg.clone());
@@ -1683,80 +1744,67 @@ async fn get_media_duration(path: &std::path::Path) -> Result<f64> {
     }
 }
 
+// HTTP handler for backward compatibility - defaults to track 0
+async fn stream_transcoded_audio_default(
+    Path((session_id, file_id)): Path<(usize, usize)>,
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> impl IntoResponse {
+    // Forward to main handler with track_index = 0
+    stream_transcoded_audio(Path((session_id, file_id, 0)), headers, axum::extract::State(state)).await
+}
+
 // HTTP handler to stream transcoded audio live (starts playing before transcoding is complete)
 async fn stream_transcoded_audio(
-    Path((session_id, file_id)): Path<(usize, usize)>,
+    Path((session_id, file_id, track_index)): Path<(usize, usize, usize)>,
     headers: HeaderMap,
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> impl IntoResponse {
     use std::process::Stdio;
     use tokio::process::Command;
     
-    tracing::info!("Live transcoded audio stream request: session_id={}, file_id={}", session_id, file_id);
+    tracing::info!("Live transcoded audio stream request: session_id={}, file_id={}, track_index={}", session_id, file_id, track_index);
     
-    // Get the file path from the torrent session
-    let file_path = {
+    // Get torrent stream to pipe directly to ffmpeg
+    let torrent_stream = {
         let handle = state.session.get(TorrentIdOrHash::Id(session_id));
-        if handle.is_none() {
-            return (StatusCode::NOT_FOUND, "Session not found").into_response();
-        }
-        let h = handle.unwrap();
-        
-        let file_info = h.with_metadata(|meta| {
-            meta.file_infos.get(file_id).map(|fi| (
-                fi.relative_filename.clone(),
-                fi.len
-            ))
-        });
-        
-        match file_info {
-            Ok(Some((file_name_path, _))) => state.download_dir.join(&file_name_path),
-            _ => return (StatusCode::NOT_FOUND, "File not found in torrent").into_response(),
+        if let Some(h) = handle {
+            match h.stream(file_id) {
+                Ok(stream) => Some(stream),
+                Err(e) => {
+                    tracing::error!("Failed to create torrent stream: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
         }
     };
     
-    if !file_path.exists() {
-        tracing::warn!("File not yet available for transcoding: {:?}", file_path);
-        return (StatusCode::SERVICE_UNAVAILABLE, "File not yet downloaded").into_response();
+    if torrent_stream.is_none() {
+        return (StatusCode::NOT_FOUND, "Failed to create torrent stream").into_response();
     }
     
-    // Check if file has minimum size (at least 1MB to start transcoding)
-    let file_size = match tokio::fs::metadata(&file_path).await {
-        Ok(meta) => meta.len(),
-        Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "File metadata unavailable").into_response(),
-    };
+    let mut torrent_stream = torrent_stream.unwrap();
     
-    if file_size < 1_048_576 {
-        tracing::warn!("File too small for transcoding: {} bytes", file_size);
-        return (StatusCode::SERVICE_UNAVAILABLE, "File not sufficiently downloaded").into_response();
-    }
+    tracing::info!("Starting real-time transcode with piped torrent stream");
     
-    // Parse seek time from range header or query param
-    let seek_time = headers.get("X-Audio-Seek")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.0);
-    
-    tracing::info!("Starting transcode from {}s", seek_time);
-    
-    // Start ffmpeg transcoding from seek position
+    // Start ffmpeg transcoding with piped input from torrent stream
     let mut cmd = Command::new(ffmpeg_path());
     
     #[cfg(target_os = "windows")]
     cmd.creation_flags(0x08000000);
     
-    if seek_time > 0.0 {
-        cmd.args(&["-ss", &seek_time.to_string()]);
-    }
-    
+    let audio_map = format!("0:a:{}", track_index);
     cmd.args(&[
-        "-i", file_path.to_str().unwrap(),
-        "-map", "0:a:0",
+        "-i", "pipe:0",  // Read from stdin
+        "-map", &audio_map,
         "-c:a", "aac",
         "-b:a", "192k",
         "-f", "adts",
         "pipe:1",
     ])
+    .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::null());
     
@@ -1768,76 +1816,49 @@ async fn stream_transcoded_audio(
         }
     };
     
+    let mut stdin = match child.stdin.take() {
+        Some(s) => s,
+        None => return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to get ffmpeg stdin").into_response(),
+    };
+    
     let stdout = match child.stdout.take() {
         Some(s) => s,
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to get ffmpeg output").into_response(),
     };
     
-    // Spawn task to handle background caching
-    let cache_dir = state.download_dir.join(".audio_cache");
-    tokio::fs::create_dir_all(&cache_dir).await.ok();
-    let cache_key = format!("{:x}", md5::compute(file_path.to_string_lossy().as_bytes()));
-    let cache_path = cache_dir.join(format!("{}.aac", cache_key));
-    
-    // Start background full transcode for caching (if not already running)
-    let transcode_in_progress = {
-        let states = state.transcode_states.read().await;
-        states.contains_key(&(session_id, file_id))
-    };
-    
-    if !transcode_in_progress {
-        let cache_path_clone = cache_path.clone();
-        let file_path_clone = file_path.clone();
-        let state_clone = state.clone();
+    // Spawn task to pipe torrent stream to ffmpeg stdin
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut buffer = vec![0u8; 256 * 1024]; // 256KB chunks
+        let mut total_piped = 0u64;
         
-        tokio::spawn(async move {
-            let mut cmd = Command::new(ffmpeg_path());
-            
-            #[cfg(target_os = "windows")]
-            cmd.creation_flags(0x08000000);
-
-            cmd.args(&[
-                "-i", file_path_clone.to_str().unwrap(),
-                "-map", "0:a:0",
-                "-c:a", "aac",
-                "-b:a", "192k",
-                "-f", "adts",
-                cache_path_clone.to_str().unwrap(),
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-            
-            tracing::info!("Starting background full transcode to cache: {:?}", cache_path_clone);
-            
-            {
-                let mut states = state_clone.transcode_states.write().await;
-                states.insert((session_id, file_id), TranscodeState {
-                    output_path: Some(cache_path_clone.clone()),
-                    completed: false,
-                    progress: 0.0,
-                    error: None,
-                });
-            }
-            
-            let result = cmd.spawn().and_then(|mut child| {
-                tokio::runtime::Handle::current().block_on(child.wait())
-            });
-            
-            {
-                let mut states = state_clone.transcode_states.write().await;
-                if let Some(state) = states.get_mut(&(session_id, file_id)) {
-                    state.completed = result.is_ok();
-                    state.progress = if result.is_ok() { 100.0 } else { 0.0 };
+        tracing::info!("Starting to pipe torrent stream to ffmpeg stdin");
+        
+        loop {
+            match torrent_stream.read(&mut buffer).await {
+                Ok(0) => {
+                    tracing::info!("Torrent stream EOF, piped {} MB total", total_piped / 1_048_576);
+                    break;
+                }
+                Ok(n) => {
+                    if let Err(e) = stdin.write_all(&buffer[..n]).await {
+                        tracing::error!("Failed to write to ffmpeg stdin: {}", e);
+                        break;
+                    }
+                    total_piped += n as u64;
+                    if total_piped % (50 * 1024 * 1024) == 0 {
+                        tracing::info!("Piped {} MB to ffmpeg", total_piped / 1_048_576);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to read from torrent stream: {}", e);
+                    break;
                 }
             }
-            
-            if result.is_ok() {
-                tracing::info!("Background transcode completed: {:?}", cache_path_clone);
-            } else {
-                tracing::error!("Background transcode failed: {:?}", result.err());
-            }
-        });
-    }
+        }
+        
+        drop(stdin);
+    });
     
     // Stream the transcoded audio to the client
     let stream = tokio_util::io::ReaderStream::new(stdout);

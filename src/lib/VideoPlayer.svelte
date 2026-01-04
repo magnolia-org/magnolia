@@ -717,9 +717,9 @@
         const baseUrl = urlMatch[1];
         const sessionId = urlMatch[2];
 
-        // Construct the cached transcoding URL (background transcode + serve from cache)
+        // Construct the transcoded stream URL - no waiting, direct streaming
         const transcodedStreamUrl = `${baseUrl}/torrents/${sessionId}/transcoded-audio-stream/${fileIndex}`;
-        console.log("Transcoded audio stream URL:", transcodedStreamUrl);
+        console.log("transcoded audio stream URL (piped, no buffering):", transcodedStreamUrl);
 
         // Stop existing audio if any
         if (audioPlayer && audioPlayer instanceof Audio) {
@@ -1904,12 +1904,54 @@
         throw new Error(`Audio track ${index} not found in metadata`);
       }
 
+      const trackInfo = videoMetadata.audio_tracks[index];
+      
+      // Check if track needs transcoding and has transcoded_url
+      if (trackInfo.transcoded_url) {
+        console.log(`[Audio] Using transcoded stream for track ${index}: ${trackInfo.transcoded_url}`);
+        
+        // Stop existing audio
+        if (audioPlayer && audioPlayer instanceof Audio) {
+          audioPlayer.pause();
+          audioPlayer.src = '';
+        }
+        
+        // Create and prepare audio element with transcoded stream
+        audioPlayer = new Audio();
+        audioPlayer.preload = 'auto';
+        audioPlayer.crossOrigin = 'anonymous';
+        audioPlayer.src = trackInfo.transcoded_url;
+        audioPlayer.volume = volume;
+        audioPlayer.muted = muted;
+        
+        // Mute video
+        if (videoElement) {
+          videoElement.muted = true;
+        }
+        
+        // Wait for audio to be ready
+        showBufferingIndicator = true;
+        await ensureTranscodedAudioPrepared(trackInfo.transcoded_url, videoElement?.currentTime || 0, audioPlayer);
+        
+        if (selectedAudioTrack !== index) return;
+
+        // Sync and play
+        syncExternalAudio(videoElement?.currentTime || 0);
+        if (!videoElement.paused) {
+          await audioPlayer.play();
+        }
+        showBufferingIndicator = false;
+        showAudioMenu = false;
+        loadingAudio = false;
+        saveTrackPreferences();
+        return;
+      }
+
       // Check cache first
       const stableCacheId = getStableCacheId();
       let audioBlobUrl = null;
 
       // Determine MIME type based on codec
-      const trackInfo = videoMetadata.audio_tracks[index];
       const codec = trackInfo.codec.toLowerCase();
       let mimeType = 'audio/webm';
       
