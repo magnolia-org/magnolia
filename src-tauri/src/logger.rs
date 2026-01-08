@@ -41,7 +41,7 @@ impl Logger {
     
     fn start_new_session(&self) -> Result<(), String> {
         let timestamp = Local::now().format("%Y%m%d_%H%M%S");
-        let log_path = self.log_dir.join(format!("frontend_{}.log", timestamp));
+        let log_path = self.log_dir.join(format!("{}_frontend.log", timestamp));
         
         let file = OpenOptions::new()
             .create(true)
@@ -58,7 +58,7 @@ impl Logger {
     
     fn start_backend_session(&self) -> Result<(), String> {
         let timestamp = Local::now().format("%Y%m%d_%H%M%S");
-        let log_path = self.log_dir.join(format!("backend_{}.log", timestamp));
+        let log_path = self.log_dir.join(format!("{}_backend.log", timestamp));
         
         let file = OpenOptions::new()
             .create(true)

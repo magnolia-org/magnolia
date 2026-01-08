@@ -570,44 +570,36 @@
             console.log(`needs audio transcoding: ${fetchedMetadata.needs_audio_transcoding}`);
             console.log(`transcoded audio URL: ${videoMetadata.transcoded_audio_url}`);
             
-            // Initialize demuxer for both subtitle and audio track extraction
+            // Initialize demuxer in background for subtitle and audio track extraction
+            // Don't block video loading - demuxer initializes after playback starts
             if (fetchedMetadata.subtitle_tracks.length > 0 || fetchedMetadata.audio_tracks.length > 1) {
-              loadingPhase = "demuxing";
-              loadingStatus.status = "Initializing demuxer...";
-              loadingStatus.phaseProgress = 70;
+              console.log("initializing MKV demuxer in background for subtitle/audio extraction");
               
-              console.log("initializing MKV demuxer for subtitle/audio extraction");
-              try {
-                demuxer = new MKVDemuxer();
-                console.log("[demuxer] MKV demuxer instance created, initializing with src:", src);
-                loadingStatus.status = "Loading demuxer...";
-                loadingStatus.phaseProgress = 80;
-                await demuxer.initialize(src);
-                loadingStatus.phaseProgress = 90;
-                console.log("[demuxer] MKV demuxer initialized successfully");
-                
-                // Extract and save fonts from MKV if any (for ASS subtitles)
-                // This is non-blocking and won't fail demuxer initialization
+              // Initialize demuxer asynchronously without blocking
+              (async () => {
                 try {
-                  if (demuxer.attachments && demuxer.attachments.length > 0) {
-                    loadingStatus.status = "Extracting fonts...";
-                    loadingStatus.phaseProgress = 92;
-                    console.log(`found ${demuxer.attachments.length} font attachments, extracting...`);
-                    extractedFonts = await demuxer.extractAndSaveFonts();
-                    console.log(`extracted ${extractedFonts.length} fonts:`, extractedFonts);
+                  demuxer = new MKVDemuxer();
+                  console.log("[demuxer] MKV demuxer instance created, initializing with src:", src);
+                  await demuxer.initialize(src);
+                  console.log("[demuxer] MKV demuxer initialized successfully");
+                  
+                  // Extract and save fonts from MKV if any (for ASS subtitles)
+                  try {
+                    if (demuxer.attachments && demuxer.attachments.length > 0) {
+                      console.log(`found ${demuxer.attachments.length} font attachments, extracting...`);
+                      extractedFonts = await demuxer.extractAndSaveFonts();
+                      console.log(`extracted ${extractedFonts.length} fonts:`, extractedFonts);
+                    }
+                  } catch (fontError) {
+                    console.warn("failed to extract fonts (non-fatal):", fontError);
+                    extractedFonts = [];
                   }
-                } catch (fontError) {
-                  console.warn("failed to extract fonts (non-fatal):", fontError);
-                  extractedFonts = [];
+                } catch (error) {
+                  console.error("[demuxer] failed to initialize MKV demuxer:", error);
+                  console.error("[demuxer] error details:", { message: error.message, stack: error.stack });
+                  demuxer = null;
                 }
-                
-                loadingStatus.phaseProgress = 95;
-              } catch (error) {
-                console.error("[demuxer] failed to initialize MKV demuxer:", error);
-                console.error("[demuxer] error details:", { message: error.message, stack: error.stack });
-                demuxer = null;
-                // Don't fail loading, just continue without demuxer
-              }
+              })();
             }
             
             loadingPhase = "ready";
@@ -2869,18 +2861,8 @@
     clearTimeout(controlsTimeout);
     clearTimeout(indicatorTimeout);
 
-    // Pause torrent stream when leaving video player (don't delete)
-    if (handleId !== null) {
-      try {
-        await invoke("stop_stream", {
-          handleId: handleId,
-          deleteFiles: false
-        });
-        console.log("[torrent] stream paused on component destroy");
-      } catch (error) {
-        console.error("[torrent] failed to pause stream on destroy:", error);
-      }
-    }
+    // Files will be cleaned up when switching torrents or on app exit
+    // No need to delete files here
 
     // Cleanup DASH instance
     if (videoElement && videoElement.dashInstance) {

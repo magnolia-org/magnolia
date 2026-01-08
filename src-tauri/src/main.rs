@@ -245,8 +245,8 @@ async fn search_nyaa(query: String) -> Result<Vec<search::SearchResult>, String>
 #[tauri::command]
 async fn search_nyaa_filtered(
     query: String,
-    season: Option<u32>,
-    episode: Option<u32>,
+    _season: Option<u32>,
+    _episode: Option<u32>,
     _is_movie: bool,
     media_type: Option<String>, // "anime", "tv", "movie"
     tracker_preference: Option<Vec<String>>, // ["nyaa", "limetorrents", ...] or None for auto
@@ -401,78 +401,6 @@ fn extract_info_hash(magnet: &str) -> Option<String> {
         .find(|part| part.starts_with("xt=urn:btih:"))
         .and_then(|part| part.strip_prefix("xt=urn:btih:"))
         .map(|hash| hash.to_lowercase())
-}
-
-fn calculate_relevance_score(
-    result: &search::SearchResult,
-    requested_season: Option<u32>,
-    requested_episode: Option<u32>,
-    query: &str,
-) -> i32 {
-    let mut score = 0;
-
-    if let (Some(req_s), Some(req_e)) = (requested_season, requested_episode) {
-        if let Some(s) = result.season {
-            if s == req_s {
-                score += 100;
-                
-                if let Some(e) = result.episode {
-                    if e == req_e {
-                        score += 100;
-                    } else {
-                        score -= 50;
-                    }
-                } else if result.is_batch {
-                    score += 50; // Batch for correct season - good fallback
-                }
-            } else {
-                score -= 100; // Wrong season
-            }
-        }
-    }
-
-    // Quality detection adds relevance
-    if result.quality.is_some() {
-        score += 10;
-        
-        // Prefer 1080p
-        if let Some(ref quality) = result.quality {
-            if quality.contains("1080") {
-                score += 15;
-            } else if quality.contains("720") {
-                score += 10;
-            } else if quality.contains("2160") || quality.contains("4K") {
-                score += 5;
-            }
-        }
-    }
-
-    if result.encode.is_some() {
-        score += 5;
-        
-        if let Some(ref encode) = result.encode {
-            if encode.contains("265") || encode.contains("HEVC") {
-                score += 10;
-            } else if encode.contains("264") || encode.contains("AVC") {
-                score += 5;
-            }
-        }
-    }
-
-    let title_lower = result.title.to_lowercase();
-    let query_lower = query.to_lowercase();
-    let query_words: Vec<&str> = query_lower.split_whitespace().collect();
-    let matched_words = query_words.iter().filter(|word| title_lower.contains(*word)).count();
-    score += (matched_words * 5) as i32;
-
-    // Seed count contributes to relevance (but less than exact matches)
-    score += (result.seeds.min(100) / 10) as i32; // Max 10 points from seeds
-
-    if requested_episode.is_some() && result.is_batch && result.episode.is_none() {
-        score -= 30;
-    }
-
-    score
 }
 
 #[tauri::command]
@@ -836,8 +764,35 @@ async fn clear_cache_item(
         return Ok(());
     }
     
-    let tmdb_id: u32 = id.parse().map_err(|_| "invalid TMDB ID".to_string())?;
+    // Check if this is a hash - if so, look it up in metadata mappings
+    let tmdb_id: u32 = if id.len() <= 40 && id.chars().all(|c| c.is_ascii_hexdigit() || c.is_ascii_lowercase()) {
+        // This looks like a hash, check metadata mappings
+        let lookup_result = {
+            let mgr = metadata_manager.lock().unwrap();
+            mgr.mappings.get(&id.to_lowercase()).map(|m| m.tmdb_id)
+        };
+        
+        match lookup_result {
+            Some(tmdb) => tmdb,
+            None => {
+                // Hash not found in mappings, just clear by ID directly
+                state.clear_cache_by_id(&id).await?;
+                return Ok(());
+            }
+        }
+    } else {
+        // Handle movie/123 or tv/456 format
+        let id_parts: Vec<&str> = id.split('/').collect();
+        if id_parts.len() == 2 {
+            // Format: movie/123 or tv/456
+            id_parts[1].parse().map_err(|_| "invalid TMDB ID".to_string())?
+        } else {
+            // Plain number
+            id.parse().map_err(|_| "invalid TMDB ID".to_string())?
+        }
+    };
     
+    // Find all hashes for this TMDB ID
     let hashes_to_delete: Vec<String> = {
         let mgr = metadata_manager.lock().unwrap();
         mgr.mappings
@@ -858,7 +813,7 @@ async fn clear_cache_item(
 }
 
 #[tauri::command]
-async fn download_update(url: String, app_handle: tauri::AppHandle) -> Result<String, String> {
+async fn download_update(url: String, _app_handle: tauri::AppHandle) -> Result<String, String> {
     let temp_dir = std::env::temp_dir();
     let file_name = url.split('/').last().unwrap_or("magnolia-installer.exe");
     let dest_path = temp_dir.join(file_name);
@@ -883,7 +838,7 @@ async fn download_update(url: String, app_handle: tauri::AppHandle) -> Result<St
 }
 
 #[tauri::command]
-async fn install_update(installer_path: String, app_handle: tauri::AppHandle) -> Result<(), String> {
+async fn install_update(installer_path: String, _app_handle: tauri::AppHandle) -> Result<(), String> {
     println!("running installer: {}", installer_path);
 
     #[cfg(target_os = "windows")]
@@ -1030,6 +985,7 @@ fn main() {
             torrent::prepare_stream,
             torrent::get_stream_status,
             torrent::stop_stream,
+            torrent::wipe_all_torrent_files,
             torrent::pause_torrent,
             torrent::resume_torrent,
             torrent::remove_torrent,

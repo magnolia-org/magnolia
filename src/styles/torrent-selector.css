@@ -396,6 +396,24 @@
   background: linear-gradient(to right, transparent, #1D141B);
 }
 
+.torrent-row.has-year {
+  background: linear-gradient(90deg, rgba(211, 118, 195, 0.08) 0%, rgba(211, 118, 195, 0.04) 100%);
+  border-left: 2px solid rgba(211, 118, 195, 0.6);
+  padding-left: calc(var(--spacing-2xl) - 2px);
+}
+
+.torrent-row.has-year:hover {
+  background: linear-gradient(90deg, rgba(211, 118, 195, 0.14) 0%, rgba(211, 118, 195, 0.08) 100%);
+}
+
+.torrent-row.has-year .torrent-title::after {
+  background: linear-gradient(to right, transparent, #140F13);
+}
+
+.torrent-row.has-year:hover .torrent-title::after {
+  background: linear-gradient(to right, transparent, #1D141B);
+}
+
 .col-name {
   flex: 1;
   font-weight: 500;
@@ -873,4 +891,27 @@
   font-size: 12px;
   color: var(--text-tertiary);
   margin-top: -8px;
+}
+
+.selection-loading-content .cancel-button {
+  margin-top: var(--spacing-xl);
+  padding: var(--spacing-md) var(--spacing-2xl);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: var(--border-radius-md);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+
+.selection-loading-content .cancel-button:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--accent-color);
+}
+
+.selection-loading-content .cancel-button i {
+  font-size: 16px;
 }

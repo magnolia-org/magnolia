@@ -44,6 +44,8 @@
   let episodeSearchQuery = "";
 
   let showTorrentSelector = false;
+  let isOperationCancelled = false;
+  let isSelectingTorrent = false;
   let searchResults = [];
   let isSearching = false;
   let currentSearchQuery = "";
@@ -525,6 +527,7 @@
       "Force reselect:",
       forceReselect,
     );
+    isOperationCancelled = false;
     pendingPlayRequest = { season: seasonNum, episode: episodeNum };
 
     // 1. Check persistence (skip if forcing reselect)
@@ -926,6 +929,12 @@
         }
       }
     } catch (err) {
+      // Don't show error if user cancelled the operation
+      if (isOperationCancelled) {
+        console.log("torrent selection cancelled by user");
+        isOperationCancelled = false;
+        return;
+      }
       console.error("Error processing selection:", err);
       showError("Failed to load torrent metadata. Please try again.");
     }
@@ -1008,12 +1017,13 @@
   }
 
   function closeTorrentSelector() {
+    isOperationCancelled = true;
+    isSelectingTorrent = false;
     showTorrentSelector = false;
     pendingPlayRequest = null;
   }
 
   const handleResearch = async (event) => {
-    console.log("=== RESEARCH EVENT RECEIVED ===");
     console.log("Event detail:", event.detail);
     console.log("isSearching:", isSearching);
     console.log("pendingPlayRequest:", pendingPlayRequest);
@@ -1031,7 +1041,6 @@
       return;
     }
     
-    console.log("=== STARTING RESEARCH ===");
     console.log("New trackers:", trackers);
     console.log("Custom query:", customQuery);
     console.log("Use IMDB:", useImdb);
@@ -1099,7 +1108,6 @@
         imdbId: imdbIdToUse,
       });
 
-      console.log(`=== RESEARCH COMPLETE ===`);
       console.log(`Found ${searchResults.length} results`);
     } catch (err) {
       console.error("Error during research:", err);
@@ -1916,10 +1924,14 @@
     isAnime={isAnime()}
     hasImdbId={!!currentImdbId}
     isTVShow={media.media_type === 'tv'}
+    isMovie={media.media_type === 'movie'}
+    releaseYear={details?.release_date ? parseInt(details.release_date.split('-')[0]) : null}
     currentSeason={pendingPlayRequest?.season}
     currentEpisode={pendingPlayRequest?.episode}
+    bind:isSelectingTorrent
     on:select={onTorrentSelect}
     on:close={closeTorrentSelector}
+    on:cancelSelection={closeTorrentSelector}
     on:research={handleResearch}
   />
 {/if}

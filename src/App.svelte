@@ -77,8 +77,17 @@
       viewAllData = e.detail;
     });
 
-    window.addEventListener("openVideoPlayer", (e) => {
-      console.log("Opening video player with:", e.detail);
+    window.addEventListener("openVideoPlayer", async (e) => {
+      console.log("[torrent] opening video player with handleId:", e.detail.handleId, "magnet:", e.detail.magnetLink?.substring(0, 50));
+      
+      // Wipe all torrent files before starting new stream
+      try {
+        console.log("[torrent] wiping all torrent files before starting stream");
+        await invoke("wipe_all_torrent_files");
+        console.log("[torrent] all torrent files wiped successfully");
+      } catch (error) {
+        console.error("[torrent] failed to wipe files:", error);
+      }
       
       // If video player is already open, close it first to force remount
       if (showVideoPlayer) {

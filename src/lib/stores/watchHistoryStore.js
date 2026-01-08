@@ -114,6 +114,6 @@ export function setTrackerPreference(trackers) {
   if (typeof window !== 'undefined') {
     const trackersArray = Array.isArray(trackers) ? trackers : [];
     localStorage.setItem('trackerPreference', JSON.stringify(trackersArray));
-    console.log('🔧 Tracker preference set to:', trackersArray);
+    console.log('tracker preference set to:', trackersArray);
   }
 }

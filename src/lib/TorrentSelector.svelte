@@ -13,6 +13,8 @@
     export let isAnime = false;
     export let hasImdbId = false;
     export let isTVShow = false;
+    export let isMovie = false;
+    export let releaseYear = null;
     export let currentSeason = null;
     export let currentEpisode = null;
 
@@ -20,14 +22,12 @@
     
     let trackerMode = 'auto';
     let selectedTrackers = [];
-    let isSelectingTorrent = false;
+    export let isSelectingTorrent = false;
     
     const storedPref = getTrackerPreference();
     if (Array.isArray(storedPref) && storedPref.length > 0) {
         trackerMode = 'manual';
         selectedTrackers = storedPref;
-    } else {
-        trackerMode = 'auto';
     }
     
     onDestroy(() => {
@@ -65,6 +65,11 @@
         if (!codec) return true;
         const compatible = ['AAC', 'MP3', 'Opus', 'Vorbis', 'FLAC'];
         return compatible.includes(codec);
+    }
+    
+    function torrentHasReleaseYear(torrent) {
+        if (!isMovie || !releaseYear) return false;
+        return torrent.title.includes(releaseYear.toString());
     }
     
     function torrentMatchesCurrentEpisode(torrent) {
@@ -121,6 +126,12 @@
                 const bMatches = torrentMatchesCurrentEpisode(b);
                 if (aMatches && !bMatches) return -1;
                 if (!aMatches && bMatches) return 1;
+                
+                // For movies, prioritize torrents with release year in title
+                const aHasYear = torrentHasReleaseYear(a);
+                const bHasYear = torrentHasReleaseYear(b);
+                if (aHasYear && !bHasYear) return -1;
+                if (!aHasYear && bHasYear) return 1;
             }
             let comparison = 0;
             if (sortBy === "relevance") {
@@ -162,6 +173,11 @@
         if (loading || isSelectingTorrent) return;
         isSelectingTorrent = true;
         dispatch("select", torrent);
+    }
+
+    function cancelSelection() {
+        isSelectingTorrent = false;
+        dispatch("cancelSelection");
     }
 
     function close() {
@@ -225,7 +241,7 @@
             console.log("Dispatching research event with trackers:", trackerData);
             setTrackerPreference(trackerData);
             dispatch("research", { trackers: trackerData, query: editableSearchQuery });
-        }, 300);
+        }, 800);
     }
     
     function handleSearchQueryKeydown(e) {
@@ -476,7 +492,7 @@
                     </div>
                 </div>
                 
-                {#if currentSeason && currentEpisode}
+                {#if (currentSeason && currentEpisode) || isMovie}
                     <div class="filter-group">
                         <span class="filter-label">Priority:</span>
                         <div class="filter-options">
@@ -540,7 +556,7 @@
                 </div>
                 <div class="table-body">
                     {#each filteredResults as torrent}
-                        <div class="torrent-row" class:disabled={loading} class:matches-episode={torrentMatchesCurrentEpisode(torrent)} on:click={() => selectTorrent(torrent)}>
+                        <div class="torrent-row" class:disabled={loading} class:matches-episode={torrentMatchesCurrentEpisode(torrent)} class:has-year={torrentHasReleaseYear(torrent)} on:click={() => selectTorrent(torrent)}>
                             <div class="col-name">
                                 <div class="torrent-title">{torrent.title}</div>
                                 {#if torrent.quality || torrent.encode || torrent.is_batch || torrent.season || torrent.episode || torrent.provider}
@@ -613,6 +629,9 @@
                 <div class="spinner"></div>
                 <p>Loading torrent metadata...</p>
                 <span class="loading-subtext">Please wait...</span>
+                <button class="cancel-button" on:click={cancelSelection}>
+                    <i class="ri-close-line"></i> Cancel
+                </button>
             </div>
         </div>
     {/if}

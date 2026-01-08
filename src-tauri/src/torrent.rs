@@ -157,6 +157,7 @@ mod systemtime_serde {
 
 // Transcoding state for a specific file
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct TranscodeState {
     pub progress: f32,
     pub output_path: Option<PathBuf>,
@@ -1117,10 +1118,19 @@ impl TorrentManager {
         if let Some(entry) = torrents.get_mut(&handle_id) {
             if let Some(session_id) = entry.session_id {
                 if delete_files {
-                    // Full removal
-                    tracing::info!("Deleting torrent session_id: {} (with files)", session_id);
+                    // Delete torrent completely from librqbit with all files
+                    tracing::info!("Deleting torrent session_id: {} completely with files", session_id);
+                    
+                    // First, manually delete the files to ensure they're removed
+                    if let Some(handle) = self.session.get(TorrentIdOrHash::Id(session_id)) {
+                        tracing::info!("Manually deleting files for session_id: {}", session_id);
+                        self.clear_torrent_files(session_id, &handle).await?;
+                    }
+                    
+                    // Then remove from librqbit
                     entry.session_id = None;
                     self.session.delete(TorrentIdOrHash::Id(session_id), true).await?;
+                    tracing::info!("Torrent session_id: {} deleted from librqbit", session_id);
                 } else {
                     // Cache the torrent: pause it and clear file data
                     tracing::info!("Caching torrent session_id: {} for handle_id: {}", session_id, handle_id);
@@ -1182,6 +1192,13 @@ impl TorrentManager {
     async fn clear_torrent_files(&self, session_id: usize, handle: &librqbit::ManagedTorrent) -> Result<()> {
         tracing::info!("Clearing file data for session_id: {}", session_id);
         
+        // Get torrent name for the base directory
+        let torrent_name = handle.with_metadata(|meta| {
+            meta.info.name.as_ref()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        })?;
+        
         // Get file paths
         let file_paths: Vec<PathBuf> = handle.with_metadata(|meta| {
             meta.file_infos
@@ -1194,12 +1211,14 @@ impl TorrentManager {
                 .collect()
         })?;
         
-        // Delete each file - librqbit will recreate them when needed
-        for path in file_paths {
+        // Delete each file
+        let mut deleted_count = 0;
+        for path in &file_paths {
             if path.exists() {
                 match tokio::fs::remove_file(&path).await {
                     Ok(_) => {
-                        tracing::debug!("Deleted file: {:?}", path);
+                        tracing::info!("Deleted file: {:?}", path);
+                        deleted_count += 1;
                     }
                     Err(e) => {
                         tracing::warn!("Failed to delete file {:?}: {}", path, e);
@@ -1208,7 +1227,20 @@ impl TorrentManager {
             }
         }
         
-        tracing::info!("Files deleted for session_id: {}", session_id);
+        // Delete the torrent's base directory if it exists and is now empty
+        let torrent_dir = self.download_dir.join(&torrent_name);
+        if torrent_dir.exists() && torrent_dir.is_dir() {
+            match tokio::fs::remove_dir_all(&torrent_dir).await {
+                Ok(_) => {
+                    tracing::info!("Deleted torrent directory: {:?}", torrent_dir);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to delete torrent directory {:?}: {}", torrent_dir, e);
+                }
+            }
+        }
+        
+        tracing::info!("Deleted {} files for session_id: {}", deleted_count, session_id);
         Ok(())
     }
     
@@ -1334,15 +1366,68 @@ impl TorrentManager {
         self.download_dir.clone()
     }
 
+    pub async fn wipe_all_files(&self) -> Result<()> {
+        tracing::info!("Wiping all torrent files from download directory");
+        
+        let download_dir = self.download_dir.clone();
+        
+        // Delete everything in the download directory except cache files
+        if download_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&download_dir).await?;
+            let mut deleted_count = 0;
+            
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                let file_name = path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                
+                // Skip cache files
+                if file_name == "torrent_cache.json" {
+                    continue;
+                }
+                
+                if path.is_dir() {
+                    match tokio::fs::remove_dir_all(&path).await {
+                        Ok(_) => {
+                            tracing::info!("Deleted directory: {:?}", path);
+                            deleted_count += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to delete directory {:?}: {}", path, e);
+                        }
+                    }
+                } else {
+                    match tokio::fs::remove_file(&path).await {
+                        Ok(_) => {
+                            tracing::info!("Deleted file: {:?}", path);
+                            deleted_count += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to delete file {:?}: {}", path, e);
+                        }
+                    }
+                }
+            }
+            
+            tracing::info!("Wiped {} items from download directory", deleted_count);
+        }
+        
+        Ok(())
+    }
+
     pub async fn cleanup_all(&self) -> Result<()> {
         tracing::info!("Cleaning up all torrents on app close");
         let torrents = self.torrents.read().await;
-        let handles: Vec<usize> = torrents.keys().copied().collect();
+        let session_ids: Vec<usize> = torrents.values()
+            .filter_map(|entry| entry.session_id)
+            .collect();
         drop(torrents);
 
-        for handle_id in handles {
-            if let Err(e) = self.stop_stream(handle_id, true).await {
-                tracing::error!("Error stopping torrent {}: {}", handle_id, e);
+        for session_id in session_ids {
+            tracing::info!("Deleting torrent session_id: {} with files", session_id);
+            if let Err(e) = self.session.delete(TorrentIdOrHash::Id(session_id), true).await {
+                tracing::error!("Error deleting torrent {}: {}", session_id, e);
             }
         }
         
@@ -1605,6 +1690,7 @@ async fn extract_mkv_metadata_ffprobe(file_path: &std::path::Path) -> Result<Mkv
 }
 
 // Transcode audio to AAC using ffmpeg-sidecar
+#[allow(dead_code)]
 async fn transcode_audio_track(
     input_path: &std::path::Path,
     output_path: &std::path::Path,
@@ -1718,6 +1804,7 @@ async fn transcode_audio_track(
 }
 
 // Get media duration using ffprobe
+#[allow(dead_code)]
 async fn get_media_duration(path: &std::path::Path) -> Result<f64> {
     use tokio::process::Command;
     
@@ -1757,7 +1844,7 @@ async fn stream_transcoded_audio_default(
 // HTTP handler to stream transcoded audio live (starts playing before transcoding is complete)
 async fn stream_transcoded_audio(
     Path((session_id, file_id, track_index)): Path<(usize, usize, usize)>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> impl IntoResponse {
     use std::process::Stdio;
@@ -2212,6 +2299,16 @@ pub async fn stop_stream(
 ) -> Result<(), String> {
     manager
         .stop_stream(handle_id, delete_files)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn wipe_all_torrent_files(
+    manager: State<'_, Arc<TorrentManager>>,
+) -> Result<(), String> {
+    manager
+        .wipe_all_files()
         .await
         .map_err(|e| e.to_string())
 }
