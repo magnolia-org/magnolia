@@ -16,6 +16,239 @@ on:
           - full
           - prerelease
 
+permissions:
+  contents: write
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Bump version in all three manifests and push the commit
+  # ─────────────────────────────────────────────────────────────────────────────
+  bump-version:
+    name: Bump Version & Commit
+    runs-on: ubuntu-latest
+    outputs:
+      commit-sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update package.json
+        run: |
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            p.version = '${{ inputs.version }}';
+            fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
+          "
+
+      - name: Update tauri.conf.json
+        run: |
+          node -e "
+            const fs = require('fs');
+            const c = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+            c.version = '${{ inputs.version }}';
+            fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(c, null, 2) + '\n');
+          "
+
+      - name: Update src-tauri/Cargo.toml
+        run: |
+          V="${{ inputs.version }}"
+          # Replace `version = "x.y.z"` only within the [package] section
+          sed -i '/^\[package\]/,/^\[/{s/^version = "[^"]*"/version = "'"$V"'"/}' src-tauri/Cargo.toml
+
+      - name: Commit and push
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
+          git commit -m "chore: bump version to ${{ inputs.version }}"
+          git push
+          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Windows — NSIS installer
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-windows:
+    name: Build (Windows · NSIS)
+    needs: bump-version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-version.outputs.commit-sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Add node_modules/.bin to PATH
+        shell: pwsh
+        run: "${{ github.workspace }}\\node_modules\\.bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Set up mpv runtime libraries
+        run: node scripts/setup_runtime_libs_windows.mjs
+
+      - name: Build (NSIS)
+        run: node scripts/run_tauri.mjs build --target nsis
+        env:
+          SOIA_SKIP_APPLY_RUNTIME_LIBS: "1"
+
+      - name: Upload NSIS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: magnolia-windows-nsis
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # macOS — DMG
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-macos:
+    name: Build (macOS · DMG)
+    needs: bump-version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-version.outputs.commit-sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Add node_modules/.bin to PATH
+        run: echo "${{ github.workspace }}/node_modules/.bin" >> $GITHUB_PATH
+
+      - name: Set up mpv runtime libraries
+        run: bash scripts/setup_runtime_libs_macos.sh
+
+      - name: Build (DMG)
+        run: node scripts/run_tauri.mjs build --target dmg
+        env:
+          SOIA_SKIP_APPLY_RUNTIME_LIBS: "1"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: magnolia-macos-dmg
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Linux — AppImage
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-linux:
+    name: Build (Linux · AppImage)
+    needs: bump-version
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-version.outputs.commit-sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libfuse2
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Add node_modules/.bin to PATH
+        run: echo "${{ github.workspace }}/node_modules/.bin" >> $GITHUB_PATH
+
+      - name: Set up mpv runtime libraries
+        run: bash scripts/setup_runtime_libs_linux.sh
+
+      - name: Build (AppImage)
+        run: node scripts/run_tauri.mjs build --target appimage
+        env:
+          SOIA_SKIP_APPLY_RUNTIME_LIBS: "1"
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: magnolia-linux-appimage
+          path: src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Draft GitHub Release
+  # ─────────────────────────────────────────────────────────────────────────────
+  draft-release:
+    name: Draft Release
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: Magnolia v${{ inputs.version }}
+          draft: true
+          prerelease: ${{ inputs.prerelease == 'prerelease' }}
+          generate_release_notes: true
+          files: |
+            artifacts/magnolia-windows-nsis/*.exe
+            artifacts/magnolia-macos-dmg/*.dmg
+            artifacts/magnolia-linux-appimage/*.AppImage
+        description: "Release type"
+        required: true
+        default: "full"
+        type: choice
+        options:
+          - full
+          - prerelease
+
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   # Windows — NSIS installer
