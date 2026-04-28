@@ -14,6 +14,9 @@
   let recentSearches = [];
   let showRecent = false;
   let searchResultsContainer;
+  let searchPage = 1;
+  let searchTotalPages = 1;
+  let loadingMore = false;
   
   $: searchActive = searchQuery.length > 0 || showRecent;
   
@@ -60,22 +63,48 @@
     if (searchQuery.length < 2) {
       searchResults = [];
       selectedIndex = -1;
+      searchPage = 1;
+      searchTotalPages = 1;
       return;
     }
     
     searching = true;
     try {
-      const response = await searchMulti(searchQuery);
-      searchResults = response.results
+      const response = await searchMulti(searchQuery, 1);
+      searchResults = (response.results || [])
         .filter(item => item.media_type !== 'person')
-        .sort((a, b) => (b.popularity || 0) - (a.popularity || 0))
-        .slice(0, 10);
+        .sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
+      searchPage = 1;
+      searchTotalPages = response.total_pages || 1;
       selectedIndex = -1;
     } catch (err) {
       console.error('Search error:', err);
       searchResults = [];
     }
     searching = false;
+  }
+
+  async function loadMoreSearchResults() {
+    if (loadingMore || searchPage >= searchTotalPages || searchQuery.length < 2) return;
+    loadingMore = true;
+    try {
+      const nextPage = searchPage + 1;
+      const response = await searchMulti(searchQuery, nextPage);
+      const newResults = (response.results || [])
+        .filter(item => item.media_type !== 'person');
+      searchResults = [...searchResults, ...newResults];
+      searchPage = nextPage;
+    } catch (err) {
+      console.error('Load more search error:', err);
+    }
+    loadingMore = false;
+  }
+
+  function handleSearchScroll(e) {
+    const el = e.currentTarget;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 150) {
+      loadMoreSearchResults();
+    }
   }
   
   function handleInput() {
@@ -197,7 +226,7 @@
       </div>
     {/if}
   </div>
-  <div class="search-results" bind:this={searchResultsContainer} class:visible={searchActive} aria-hidden={!searchActive}>
+  <div class="search-results" bind:this={searchResultsContainer} class:visible={searchActive} aria-hidden={!searchActive} on:scroll={handleSearchScroll}>
       {#if showRecent && recentSearches.length > 0}
         <div class="results-header">
           <span>Recent Searches</span>
@@ -271,6 +300,9 @@
         {/each}
       {:else if searchQuery.length >= 2}
         <div class="results-placeholder">No results found</div>
+      {/if}
+      {#if loadingMore}
+        <div class="results-placeholder">Loading...</div>
       {/if}
     </div>
 </div>

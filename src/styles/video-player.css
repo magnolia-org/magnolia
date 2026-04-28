@@ -1711,3 +1711,26 @@
     -webkit-box-orient: vertical;
     overflow: hidden;
 }
+
+/* ── Non-macOS backdrop-filter fallbacks ────────────────────────────────────
+   On Windows/Linux the WebView is transparent (mpv renders natively below it),
+   so backdrop-filter has no web content to blur. Use opaque backgrounds instead.
+   On macOS (-webkit-backdrop-filter capable), the system compositor blurs
+   through to the native Metal layer, so we keep the normal rules there.      */
+
+html:not(.macos) .episodes-panel {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: color-mix(in srgb, var(--bg-primary) 97%, transparent);
+}
+
+html:not(.macos) .player-header .back-btn {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: rgba(0, 0, 0, 0.75);
+}
+
+html:not(.macos) .player-track-dropdown {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}

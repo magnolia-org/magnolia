@@ -967,3 +967,13 @@ pre {
 .toggle-switch input:checked:hover + .toggle-slider {
   background: var(--accent-color-hover);
 }
+/* ── Non-macOS backdrop-filter fallback for titlebar immersive mode ─────────
+   When the video player is active the titlebar enters immersive-mode and
+   renders over the transparent WebView. On Windows/Linux the system compositor
+   cannot blur through to the native mpv layer, so increase opacity instead.  */
+
+html:not(.macos) .titlebar.immersive-mode {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: rgba(10, 10, 10, 0.92);
+}

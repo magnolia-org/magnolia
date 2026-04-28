@@ -40,11 +40,11 @@
     let selectedQuality = "all";
     let selectedEncode = "all";
     let selectedAudioCodec = "all";
-    let hideIncompatible = true;
     let prioritizeMatching = true;
     let sortBy = "relevance";
     let sortDirection = "desc";
     let searchFilter = "";
+    let visibleCount = 50;
     
     let customMagnetLink = "";
     let magnetError = "";
@@ -61,12 +61,6 @@
     $: availableEncodes = [...new Set(results.map(r => r.encode).filter(Boolean))].sort();
     $: availableAudioCodecs = [...new Set(results.map(r => r.audio_codec).filter(Boolean))].sort();
 
-    function isWebCompatible(codec) {
-        if (!codec) return true;
-        const compatible = ['AAC', 'MP3', 'Opus', 'Vorbis', 'FLAC'];
-        return compatible.includes(codec);
-    }
-    
     function torrentHasReleaseYear(torrent) {
         if (!isMovie || !releaseYear) return false;
         return torrent.title.includes(releaseYear.toString());
@@ -115,7 +109,6 @@
             if (selectedBatch === "single" && torrent.is_batch) return false;
             if (selectedQuality !== "all" && torrent.quality !== selectedQuality) return false;
             if (selectedEncode !== "all" && torrent.encode !== selectedEncode) return false;
-            if (hideIncompatible && !isWebCompatible(torrent.audio_codec)) return false;
             if (selectedAudioCodec !== "all" && torrent.audio_codec !== selectedAudioCodec) return false;
             return true;
         })
@@ -190,10 +183,20 @@
         selectedQuality = "all";
         selectedEncode = "all";
         selectedAudioCodec = "all";
-        hideIncompatible = true;
         sortBy = "relevance";
         sortDirection = "desc";
         searchFilter = "";
+        visibleCount = 50;
+    }
+
+    // Reset visible window whenever the filtered list changes
+    $: { filteredResults; visibleCount = 50; }
+
+    function handleResultsScroll(e) {
+        const el = e.currentTarget;
+        if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
+            visibleCount = Math.min(visibleCount + 50, filteredResults.length);
+        }
     }
 
     function toggleSort(column) {
@@ -483,15 +486,6 @@
                     </div>
                 {/if}
 
-                <div class="filter-group">
-                    <span class="filter-label">Compat:</span>
-                    <div class="filter-options">
-                        <button class="filter-chip" class:active={hideIncompatible} on:click={() => hideIncompatible = !hideIncompatible} title="Hide torrents with incompatible audio codecs (AC3, DTS, TrueHD, etc.)">
-                            <i class="ri-{hideIncompatible ? 'eye-off' : 'eye'}-line"></i>
-                        </button>
-                    </div>
-                </div>
-                
                 {#if (currentSeason && currentEpisode) || isMovie}
                     <div class="filter-group">
                         <span class="filter-label">Priority:</span>
@@ -509,7 +503,7 @@
             </div>
         {/if}
 
-        <div class="results-list">
+        <div class="results-list" on:scroll={handleResultsScroll}>
             {#if loading}
                 <div class="loading-state">
                     <div class="spinner"></div>
@@ -555,7 +549,7 @@
                     </div>
                 </div>
                 <div class="table-body">
-                    {#each filteredResults as torrent}
+                    {#each filteredResults.slice(0, visibleCount) as torrent}
                         <div class="torrent-row" class:disabled={loading} class:matches-episode={torrentMatchesCurrentEpisode(torrent)} class:has-year={torrentHasReleaseYear(torrent)} on:click={() => selectTorrent(torrent)}>
                             <div class="col-name">
                                 <div class="torrent-title">{torrent.title}</div>

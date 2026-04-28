@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, Session, api::TorrentIdOrHash};
+use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, Session, SessionOptions, SessionPersistenceConfig, api::TorrentIdOrHash};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -228,9 +228,18 @@ impl TorrentManager {
             return Err(e.into());
         }
 
-        // Create session with default options
+        // Create session with fastresume enabled so the "all zeros" bitfield is persisted
+        // after the first initial_check. On Windows, pread_exact via seek_read returns Ok()
+        // on EOF rather than an error, so the initial_check has to SHA1-hash every piece
+        // individually instead of short-circuiting when a file is found empty. Fastresume
+        // means only the *first* play of any given torrent incurs that cost; every
+        // subsequent play (same info_hash) skips the check entirely.
         println!("creating librqbit session...");
-        let session = match Session::new(download_dir.clone()).await {
+        let session = match Session::new_with_opts(download_dir.clone(), SessionOptions {
+            fastresume: true,
+            persistence: Some(SessionPersistenceConfig::Json { folder: None }),
+            ..Default::default()
+        }).await {
             Ok(s) => {
                 println!("librqbit session created successfully");
                 s
@@ -521,31 +530,35 @@ impl TorrentManager {
             .map(|ct| ct.session_id);
         
         if let Some(session_id) = cached_session_id {
-            tracing::info!("Found cached torrent for handle_id {}, resuming session_id {}", handle_id, session_id);
-            
             // Remove from cache
             cache.retain(|ct| ct.handle_id != handle_id);
             drop(cache);
-            
-            // Resume the torrent
+
+            // The torrent is still paused in the rqbit session (files were cleared by
+            // stop_stream but the session entry is kept so the persisted bitfield survives).
+            // Just update only_files to the requested file and unpause — no re-checking phase.
             if let Some(handle) = self.session.get(TorrentIdOrHash::Id(session_id)) {
-                // Resume if paused
+                let only_files_set = std::collections::HashSet::from([file_index]);
+                if let Err(e) = self.session.update_only_files(&handle, &only_files_set).await {
+                    tracing::warn!("Failed to update only_files for cached session {}: {}", session_id, e);
+                }
+
                 if handle.is_paused() {
                     self.session.unpause(&handle).await?;
                 }
-                
-                tracing::info!("Resumed cached torrent, session_id {} for handle_id {}", session_id, handle_id);
-                
-                // Update entry with session_id
+
+                tracing::info!("Resumed cached torrent session_id {} for handle_id {}, file_index {}", session_id, handle_id, file_index);
+
                 drop(torrents);
                 let mut torrents = self.torrents.write().await;
                 if let Some(entry) = torrents.get_mut(&handle_id) {
                     entry.session_id = Some(session_id);
                 }
-                
+
                 return Ok(());
             } else {
-                tracing::warn!("Cached session_id {} not found in session, adding fresh", session_id);
+                tracing::warn!("Cached session_id {} not found in rqbit session, will re-add fresh", session_id);
+                // Fall through to fresh add with only_files below.
             }
         } else {
             drop(cache);

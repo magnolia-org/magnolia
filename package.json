@@ -7,9 +7,15 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri": "node ./scripts/run_tauri.mjs",
+    "tauri:dev": "node ./scripts/run_tauri.mjs dev",
+    "tauri:build": "node ./scripts/run_tauri.mjs build",
+    "setup:libs": "node ./scripts/setup_runtime_libs.mjs",
+    "setup:libs:mac:intel": "MPV_TARGET_ARCH=x86_64 node ./scripts/setup_runtime_libs.mjs --platform darwin",
+    "sync:runtime": "node ./scripts/sync_runtime_libs.mjs",
+    "sync:runtime:mac": "node ./scripts/sync_runtime_libs.mjs --platform darwin",
+    "sync:runtime:linux": "node ./scripts/sync_runtime_libs.mjs --platform linux",
+    "sync:runtime:win": "node ./scripts/sync_runtime_libs.mjs --platform win32"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^3.0.0",

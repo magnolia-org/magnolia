@@ -1,16 +1,12 @@
-use super::embed::{self, EmbedHandle};
 use super::event_loop::mpv_event_loop;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::ffi::ensure_numeric_locale_for_mpv;
 use super::ffi::{
     mpv_command, mpv_create, mpv_create_client, mpv_destroy, mpv_format, mpv_free,
     mpv_get_property_string, mpv_initialize, mpv_set_option, mpv_set_option_string,
-    mpv_terminate_destroy, SoiaUtils,
-};
-#[cfg(target_os = "macos")]
-use super::ffi::{
-    soia_utils_create, soia_utils_destroy, soia_utils_render_context_update,
-    soia_utils_render_target_resize, soia_utils_uses_render_context,
+    mpv_terminate_destroy, SoiaUtils, soia_utils_create, soia_utils_destroy,
+    soia_utils_render_context_update, soia_utils_render_target_resize,
+    soia_utils_uses_render_context,
 };
 use log::info;
 use std::ffi::{c_void, CStr, CString};
@@ -29,10 +25,8 @@ pub struct MpvHandle {
     event_loop_handle: Mutex<Option<JoinHandle<()>>>,
     render_loop_stop: Arc<AtomicBool>,
     render_loop_handle: Mutex<Option<JoinHandle<()>>>,
-    /// soia_utils instance (macOS only; null on other platforms).
+    /// soia_utils instance (all platforms).
     soia_utils: AtomicPtr<SoiaUtils>,
-    /// Keeps the platform embed resources alive for the lifetime of this handle.
-    _embed: EmbedHandle,
 }
 
 unsafe impl Send for MpvHandle {}
@@ -74,38 +68,21 @@ impl MpvHandle {
             );
         }
 
-        // Create the platform embed (NSView on macOS) BEFORE mpv_initialize().
-        let embed = embed::setup_mpv_window(raw_window, display).map_err(|e| {
-            unsafe { mpv_destroy(ctx) };
-            e
-        })?;
-
         let set_str = |name: &str, value: &str| {
             let c_name = CString::new(name).unwrap();
             let c_value = CString::new(value).unwrap();
             unsafe { mpv_set_option_string(ctx, c_name.as_ptr(), c_value.as_ptr()) };
         };
 
-        if !embed.uses_render_context {
-            let mut wid: i64 = embed.wid;
-            let c_name = CString::new("wid").unwrap();
-            unsafe {
-                mpv_set_option(
-                    ctx,
-                    c_name.as_ptr(),
-                    mpv_format::MPV_FORMAT_INT64,
-                    &mut wid as *mut i64 as *mut c_void,
-                );
-            }
-        }
-
-        // On macOS soia_utils handles vo selection; elsewhere keep gpu/libmpv.
-        #[cfg(not(target_os = "macos"))]
-        set_str("vo", if embed.uses_render_context { "libmpv" } else { "gpu" });
+        // soia_utils handles vo, wid, and GPU backend selection — only set
+        // options that are independent of the render path.
         set_str("hwdec", "auto");
         set_str("osc", "no");
         set_str("osd-level", "0");
         set_str("demuxer-lavf-o", "reconnect=1,reconnect_streamed=1");
+        // Disable automatic subtitle selection so the UI and mpv stay in sync.
+        // loadTrackPreferences() will apply any saved preference after file load.
+        set_str("sub-auto", "no");
 
         let init_result = unsafe { mpv_initialize(ctx) };
         if init_result < 0 {
@@ -113,41 +90,44 @@ impl MpvHandle {
             return Err(format!("mpv_initialize failed (error {})", init_result));
         }
 
-        // ── macOS: create soia_utils after mpv_initialize ─────────────────
-        // soia_utils_create sets up the Metal/Vulkan render context and embeds
-        // video into the WKWebView's own NSView (raw_window).
-        // mode 0 = wid/native embedding (default on macOS).
-        // IMPORTANT: pass raw_window directly — NOT a sub-view pointer.
-        let soia_utils_ptr: *mut SoiaUtils;
+        // ── soia_utils: handles embedding on all platforms ─────────────────
+        // mode: macOS = 0 (native/Metal), Linux X11 = 1, Linux Wayland = 2,
+        //       Windows = 1 (D3D/OpenGL child-window render context).
         #[cfg(target_os = "macos")]
-        {
-            let display_ptr = display.unwrap_or(std::ptr::null());
-            let utils = unsafe {
-                soia_utils_create(
-                    ctx,
-                    raw_window,   // WKWebView's own NSView, as in soia
-                    display_ptr,
-                    0,            // mode 0 = wid / native
-                    std::ptr::null(),
-                    std::ptr::null(),
-                )
-            };
-            if utils.is_null() {
-                unsafe { mpv_destroy(ctx) };
-                return Err("soia_utils_create failed — check that libsoia_utils.dylib is present in src-tauri/libs/mpv/lib/".into());
-            }
-            soia_utils_ptr = utils;
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            soia_utils_ptr = std::ptr::null_mut();
+        let mode: i32 = 0;
+        #[cfg(target_os = "linux")]
+        let mode: i32 = {
+            let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
+            if session.trim().eq_ignore_ascii_case("wayland") { 2 } else { 1 }
+        };
+        #[cfg(target_os = "windows")]
+        let mode: i32 = 1;
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        let mode: i32 = 0;
+
+        let display_ptr = display.unwrap_or(std::ptr::null());
+        let soia_utils_ptr = unsafe {
+            soia_utils_create(
+                ctx,
+                raw_window,
+                display_ptr,
+                mode,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        if soia_utils_ptr.is_null() {
+            unsafe { mpv_destroy(ctx) };
+            return Err(
+                "soia_utils_create failed — ensure libsoia_utils is present in src-tauri/libs/mpv/lib/"
+                    .into(),
+            );
         }
 
         let handle = MpvHandle {
             ctx: AtomicPtr::new(ctx),
             is_playing: Arc::new(AtomicBool::new(false)),
             eof_reached: Arc::new(AtomicBool::new(false)),
-            _embed: embed,
             app_handle,
             event_loop_stop: Arc::new(AtomicBool::new(false)),
             event_loop_handle: Mutex::new(None),
@@ -233,44 +213,42 @@ impl MpvHandle {
         }
     }
 
-    /// Start the soia_utils render loop if one is needed (i.e. render context mode).
-    /// On macOS mode-0 (wid/native) no render thread is needed.
-    /// Returns the raw soia_utils pointer (macOS only).
+    /// Returns the raw soia_utils pointer (used by macOS layer geometry sync).
     #[cfg(target_os = "macos")]
-    pub fn soia_utils_ptr(&self) -> *mut SoiaUtils {
+    pub(crate) fn soia_utils_ptr(&self) -> *mut SoiaUtils {
         self.soia_utils.load(Ordering::Acquire)
     }
 
+    /// Start the soia_utils render loop if the render context path is active.
+    /// On native/wid modes (macOS mode-0, Windows/Linux mode-1) soia_utils drives
+    /// its own presentation; no render thread is required.
     pub fn start_render_loop(&self) {
-        #[cfg(target_os = "macos")]
-        {
-            let utils = self.soia_utils.load(Ordering::Acquire);
-            if utils.is_null() {
-                return;
-            }
-            let needs_loop = unsafe { soia_utils_uses_render_context(utils) != 0 };
-            if !needs_loop {
-                return;
-            }
+        let utils = self.soia_utils.load(Ordering::Acquire);
+        if utils.is_null() {
+            return;
+        }
+        let needs_loop = unsafe { soia_utils_uses_render_context(utils) != 0 };
+        if !needs_loop {
+            return;
+        }
 
-            self.render_loop_stop.store(false, Ordering::SeqCst);
-            let stop_flag = self.render_loop_stop.clone();
-            let utils_usize = utils as usize;
+        self.render_loop_stop.store(false, Ordering::SeqCst);
+        let stop_flag = self.render_loop_stop.clone();
+        let utils_usize = utils as usize;
 
-            let thread = std::thread::Builder::new()
-                .name("mpv-soia-render".into())
-                .spawn(move || {
-                    let utils = utils_usize as *mut SoiaUtils;
-                    while !stop_flag.load(Ordering::Relaxed) {
-                        unsafe { soia_utils_render_context_update(utils) };
-                        std::thread::sleep(std::time::Duration::from_millis(8));
-                    }
-                })
-                .expect("failed to spawn soia render thread");
+        let thread = std::thread::Builder::new()
+            .name("mpv-soia-render".into())
+            .spawn(move || {
+                let utils = utils_usize as *mut SoiaUtils;
+                while !stop_flag.load(Ordering::Relaxed) {
+                    unsafe { soia_utils_render_context_update(utils) };
+                    std::thread::sleep(std::time::Duration::from_millis(8));
+                }
+            })
+            .expect("failed to spawn soia render thread");
 
-            if let Ok(mut guard) = self.render_loop_handle.lock() {
-                *guard = Some(thread);
-            }
+        if let Ok(mut guard) = self.render_loop_handle.lock() {
+            *guard = Some(thread);
         }
     }
 
@@ -312,7 +290,6 @@ impl MpvHandle {
     fn free_soia_utils(&self) {
         let utils = self.soia_utils.swap(std::ptr::null_mut(), Ordering::AcqRel);
         if !utils.is_null() {
-            #[cfg(target_os = "macos")]
             unsafe { soia_utils_destroy(utils) };
         }
     }
@@ -327,18 +304,11 @@ impl MpvHandle {
 
     /// Notify soia_utils that the window was resized (physical pixel dimensions).
     pub fn resize_view(&self, logical_w: f64, logical_h: f64, scale: f64) {
-        #[cfg(target_os = "macos")]
-        {
-            let utils = self.soia_utils.load(Ordering::Acquire);
-            if !utils.is_null() {
-                let pw = (logical_w * scale) as u32;
-                let ph = (logical_h * scale) as u32;
-                unsafe { soia_utils_render_target_resize(utils, pw, ph) };
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            self._embed.resize(logical_w, logical_h, scale);
+        let utils = self.soia_utils.load(Ordering::Acquire);
+        if !utils.is_null() {
+            let pw = (logical_w * scale) as u32;
+            let ph = (logical_h * scale) as u32;
+            unsafe { soia_utils_render_target_resize(utils, pw, ph) };
         }
     }
 

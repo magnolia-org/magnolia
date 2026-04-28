@@ -36,4 +36,4 @@ coverage
 *.njsproj
 *.sln
 *.sw?
-/.github
+/.github/instructions

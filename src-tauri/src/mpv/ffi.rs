@@ -175,7 +175,7 @@ unsafe extern "C" {
     pub(super) fn mpv_free(data: *mut c_void);
 }
 
-// ── soia_utils — macOS embedding + render context (from bundled dylib) ───────
+// ── soia_utils — cross-platform embedding + render context (from bundled library) ──
 
 /// Opaque handle returned by soia_utils_create.
 #[repr(C)]
@@ -183,11 +183,11 @@ pub(crate) struct SoiaUtils {
     _private: [u8; 0],
 }
 
-#[cfg(target_os = "macos")]
 #[link(name = "soia_utils")]
 unsafe extern "C" {
-    /// Create a SoiaUtils instance that embeds mpv into `window` (NSView*).
-    /// `mode` 0 = wid/native (default on macOS). Must be called after mpv_initialize().
+    /// Create a SoiaUtils instance that embeds mpv into `window`.
+    /// `mode`: macOS — 0 = wid/native; Linux/Windows — 1 = X11/HWND, 2 = render context (Wayland).
+    /// Must be called after mpv_initialize().
     pub(crate) fn soia_utils_create(
         mpv_ctx: *mut c_void,
         window: *const c_void,
@@ -208,9 +208,12 @@ unsafe extern "C" {
 
     /// Destroy the SoiaUtils instance. Must be called before mpv_destroy().
     pub(crate) fn soia_utils_destroy(utils: *mut SoiaUtils);
+}
 
+#[cfg(target_os = "macos")]
+#[link(name = "soia_utils")]
+unsafe extern "C" {
     /// Sync the Metal layer geometry to match the NSView bounds.
     /// Call on the main thread after every resize and at startup.
-    /// `utils` is the SoiaUtils pointer cast to usize (matches soia's FFI convention).
     pub(crate) fn soia_sync_layer_geometry(ns_view: *mut c_void, utils: usize);
 }

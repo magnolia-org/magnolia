@@ -1456,9 +1456,9 @@
         event.preventDefault();
         togglePlay();
         showShortcutIndicator(
-          playing ? "play" : "pause",
-          playing ? "Play" : "Pause",
-          playing ? "ri-play-fill" : "ri-pause-fill"
+          playing ? "pause" : "play",
+          playing ? "Pause" : "Play",
+          playing ? "ri-pause-fill" : "ri-play-fill"
         );
         break;
       case "arrowleft":
@@ -1693,10 +1693,14 @@
 
     mpvUnlisteners.push(await listen("mpv-tracks-update", (event) => {
       const tracks = event.payload.tracks || [];
+      const subtitleTracks = tracks.filter(t => t.track_type === "sub");
       videoMetadata = {
         audio_tracks: tracks.filter(t => t.track_type === "audio"),
-        subtitle_tracks: tracks.filter(t => t.track_type === "sub"),
+        subtitle_tracks: subtitleTracks,
       };
+      // Sync selected subtitle track index from mpv's own selection state
+      const selectedIdx = subtitleTracks.findIndex(t => t.selected);
+      selectedSubtitleTrack = selectedIdx; // -1 when no sub track is selected
     }));
 
     mpvUnlisteners.push(await listen("mpv-chapters-update", (event) => {
