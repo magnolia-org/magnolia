@@ -1,6 +1,6 @@
 {
   "productName": "Magnolia",
-  "version": "2.0.0beta",
+  "version": "2.0.0-beta",
   "identifier": "com.chair.magnolia",
   "build": {
     "beforeDevCommand": "npm run dev",
