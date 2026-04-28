@@ -151,6 +151,8 @@ jobs:
 
       - name: Set up mpv runtime libraries
         run: bash scripts/setup_runtime_libs_macos.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build (DMG)
         run: node scripts/run_tauri.mjs build --bundles dmg --target aarch64-apple-darwin
