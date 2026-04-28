@@ -97,7 +97,8 @@ jobs:
 
       - name: Add node_modules/.bin to PATH
         shell: pwsh
-        run: "${{ github.workspace }}\\node_modules\\.bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        run: |
+          "$env:GITHUB_WORKSPACE\node_modules\.bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Set up mpv runtime libraries
         run: node scripts/setup_runtime_libs_windows.mjs
