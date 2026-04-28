@@ -15,6 +15,21 @@ on:
         options:
           - full
           - prerelease
+      build_windows:
+        description: "Build Windows (NSIS)"
+        required: false
+        default: true
+        type: boolean
+      build_macos:
+        description: "Build macOS (DMG)"
+        required: false
+        default: true
+        type: boolean
+      build_linux:
+        description: "Build Linux (AppImage)"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -76,6 +91,7 @@ jobs:
   build-windows:
     name: Build (Windows · NSIS)
     needs: bump-version
+    if: inputs.build_windows
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -124,6 +140,7 @@ jobs:
   build-macos:
     name: Build (macOS DMG)
     needs: bump-version
+    if: inputs.build_macos
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -163,7 +180,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: magnolia-macos-dmg
-          path: src-tauri/target/release/bundle/dmg/*.dmg
+          path: src-tauri/target/*/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -172,6 +189,7 @@ jobs:
   build-linux:
     name: Build (Linux AppImage)
     needs: bump-version
+    if: inputs.build_linux
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -228,6 +246,7 @@ jobs:
   draft-release:
     name: Draft Release
     needs: [build-windows, build-macos, build-linux]
+    if: always() && !failure() && !cancelled()
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
