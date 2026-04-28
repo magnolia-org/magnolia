@@ -2,239 +2,106 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod mpv;
 mod search;
 mod torrent;
 mod tracking;
-mod media_cache;
-mod font_manager;
 mod watch_history;
 mod track_preferences;
 mod settings;
 mod logger;
 mod cache_metadata;
 
-use search::{nyaa::NyaaProvider, limetorrents::LimeTorrentsProvider, piratebay::PirateBayProvider, 
+use search::{nyaa::NyaaProvider, limetorrents::LimeTorrentsProvider, piratebay::PirateBayProvider,
              SearchProvider};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use tauri::{Manager, State};
 use torrent::TorrentManager;
 use tracking::TrackingManager;
-use media_cache::{MediaCache, TrackType};
-use font_manager::FontManager;
 use watch_history::{WatchHistoryManager, WatchHistoryItem};
 use track_preferences::TrackPreferencesManager;
 use settings::{SettingsManager, Settings};
 use logger::Logger;
 use cache_metadata::CacheMetadataManager;
-use ffmpeg_sidecar::download::{check_latest_version, download_ffmpeg_package, unpack_ffmpeg};
 
-fn is_ffmpeg_installed() -> bool {
-    #[cfg(target_os = "windows")]
-    let system_check = std::process::Command::new("where")
-        .arg("ffmpeg")
-        .creation_flags(0x08000000)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-    
-    #[cfg(not(target_os = "windows"))]
-    let system_check = std::process::Command::new("which")
-        .arg("ffmpeg")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-    
-    if system_check {
-        println!("ffmpeg found in system PATH");
-        return true;
-    }
-    
-    let sidecar_exists = ffmpeg_sidecar::paths::ffmpeg_path().exists();
-    if sidecar_exists {
-        println!("ffmpeg found in sidecar directory");
-    }
-    
-    sidecar_exists
+/// Tauri managed state — accessible by mpv event_loop and all mpv commands.
+pub struct AppState {
+    pub mpv_player: Arc<Mutex<mpv::MpvHandle>>,
 }
 
-#[allow(dead_code)]
-async fn ensure_ffmpeg_installed() -> Result<(), Box<dyn std::error::Error>> {
-    if is_ffmpeg_installed() {
-        println!("ffmpeg is already available");
-        return Ok(());
-    }
-    
-    println!("============================================");
-    println!("ffmpeg not found, downloading and installing...");
-    println!("this may take a few minutes (approximately 80MB download)");
-    println!("============================================");
-    
-    tokio::task::spawn_blocking(|| {
-        let sidecar_dir = ffmpeg_sidecar::paths::sidecar_dir()
-            .map_err(|e| {
-                eprintln!("failed to get sidecar directory: {}", e);
-                format!("failed to get sidecar directory: {}", e)
-            })?;
-        
-        println!("sidecar directory: {:?}", sidecar_dir);
-        
-        std::fs::create_dir_all(&sidecar_dir)
-            .map_err(|e| {
-                eprintln!("failed to create sidecar directory: {}", e);
-                format!("failed to create sidecar directory: {}", e)
-            })?;
-        
-        // Download ffmpeg
-        println!("checking latest version...");
-        let download_url = check_latest_version()
-            .map_err(|e| {
-                eprintln!("failed to check latest version: {}", e);
-                format!("failed to check latest version: {}", e)
-            })?;
-        
-        println!("download URL: {}", download_url);
-        
-        let destination = sidecar_dir.join("ffmpeg-download.zip");
-        println!("downloading to: {:?}", destination);
-        
-        download_ffmpeg_package(&download_url, &destination)
-            .map_err(|e| {
-                eprintln!("failed to download ffmpeg package: {}", e);
-                format!("failed to download ffmpeg package: {}", e)
-            })?;
-        
-        println!("download complete, unpacking...");
-        
-        unpack_ffmpeg(&destination, &sidecar_dir)
-            .map_err(|e| {
-                eprintln!("failed to unpack ffmpeg: {}", e);
-                // Clean up partial download
-                let _ = std::fs::remove_file(&destination);
-                format!("failed to unpack ffmpeg: {}", e)
-            })?;
-        
-        let _ = std::fs::remove_file(&destination);
-        
-        println!("ffmpeg installed successfully to {:?}", sidecar_dir);
-        
-        let ffmpeg_exe = ffmpeg_sidecar::paths::ffmpeg_path();
-        if ffmpeg_exe.exists() {
-            println!("ffmpeg installation verified at: {:?}", ffmpeg_exe);
-            println!("============================================");
-            Ok(())
-        } else {
-            eprintln!("ffmpeg installation failed - binary not found after unpacking");
-            eprintln!("expected location: {:?}", ffmpeg_exe);
-            Err(format!("ffmpeg installation failed - binary not found after unpacking at {:?}", ffmpeg_exe))
+
+// ── mpv commands ────────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn load_file(
+    state: State<'_, AppState>,
+    path: String,
+    #[allow(non_snake_case)] resumePosition: Option<f64>,
+    #[allow(non_snake_case)] autoPlay: Option<bool>,
+) -> Result<(), String> {
+    let guard = state.mpv_player.lock().map_err(|e| e.to_string())?;
+    let start_opt;
+    let mut args: Vec<&str> = vec!["loadfile", &path, "replace"];
+    if let Some(pos) = resumePosition {
+        if pos > 0.0 {
+            start_opt = format!("start={pos}");
+            args.push(&start_opt);
         }
-    })
-    .await
-    .map_err(|e| -> Box<dyn std::error::Error> { Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("ffmpeg installation task panicked: {}", e))) })?
-    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    
+    }
+    guard.command(&args);
+    let pause_val = if autoPlay.unwrap_or(true) { "no" } else { "yes" };
+    guard.set_option_string("pause", pause_val);
     Ok(())
 }
 
 #[tauri::command]
-fn check_ffmpeg() -> bool {
-    is_ffmpeg_installed()
+async fn cycle_pause(state: State<'_, AppState>) -> Result<(), String> {
+    let guard = state.mpv_player.lock().map_err(|e| e.to_string())?;
+    if guard.eof_reached() {
+        guard.command(&["seek", "0", "absolute"]);
+        guard.set_option_string("pause", "no");
+    } else {
+        guard.command(&["cycle", "pause"]);
+    }
+    Ok(())
 }
 
 #[tauri::command]
-async fn install_ffmpeg(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::Emitter;
-    use std::io::Write;
-    use std::fs::File;
-    
-    if is_ffmpeg_installed() {
-        return Ok(());
+async fn seek_video(state: State<'_, AppState>, seconds: f64) -> Result<(), String> {
+    let guard = state.mpv_player.lock().map_err(|e| e.to_string())?;
+    let pos_str = seconds.to_string();
+    guard.command(&["seek", &pos_str, "absolute"]);
+    if guard.eof_reached() {
+        guard.set_option_string("pause", "no");
     }
-
-    let sidecar_dir = ffmpeg_sidecar::paths::sidecar_dir()
-        .map_err(|e| e.to_string())?;
-    
-    std::fs::create_dir_all(&sidecar_dir)
-        .map_err(|e| e.to_string())?;
-    #[cfg(target_os = "windows")]
-    let download_url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip".to_string();
-    
-    #[cfg(not(target_os = "windows"))]
-    let download_url = check_latest_version()
-        .map_err(|e| e.to_string())?;
-    
-    let destination = sidecar_dir.join("ffmpeg-download.zip");
-    
-    let client = reqwest::Client::new();
-    let mut response = client.get(&download_url)
-        .header("User-Agent", "Magnolia/1.0")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-        
-    let total_size = response.content_length().unwrap_or(0);
-    println!("Download started. Total size: {}", total_size);
-
-    let mut file = std::fs::File::create(&destination).map_err(|e| e.to_string())?;
-    let mut downloaded: u64 = 0;
-    let mut last_emit_time = std::time::Instant::now();
-    
-    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
-        file.write_all(&chunk).map_err(|e| e.to_string())?;
-        downloaded += chunk.len() as u64;
-        
-        // Emit progress at most every 100ms to avoid flooding the frontend
-        if last_emit_time.elapsed().as_millis() > 100 {
-            if total_size > 0 {
-                let progress = (downloaded as f64 / total_size as f64) * 100.0;
-                let _ = app.emit("ffmpeg-install-progress", progress);
-            } else {
-                let _ = app.emit("ffmpeg-install-progress", -1.0);
-            }
-            last_emit_time = std::time::Instant::now();
-        }
-    }
-    
-    let _ = app.emit("ffmpeg-install-progress", 100.0);
-    
-    println!("Unpacking ffmpeg and ffprobe...");
-    let file = File::open(&destination).map_err(|e| e.to_string())?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-    
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
-        let name = file.name().to_string();
-        
-        let is_bin = if cfg!(target_os = "windows") {
-            name.ends_with("bin/ffmpeg.exe") || name.ends_with("bin/ffprobe.exe")
-        } else {
-            name.ends_with("bin/ffmpeg") || name.ends_with("bin/ffprobe")
-        };
-        
-        if is_bin {
-            let file_name = std::path::Path::new(&name).file_name().unwrap();
-            let out_path = sidecar_dir.join(file_name);
-            
-            println!("Extracting {:?} to {:?}", name, out_path);
-            
-            let mut outfile = File::create(&out_path).map_err(|e| e.to_string())?;
-            std::io::copy(&mut file, &mut outfile).map_err(|e| e.to_string())?;
-            
-            #[cfg(not(target_os = "windows"))]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&out_path).map_err(|e| e.to_string())?.permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&out_path, perms).map_err(|e| e.to_string())?;
-            }
-        }
-    }
-        
-    let _ = std::fs::remove_file(&destination);
-    
     Ok(())
 }
+
+#[tauri::command]
+async fn mpv_run_command(
+    state: State<'_, AppState>,
+    args: Vec<String>,
+) -> Result<(), String> {
+    let guard = state.mpv_player.lock().map_err(|e| e.to_string())?;
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    guard.command(&refs);
+    Ok(())
+}
+
+#[tauri::command]
+async fn mpv_set_option_string(
+    state: State<'_, AppState>,
+    name: String,
+    value: String,
+) -> Result<(), String> {
+    let guard = state.mpv_player.lock().map_err(|e| e.to_string())?;
+    guard.set_option_string(&name, &value);
+    Ok(())
+}
+
+// ── search commands ──────────────────────────────────────────────────────────
 
 #[tauri::command]
 async fn search_nyaa(query: String) -> Result<Vec<search::SearchResult>, String> {
@@ -467,107 +334,6 @@ async fn remove_saved_selection(
 }
 
 #[tauri::command]
-async fn save_subtitle_cache(
-    cache: State<'_, MediaCache>,
-    cache_id: String,
-    file_index: usize,
-    track_index: usize,
-    data: String,
-) -> Result<(), String> {
-    cache.save_track(TrackType::Subtitle, &cache_id, file_index, track_index, data.into_bytes()).await
-}
-
-#[tauri::command]
-async fn load_subtitle_cache(
-    cache: State<'_, MediaCache>,
-    cache_id: String,
-    file_index: usize,
-    track_index: usize,
-) -> Result<Option<String>, String> {
-    let result = cache.load_track(TrackType::Subtitle, &cache_id, file_index, track_index).await?;
-    Ok(result.and_then(|bytes| String::from_utf8(bytes).ok()))
-}
-
-#[tauri::command]
-async fn clear_subtitle_cache(
-    cache: State<'_, MediaCache>,
-) -> Result<(), String> {
-    cache.clear_cache(TrackType::Subtitle).await
-}
-
-#[tauri::command]
-async fn save_audio_cache(
-    cache: State<'_, MediaCache>,
-    cache_id: String,
-    file_index: usize,
-    track_index: usize,
-    data: String,
-) -> Result<(), String> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    let bytes = STANDARD.decode(&data).map_err(|e| format!("Failed to decode base64: {}", e))?;
-    cache.save_track(TrackType::Audio, &cache_id, file_index, track_index, bytes).await
-}
-
-#[tauri::command]
-async fn load_audio_cache(
-    cache: State<'_, MediaCache>,
-    cache_id: String,
-    file_index: usize,
-    track_index: usize,
-) -> Result<Option<String>, String> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    let data = cache.load_track(TrackType::Audio, &cache_id, file_index, track_index).await?;
-    Ok(data.map(|bytes| STANDARD.encode(&bytes)))
-}
-
-#[tauri::command]
-async fn clear_audio_cache(
-    cache: State<'_, MediaCache>,
-) -> Result<(), String> {
-    cache.clear_cache(TrackType::Audio).await
-}
-
-#[tauri::command]
-async fn load_transcoded_audio(
-    torrent_manager: State<'_, Arc<torrent::TorrentManager>>,
-    session_id: usize,
-    file_index: usize,
-) -> Result<Option<Vec<u8>>, String> {
-    torrent_manager.get_transcoded_audio(session_id, file_index).await
-}
-
-#[tauri::command]
-async fn save_font(
-    font_manager: State<'_, FontManager>,
-    filename: String,
-    data: Vec<u8>,
-) -> Result<String, String> {
-    // Check if font is already installed on system
-    if font_manager::is_font_installed(&filename) {
-        println!("Font {} is already installed on system, skipping save", filename);
-        return Ok(format!("system:{}", filename));
-    }
-    
-    let path = font_manager.save_font(&filename, &data)?;
-    Ok(path.to_string_lossy().to_string())
-}
-
-#[tauri::command]
-fn check_font_installed(filename: String) -> bool {
-    font_manager::is_font_installed(&filename)
-}
-
-#[tauri::command]
-fn list_fonts(font_manager: State<'_, FontManager>) -> Result<Vec<font_manager::FontInfo>, String> {
-    font_manager.list_fonts()
-}
-
-#[tauri::command]
-fn get_fonts_dir(font_manager: State<'_, FontManager>) -> String {
-    font_manager.get_fonts_dir().to_string_lossy().to_string()
-}
-
-#[tauri::command]
 async fn get_http_port(manager: State<'_, Arc<TorrentManager>>) -> Result<u16, String> {
     manager.get_http_port().await
 }
@@ -610,12 +376,12 @@ async fn clear_watch_history(
 async fn save_track_preference(
     track_prefs: State<'_, TrackPreferencesManager>,
     magnet_link: String,
-    audio_track_index: Option<usize>,
-    subtitle_track_index: Option<i32>,
+    #[allow(non_snake_case)] audioTrackId: Option<i64>,
+    #[allow(non_snake_case)] subtitleTrackId: Option<i64>,
     subtitle_language: Option<String>,
     subtitle_offset: Option<f64>,
 ) -> Result<(), String> {
-    track_prefs.save_preference(magnet_link, audio_track_index, subtitle_track_index, subtitle_language, subtitle_offset).await;
+    track_prefs.save_preference(magnet_link, audioTrackId, subtitleTrackId, subtitle_language, subtitle_offset).await;
     Ok(())
 }
 
@@ -744,75 +510,6 @@ async fn open_in_external_player(
 }
 
 #[tauri::command]
-async fn get_cache_stats(state: State<'_, MediaCache>) -> Result<Vec<media_cache::CacheGroup>, String> {
-    state.get_cache_stats().await
-}
-
-#[tauri::command]
-async fn get_font_stats(state: State<'_, FontManager>) -> Result<(usize, u64), String> {
-    state.get_stats()
-}
-
-#[tauri::command]
-async fn clear_cache_item(
-    id: String, 
-    state: State<'_, MediaCache>,
-    metadata_manager: State<'_, std::sync::Mutex<cache_metadata::CacheMetadataManager>>
-) -> Result<(), String> {
-    if id.starts_with("torrent_") {
-        state.clear_cache_by_id(&id).await?;
-        return Ok(());
-    }
-    
-    // Check if this is a hash - if so, look it up in metadata mappings
-    let tmdb_id: u32 = if id.len() <= 40 && id.chars().all(|c| c.is_ascii_hexdigit() || c.is_ascii_lowercase()) {
-        // This looks like a hash, check metadata mappings
-        let lookup_result = {
-            let mgr = metadata_manager.lock().unwrap();
-            mgr.mappings.get(&id.to_lowercase()).map(|m| m.tmdb_id)
-        };
-        
-        match lookup_result {
-            Some(tmdb) => tmdb,
-            None => {
-                // Hash not found in mappings, just clear by ID directly
-                state.clear_cache_by_id(&id).await?;
-                return Ok(());
-            }
-        }
-    } else {
-        // Handle movie/123 or tv/456 format
-        let id_parts: Vec<&str> = id.split('/').collect();
-        if id_parts.len() == 2 {
-            // Format: movie/123 or tv/456
-            id_parts[1].parse().map_err(|_| "invalid TMDB ID".to_string())?
-        } else {
-            // Plain number
-            id.parse().map_err(|_| "invalid TMDB ID".to_string())?
-        }
-    };
-    
-    // Find all hashes for this TMDB ID
-    let hashes_to_delete: Vec<String> = {
-        let mgr = metadata_manager.lock().unwrap();
-        mgr.mappings
-            .iter()
-            .filter(|(_, metadata)| metadata.tmdb_id == tmdb_id)
-            .map(|(hash, _)| hash.clone())
-            .collect()
-    };
-    
-    println!("[cache cleanup] found {} cache hashes for TMDB ID {}", hashes_to_delete.len(), tmdb_id);
-    
-    for hash in hashes_to_delete {
-        state.clear_cache_by_id(&hash).await?;
-        println!("[cache cleanup] cleared cache for hash: {}", &hash[..8.min(hash.len())]);
-    }
-    
-    Ok(())
-}
-
-#[tauri::command]
 async fn download_update(url: String, _app_handle: tauri::AppHandle) -> Result<String, String> {
     let temp_dir = std::env::temp_dir();
     let file_name = url.split('/').last().unwrap_or("magnolia-installer.exe");
@@ -913,7 +610,7 @@ fn main() {
                 .path()
                 .app_data_dir()
                 .expect("failed to get app data dir");
-            
+
             // Create app data dir if it doesn't exist
             if !app_data_dir.exists() {
                 std::fs::create_dir_all(&app_data_dir).expect("failed to create app data dir");
@@ -921,9 +618,6 @@ fn main() {
 
             let tracking_manager = TrackingManager::new(app_data_dir.clone());
             app.manage(tracking_manager);
-
-            let media_cache = MediaCache::new(app_data_dir.clone());
-            app.manage(media_cache);
 
             let watch_history_manager = WatchHistoryManager::new(app_data_dir.clone());
             app.manage(watch_history_manager);
@@ -933,10 +627,6 @@ fn main() {
 
             let settings_manager = SettingsManager::new(app_data_dir.clone());
             app.manage(settings_manager);
-
-            let font_manager = FontManager::new(&app_handle)
-                .expect("failed to create font manager");
-            app.manage(font_manager);
 
             let logger = Logger::new(&app_handle)
                 .expect("failed to create logger");
@@ -955,17 +645,129 @@ fn main() {
             let torrent_manager_arc = Arc::new(torrent_manager);
             app.manage(torrent_manager_arc.clone());
 
-            // Cleanup torrents on app close
-            let manager_for_cleanup = torrent_manager_arc.clone();
             let main_window = app.get_webview_window("main").unwrap();
-            
+
             // Set macOS-specific window properties for inset traffic lights
             #[cfg(target_os = "macos")]
             {
                 use tauri::TitleBarStyle;
                 let _ = main_window.set_title_bar_style(TitleBarStyle::Overlay);
             }
-            
+
+            // ── initialise libmpv and embed it under the WebView ──────────
+            {
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+                let wh = main_window
+                    .window_handle()
+                    .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
+                let (raw_window_ptr, display_ptr): (
+                    *const std::ffi::c_void,
+                    Option<*const std::ffi::c_void>,
+                ) = match wh.as_raw() {
+                    #[cfg(target_os = "macos")]
+                    RawWindowHandle::AppKit(h) => {
+                        (h.ns_view.as_ptr() as *const std::ffi::c_void, None)
+                    }
+                    #[cfg(target_os = "windows")]
+                    RawWindowHandle::Win32(h) => {
+                        (h.hwnd.get() as *const std::ffi::c_void, None)
+                    }
+                    #[cfg(target_os = "linux")]
+                    RawWindowHandle::Xcb(h) => (
+                        h.window.get() as *const std::ffi::c_void,
+                        h.connection
+                            .map(|p| p.as_ptr() as *const std::ffi::c_void),
+                    ),
+                    #[cfg(target_os = "linux")]
+                    RawWindowHandle::Wayland(h) => {
+                        (h.surface.as_ptr() as *const std::ffi::c_void, None)
+                    }
+                    _ => return Err("unsupported platform window handle".into()),
+                };
+
+                let mpv_handle =
+                    mpv::MpvHandle::new(raw_window_ptr, display_ptr, app_handle.clone())
+                        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+                let mpv_arc = Arc::new(Mutex::new(mpv_handle));
+                // Register AppState BEFORE starting the event listener —
+                // the event loop accesses AppState via app_handle.state::<AppState>().
+                app.manage(AppState {
+                    mpv_player: mpv_arc.clone(),
+                });
+
+                let guard = mpv_arc
+                    .lock()
+                    .map_err(|e| -> Box<dyn std::error::Error> { format!("mpv lock: {e}").into() })?;
+                guard.start_event_listener();
+                guard.start_render_loop();
+
+                // ── resize the embedded mpv NSView whenever the window resizes ──
+                let mpv_for_resize = mpv_arc.clone();
+                let window_for_resize = main_window.clone();
+                main_window.on_window_event(move |event| {
+                    let physical_size = match event {
+                        tauri::WindowEvent::Resized(s) => *s,
+                        tauri::WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
+                            *new_inner_size
+                        }
+                        _ => return,
+                    };
+                    let scale = window_for_resize.scale_factor().unwrap_or(2.0);
+                    let pw = physical_size.width.max(1);
+                    let ph = physical_size.height.max(1);
+                    let logical_w = pw as f64 / scale;
+                    let logical_h = ph as f64 / scale;
+                    if let Ok(guard) = mpv_for_resize.lock() {
+                        guard.resize_view(logical_w, logical_h, scale);
+                        #[cfg(target_os = "macos")]
+                        let utils_usize = guard.soia_utils_ptr() as usize;
+                        drop(guard);
+                        #[cfg(target_os = "macos")]
+                        {
+                            let window_cl = window_for_resize.clone();
+                            let app = window_for_resize.app_handle().clone();
+                            let _ = app.run_on_main_thread(move || {
+                                if let Ok(ns_view) = window_cl.ns_view() {
+                                    unsafe {
+                                        crate::mpv::ffi::soia_sync_layer_geometry(
+                                            ns_view as *mut std::ffi::c_void,
+                                            utils_usize,
+                                        );
+                                    }
+                                }
+                            });
+                        }
+                    }
+                });
+
+                // ── initial geometry sync at startup so video layer is visible immediately ──
+                #[cfg(target_os = "macos")]
+                {
+                    if let Ok(physical_size) = main_window.inner_size() {
+                        let scale = main_window.scale_factor().unwrap_or(2.0);
+                        let pw = physical_size.width.max(1);
+                        let ph = physical_size.height.max(1);
+                        let logical_w = pw as f64 / scale;
+                        let logical_h = ph as f64 / scale;
+                        guard.resize_view(logical_w, logical_h, scale);
+                    }
+                    if let Ok(ns_view) = main_window.ns_view() {
+                        let utils_usize = guard.soia_utils_ptr() as usize;
+                        unsafe {
+                            crate::mpv::ffi::soia_sync_layer_geometry(
+                                ns_view as *mut std::ffi::c_void,
+                                utils_usize,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Cleanup on app close
+            let manager_for_cleanup = torrent_manager_arc.clone();
             main_window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
                     tauri::async_runtime::block_on(async {
@@ -990,8 +792,6 @@ fn main() {
             torrent::resume_torrent,
             torrent::remove_torrent,
             torrent::get_download_dir,
-            torrent::extract_subtitle,
-            torrent::extract_audio_track,
             search_nyaa,
             search_nyaa_filtered,
             search_eztv_by_imdb,
@@ -1000,17 +800,6 @@ fn main() {
             get_saved_selection,
             get_all_torrent_selections,
             remove_saved_selection,
-            save_subtitle_cache,
-            load_subtitle_cache,
-            clear_subtitle_cache,
-            save_audio_cache,
-            load_audio_cache,
-            clear_audio_cache,
-            load_transcoded_audio,
-            save_font,
-            check_font_installed,
-            list_fonts,
-            get_fonts_dir,
             get_http_port,
             add_watch_history_item,
             get_watch_history,
@@ -1022,20 +811,19 @@ fn main() {
             get_settings,
             check_external_player,
             open_in_external_player,
-            check_ffmpeg,
-            install_ffmpeg,
-            get_cache_stats,
-            get_font_stats,
-            clear_cache_item,
             logger::log_message,
             cache_metadata::save_cache_metadata,
             cache_metadata::get_cache_metadata,
             cache_metadata::get_all_cache_metadata,
             download_update,
             install_update,
-            open_external_url
+            open_external_url,
+            load_file,
+            cycle_pause,
+            seek_video,
+            mpv_run_command,
+            mpv_set_option_string
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-

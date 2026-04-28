@@ -1,3 +1,6 @@
+body {
+  background-color: transparent !important;
+}
 .modal-overlay {
   position: fixed;
   top: 0;

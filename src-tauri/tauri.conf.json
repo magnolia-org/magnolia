@@ -9,18 +9,24 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "withGlobalTauri": true,
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
         "fullscreen": false,
         "resizable": true,
-        "title": "Magnolia",
+        "title": "",
         "width": 1300,
         "height": 900,
         "minWidth": 1000,
         "minHeight": 700,
-        "decorations": false,
-        "shadow": true,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "trafficLightPosition": {
+          "x": 15,
+          "y": 26
+        },
         "transparent": true
       }
     ],
@@ -43,6 +49,11 @@
         "installerIcon": "icons/icon.ico",
         "headerImage": "icons/nsis/headerimage.bmp",
         "sidebarImage": "icons/nsis/sidebarimage.bmp"
+      }
+    },
+    "macOS": {
+      "dmg": {
+        "background": "icons/dmg/background.png"
       }
     }
   }

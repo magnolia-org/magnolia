@@ -269,6 +269,24 @@ export async function getTVExternalIds(tvId) {
   return response.json();
 }
 
+export async function getMovieKeywords(movieId) {
+  const headers = await getHeaders();
+  const response = await fetch(
+    `${TMDB_BASE_URL}/movie/${movieId}/keywords`,
+    { headers }
+  );
+  return response.json();
+}
+
+export async function getTVKeywords(tvId) {
+  const headers = await getHeaders();
+  const response = await fetch(
+    `${TMDB_BASE_URL}/tv/${tvId}/keywords`,
+    { headers }
+  );
+  return response.json();
+}
+
 export async function getEpisodeExternalIds(tvId, seasonNumber, episodeNumber) {
   const headers = await getHeaders();
   const response = await fetch(

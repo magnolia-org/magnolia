@@ -49,7 +49,6 @@
 >
   {#if isMacOS}
     <div class="titlebar-center">
-      <div class="logo"></div>
       {#if !immersive}
         <SearchBar bind:searchActive />
       {/if}
@@ -58,6 +57,7 @@
       {#if !immersive}
         <SettingsPanel bind:settingsActive />
       {/if}
+      <div class="logo"></div>
     </div>
   {:else}
     <div class="titlebar-left">

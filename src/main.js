@@ -14,7 +14,7 @@ import '@fontsource-variable/geist-mono'
 import 'remixicon/fonts/remixicon.css'
 import App from './App.svelte'
 
-document.addEventListener('contextmenu', (e) => e.preventDefault());
+// document.addEventListener('contextmenu', (e) => e.preventDefault());
 
 const app = new App({
   target: document.getElementById('app'),

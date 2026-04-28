@@ -89,6 +89,12 @@ body {
   overflow: hidden;
 }
 
+/* Make root container and body transparent when video is playing so the native Metal layer shows through */
+main.video-active,
+body.video-active {
+  background-color: transparent !important;
+}
+
 main {
   width: 100%;
   height: 100%;
@@ -313,7 +319,11 @@ pre {
 /* macOS specific titlebar padding for inset traffic lights */
 @supports (-webkit-backdrop-filter: blur(10px)) {
   .titlebar {
-    padding-left: 78px;
+    padding-left: 90px;
+    padding-right: 14px;
+  }
+  .settings-wrapper {
+    padding-right: 8px;
   }
 }
 

@@ -1,6 +1,9 @@
-import { searchSubtitles } from "wyzie-lib";
+import { configure, searchSubtitles } from "wyzie-lib";
 
 export async function fetchSubtitles(mediaId, mediaType, seasonNum = null, episodeNum = null) {
+  configure({
+    baseUrl: "https://wyzie.wyziemagnolia.workers.dev"
+  });
   try {
     const params = {
       tmdb_id: mediaId,

@@ -25,6 +25,10 @@ let showLeftArrow = false;
 let showRightArrow = false;
 let cardColors = {};
 
+function getItemKey(item) {
+  return `${item.id}-${item.media_type || type}`;
+}
+
 $: myListItems = new Set($myListStore.map(item => `${item.id}-${item.media_type}`));
 $: {
   if (title === "My List") console.log('📺 My List carousel updated:', myListItems.size, 'items in store');
@@ -41,12 +45,18 @@ $: {
 }
 
 $: if (customItems) {
+  cardColors = {};
   items = customItems;
   loading = false;
   console.log('🔄 Custom items updated:', customItems.length, 'items');
   customItems.forEach(item => {
-    if (item.poster_path) {
-      extractDominantColor(item.id, getImageUrl(item.poster_path, 'w92'));
+    const itemKey = getItemKey(item);
+    if (isRecentlyWatched || title === 'My List') {
+      cardColors[itemKey] = accentColor;
+    } else if (item.poster_path) {
+      extractDominantColor(itemKey, getImageUrl(item.poster_path, 'w92'));
+    } else {
+      cardColors[itemKey] = accentColor;
     }
   });
 }
@@ -90,7 +100,7 @@ onMount(async () => {
 
     items.forEach(item => {
       if (item.poster_path) {
-        extractDominantColor(item.id, getImageUrl(item.poster_path, 'w92'));
+        extractDominantColor(getItemKey(item), getImageUrl(item.poster_path, 'w92'));
       }
     });
   } catch (err) {
@@ -149,7 +159,7 @@ behavior: 'smooth'
 setTimeout(updateArrows, 300);
 }
 
-async function extractDominantColor(itemId, imageUrl) {
+async function extractDominantColor(itemKey, imageUrl) {
 try {
 const img = new Image();
 img.crossOrigin = 'Anonymous';
@@ -194,13 +204,13 @@ const boost = 1.5; // Increase saturation
 r = Math.min(255, Math.floor(r + (r - min) * boost * saturation));
 g = Math.min(255, Math.floor(g + (g - min) * boost * saturation));
 b = Math.min(255, Math.floor(b + (b - min) * boost * saturation));
-cardColors[itemId] = `rgb(${r}, ${g}, ${b})`;
+cardColors[itemKey] = `rgb(${r}, ${g}, ${b})`;
 } else {
-cardColors[itemId] = accentColor;
+cardColors[itemKey] = accentColor;
 }
 cardColors = cardColors;
 } catch (err) {
-cardColors[itemId] = accentColor;
+cardColors[itemKey] = accentColor;
 cardColors = cardColors;
 }
 }
@@ -352,7 +362,7 @@ function handleViewAll() {
 {#each items as item, index (`${item.id}-${item.media_type}-${index}`)}
 <!-- svelte-ignore a11y-click-events-have-key-events -->
 <!-- svelte-ignore a11y-no-static-element-interactions -->
-<div class="media-card" style="--card-accent: {cardColors[item.id] || accentColor}" on:click={() => openDetail(item)}>
+<div class="media-card" style="--card-accent: {cardColors[getItemKey(item)] || accentColor}" on:click={() => openDetail(item)}>
 {#if item.poster_path}
 <img class="media-poster" src={getImageUrl(item.poster_path, 'w500')} alt={item.title || item.name} loading="lazy" />
 {#if isRecentlyWatched}

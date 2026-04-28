@@ -2,15 +2,12 @@
   import { onMount, onDestroy } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { invoke } from "@tauri-apps/api/core";
-  import { MKVDemuxer } from "./mkvDemuxer.js";
-  import { SubtitleRenderer } from "./subtitleRenderer.js";
-  import { SRTSubtitleRenderer } from "./srtSubtitleRenderer.js";
-  import { StreamingSrtFetcher } from "./streamingSrtFetcher.js";
-  import { AudioPlayer } from "./audioPlayer.js";
+  import { listen } from "@tauri-apps/api/event";
   import { formatTime } from "./utils/timeUtils.js";
-  import { fetchSubtitles, downloadSubtitle } from "./wyzieSubs.js";
+  import { fetchSubtitles } from "./wyzieSubs.js";
   import { watchProgressStore } from "./stores/watchProgressStore.js";
   import { watchHistoryStore } from "./stores/watchHistoryStore.js";
+  import { getSeasonDetails, getImageUrl } from "./tmdb.js";
 
   import { createEventDispatcher } from "svelte";
 
@@ -22,14 +19,12 @@
   export let magnetLink = null;
   export let initialTimestamp = 0;
   
-  let lastInitializedSrc = null;
-  
+  let videoMetadata = null;
+
   export let mediaId = null;
   export let mediaType = null;
   export let seasonNum = null;
   export let episodeNum = null;
-  
-  let videoMetadata = null;
 
   let loading = true;
   let loadingPhase = "initializing";
@@ -43,8 +38,6 @@
     phaseProgress: 0,
   };
   let pollInterval;
-  let needsAudioTranscoding = false;
-  let metadataFetched = false;
 
   const dispatch = createEventDispatcher();
 
@@ -55,9 +48,10 @@
   const CONTROLS_HIDE_TIMEOUT = 2000;
   const REFRESH_INTERVAL = 1000;
 
-  let videoElement;
-  let subtitleCanvas;
+  // mpv container (no videoElement)
+  let mpvContainer;
   let playing = false;
+  let playbackRate = 1.0;
   let currentTime = 0;
   let duration = 0;
   let bufferedRanges = [];
@@ -68,9 +62,6 @@
   let fullscreen = false;
   let wasMaximizedBeforeFullscreen = false;
   let showControls = true;
-  let isBufferingSeek = false;
-  let prefetchedAudio = null;
-  let waitingForAudio = false;
   let justSeeked = false;
   let showBufferingIndicator = false;
   let controlsTimeout;
@@ -78,13 +69,7 @@
   let progressBar;
   let videoContainer;
 
-  let demuxer = null;
-  let subtitleRenderer = null;
-  let srtRenderer = null;
-  let audioPlayer = null;
-  let useMkvDemuxer = false;
-  let demuxerInitialized = false;
-  let extractedFonts = [];
+  let mpvUnlisteners = [];
 
   let showAudioMenu = false;
   let showSubtitleMenu = false;
@@ -116,7 +101,6 @@
   let subtitleSubmenuX = 0;
   let subtitleSubmenuY = 0;
   let selectedAudioTrack = 0;
-  let audioTrackSwitchingSupported = false;
   let selectedSubtitleTrack = -1;
   let subtitleOffset = 0;
   let chapters = [];
@@ -130,10 +114,6 @@
   let showSkipPrompts = true;
   let clearCacheAfterWatch = false;
   let cacheCleared = false;
-  
-  let subtitleCache = {};
-  let audioCache = {};
-  let streamingSrtFetcher = null;
   
   let torrentSessionId = null;
   let torrentFileId = null;
@@ -159,218 +139,50 @@
           tmdbId: Number(mediaId),
           mediaType: mediaType
         });
-        console.log(`[cache metadata] saved mapping ${cacheId.substring(0, 8)}... -> ${mediaType}/${mediaId}`);
       } catch (error) {
         console.error('[cache metadata] failed to save mapping:', error);
       }
     }
   }
-  
+
   async function loadTrackPreferences() {
     if (!magnetLink) return;
-    
     try {
       const prefs = await invoke('get_track_preference', { magnetLink });
       if (!prefs) return;
-      
-      console.log('[track prefs] loaded preferences:', prefs);
-      
-      if (prefs.audio_track_index !== null && prefs.audio_track_index !== undefined) {
-        const audioIndex = prefs.audio_track_index;
-        if (videoMetadata?.audio_tracks?.[audioIndex]) {
-          console.log(`[track prefs] auto-selecting audio track ${audioIndex}`);
-          await selectAudioTrack(audioIndex);
-        }
-      }
-      
-      if (prefs.subtitle_track_index !== null && prefs.subtitle_track_index !== undefined) {
-        const subIndex = prefs.subtitle_track_index;
-        
-        if (subIndex < 0) {
-          if (externalSubtitles.length > 0 && prefs.subtitle_language) {
-            const matchingSub = externalSubtitles.find(sub => 
-              sub.language === prefs.subtitle_language
-            );
-            if (matchingSub) {
-              const externalIndex = externalSubtitles.indexOf(matchingSub);
-              const totalEmbedded = videoMetadata?.subtitle_tracks?.length || 0;
-              const trackIndex = totalEmbedded + externalIndex;
-              console.log(`[track prefs] auto-selecting external subtitle: ${matchingSub.language} (index ${trackIndex})`);
-              await selectSubtitle(matchingSub, trackIndex);
-            }
-          }
-        } else {
-          if (videoMetadata?.subtitle_tracks?.[subIndex]) {
-            const track = videoMetadata.subtitle_tracks[subIndex];
-            console.log(`[track prefs] auto-selecting embedded subtitle track ${subIndex}`);
-            await selectSubtitle(track, subIndex);
-          }
-        }
+
+      // audio_track_id is the mpv track id (i64)
+      if (prefs.audio_track_id != null) {
+        await invoke("mpv_run_command", { args: ["set", "aid", String(prefs.audio_track_id)] }).catch(() => {});
       }
 
-      // Apply subtitle offset
-      if (prefs.subtitle_offset !== null && prefs.subtitle_offset !== undefined) {
+      // subtitle_track_id is the mpv track id or -1 for external/disabled
+      if (prefs.subtitle_track_id != null && prefs.subtitle_track_id > 0) {
+        await invoke("mpv_run_command", { args: ["set", "sid", String(prefs.subtitle_track_id)] }).catch(() => {});
+      }
+
+      if (prefs.subtitle_offset != null) {
         subtitleOffset = prefs.subtitle_offset;
-        if (srtRenderer) {
-          srtRenderer.setOffset(subtitleOffset);
-        }
-        if (subtitleRenderer) {
-          subtitleRenderer.setOffset(subtitleOffset);
-        }
-        console.log(`[track prefs] applied subtitle offset: ${subtitleOffset}s`);
+        await invoke("mpv_set_option_string", { name: "sub-delay", value: String(subtitleOffset) }).catch(() => {});
       }
     } catch (error) {
       console.error('[track prefs] error loading preferences:', error);
     }
   }
-  
+
   async function saveTrackPreferences() {
     if (!magnetLink) return;
-    
     try {
-      let subtitleLanguage = null;
-      let subtitleIndex = selectedSubtitleTrack;
-      if (selectedSubtitleTrack >= 0) {
-        const totalEmbedded = videoMetadata?.subtitle_tracks?.length || 0;
-        if (selectedSubtitleTrack >= totalEmbedded) {
-          // It's an external subtitle
-          const externalIndex = selectedSubtitleTrack - totalEmbedded;
-          if (externalSubtitles[externalIndex]) {
-            subtitleLanguage = externalSubtitles[externalIndex].language;
-            subtitleIndex = -1; // Mark as external
-          }
-        }
-      }
-      
+      const audioTrackId = selectedAudioTrack > 0 ? selectedAudioTrack : null;
+      const subtitleTrackId = selectedSubtitleTrack >= 0 ? selectedSubtitleTrack : null;
       await invoke('save_track_preference', {
         magnetLink,
-        audioTrackIndex: selectedAudioTrack > 0 ? selectedAudioTrack : null,
-        subtitleTrackIndex: subtitleIndex,
-        subtitleLanguage,
+        audioTrackId,
+        subtitleTrackId,
         subtitleOffset: subtitleOffset !== 0 ? subtitleOffset : null
-      });
-      
-      console.log('[track prefs] saved preferences:', {
-        audio: selectedAudioTrack,
-        subtitle: subtitleIndex,
-        language: subtitleLanguage,
-        offset: subtitleOffset
       });
     } catch (error) {
       console.error('[track prefs] error saving preferences:', error);
-    }
-  }
-  
-  async function loadCachedSubtitle(cacheId, fileIndex, trackIndex) {
-    try {
-      const result = await invoke('load_subtitle_cache', { 
-        cacheId: cacheId, 
-        fileIndex: Number(fileIndex), 
-        trackIndex: Number(trackIndex) 
-      });
-      if (result) {
-        console.log(`[subtitle cache] loaded ${result.length} bytes from filesystem`);
-        return result;
-      }
-      return null;
-    } catch (error) {
-      console.error('[subtitle cache] failed to load from filesystem:', error);
-      return null;
-    }
-  }
-  
-  // Save subtitle to Tauri filesystem cache
-  async function saveCachedSubtitle(cacheId, fileIndex, trackIndex, data) {
-    try {
-      await invoke('save_subtitle_cache', { 
-        cacheId: cacheId, 
-        fileIndex: Number(fileIndex), 
-        trackIndex: Number(trackIndex),
-        data: data
-      });
-      
-      await saveCacheMetadata(cacheId);
-    } catch (error) {
-      console.error('[subtitle cache] failed to save to filesystem:', error);
-    }
-  }
-
-  async function extractCompleteSubtitleInBackground(cacheId, fileIndex, trackIndex) {
-    console.log('[subtitle background] starting complete extraction for caching');
-    
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    try {
-      const subtitleData = await invoke('extract_subtitle', {
-        handleId: handleId,
-        fileIndex: fileIndex,
-        trackIndex: trackIndex
-      });
-      
-      // Save to cache
-      console.log('[subtitle background] complete extraction finished, saving to cache');
-      await saveCachedSubtitle(cacheId, fileIndex, trackIndex, subtitleData);
-      console.log('[subtitle background] complete subtitles cached successfully');
-    } catch (error) {
-      console.error('[subtitle background] failed to extract complete subtitles:', error);
-    }
-  }
-
-  async function loadCachedAudio(cacheId, fileIndex, trackIndex) {
-    try {
-      const base64Data = await invoke('load_audio_cache', { 
-        cacheId: cacheId, 
-        fileIndex: Number(fileIndex), 
-        trackIndex: Number(trackIndex) 
-      });
-      if (base64Data) {
-        const audioBuffer = base64ToUint8Array(base64Data);
-        console.log(`[audio cache] loaded ${audioBuffer.length} bytes from filesystem`);
-        return audioBuffer;
-      }
-      return null;
-    } catch (error) {
-      console.error('[audio cache] failed to load from filesystem:', error);
-      return null;
-    }
-  }
-  
-  function uint8ArrayToBase64(uint8Array) {
-    let binary = '';
-    const chunkSize = 8192;
-    for (let i = 0; i < uint8Array.length; i += chunkSize) {
-      const chunk = uint8Array.subarray(i, Math.min(i + chunkSize, uint8Array.length));
-      binary += String.fromCharCode.apply(null, chunk);
-    }
-    return btoa(binary);
-  }
-  
-  // Helper to convert base64 to Uint8Array
-  function base64ToUint8Array(base64) {
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes;
-  }
-  
-  // Save audio to Tauri filesystem cache
-  async function saveCachedAudio(cacheId, fileIndex, trackIndex, audioBuffer) {
-    try {
-      // Convert to base64 for efficient transfer (Array.from is too slow for large files)
-      const base64Data = uint8ArrayToBase64(audioBuffer);
-      await invoke('save_audio_cache', { 
-        cacheId: cacheId, 
-        fileIndex: Number(fileIndex), 
-        trackIndex: Number(trackIndex),
-        data: base64Data
-      });
-      console.log(`[audio cache] saved ${audioBuffer.length} bytes to filesystem`);
-      
-      await saveCacheMetadata(cacheId);
-    } catch (error) {
-      console.error('[audio cache] failed to save to filesystem:', error);
     }
   }
 
@@ -409,6 +221,12 @@
   let skipAnimationKey = 0;
   let showNextEpisodeButton = false;
 
+  // Episode picker panel
+  let showEpisodesPanel = false;
+  let episodesPanelSeason = null;
+  let episodesData = {};
+  let loadingEpisodesPanel = false;
+
   $: hasNextEpisode = (() => {
     if (!metadata || !metadata.seasons || seasonNum === null || episodeNum === null) return false;
     
@@ -424,46 +242,13 @@
     return !!nextSeason;
   })();
 
-  $: if (videoElement && !useMkvDemuxer) {
-    videoElement.volume = volume;
-  }
-  
-  // Sync audio player volume when it exists (for extracted/transcoded audio tracks)
-  $: if (audioPlayer && audioPlayer instanceof Audio && (selectedAudioTrack > 0 || needsAudioTranscoding)) {
-    audioPlayer.volume = volume;
-    audioPlayer.muted = muted;
-  }
-  
-  // Mute video element when using extracted audio (track > 0) or transcoded audio
-  $: if (videoElement && (selectedAudioTrack > 0 || needsAudioTranscoding) && audioPlayer) {
-    videoElement.muted = true;
-  } else if (videoElement && selectedAudioTrack === 0 && !needsAudioTranscoding) {
-    // Unmute video element when using native audio (track 0) and no transcoding
-    videoElement.muted = muted;
-  }
-
-  $: if (videoMetadata?.chapters) {
-    chapters = videoMetadata.chapters;
-  }
-
   $: seekChapter = chapters
     .filter((ch) => ch.start_time <= seekPreviewTime)
     .sort((a, b) => b.start_time - a.start_time)[0];
 
-  // Initialize demuxer when src changes
-  $: if (src && src !== lastInitializedSrc) {
-    lastInitializedSrc = src;
-    demuxerInitialized = false;
-    hasSeekedToInitial = false;
-    externalSubtitles = [];
-    lastSubtitleFetchKey = null;
-    selectedSubtitleTrack = -1;
-    needsAudioTranscoding = false;
-    metadataFetched = false;
-    loadingAudio = false;
-    loadingSubtitle = false;
-    initializeDemuxer();
-  }
+  // Sync mpv volume/mute when changed
+  $: invoke("mpv_set_option_string", { name: "volume", value: String(Math.round(volume * 100)) }).catch(() => {});
+  $: invoke("mpv_set_option_string", { name: "mute", value: muted ? "yes" : "no" }).catch(() => {});
 
   // Fetch external subtitles when media info is available
   $: {
@@ -504,334 +289,13 @@
     }
   }
 
-  async function initializeDemuxer() {
-    if (demuxerInitialized) return; // Already initialized or intentionally skipped
-    demuxerInitialized = true;
-
-    console.log("initializeDemuxer called with src:", src);
-    console.log("metadata prop:", metadata);
-
-    // Check if native audioTracks API is available (Safari/macOS)
-    const hasNativeAudioTracks = videoElement && 'audioTracks' in videoElement;
-    console.log("native audioTracks API available:", hasNativeAudioTracks);
-
-    // Check if video source is from torrent streaming - fetch metadata from backend
-    if (src && src.includes('/torrents/') && src.includes('/stream/')) {
-      console.log("torrent stream detected, fetching metadata from backend");
-      console.log("source URL:", src);
-      loadingPhase = "metadata";
-      loadingStatus.status = "Extracting video metadata...";
-      loadingStatus.phaseProgress = 20;
-      
-      // Extract session_id and file_id from URL
-      // URL format: http://localhost:PORT/torrents/{session_id}/stream/{file_id}
-      const urlMatch = src.match(/\/torrents\/(\d+)\/stream\/(\d+)/);
-      console.log("URL match result:", urlMatch);
-      if (urlMatch) {
-        torrentSessionId = parseInt(urlMatch[1]);
-        torrentFileId = parseInt(urlMatch[2]);
-        const baseUrl = src.substring(0, src.indexOf('/torrents/'));
-        const portMatch = baseUrl.match(/:(\d+)$/);
-        console.log("port match result:", portMatch);
-        if (portMatch) {
-          torrentHttpPort = parseInt(portMatch[1]);
-        }
-        console.log("parsed values - sessionId:", torrentSessionId, "fileId:", torrentFileId, "port:", torrentHttpPort);
-        const metadataUrl = `${baseUrl}/torrents/${torrentSessionId}/metadata/${torrentFileId}`;
-        
-        console.log("fetching metadata from:", metadataUrl);
-        
-        try {
-          loadingStatus.status = "Reading video container...";
-          loadingStatus.phaseProgress = 40;
-          
-          const response = await fetch(metadataUrl);
-          if (response.ok) {
-            const fetchedMetadata = await response.json();
-            console.log("fetched metadata:", fetchedMetadata);
-            
-            loadingStatus.status = "Processing track information...";
-            loadingStatus.phaseProgress = 60;
-            
-            // Preserve transcoded_audio_url from previous videoMetadata if it exists
-            const existingTranscodedUrl = videoMetadata?.transcoded_audio_url;
-            
-            // Set videoMetadata (merge with existing to preserve transcoded_audio_url)
-            videoMetadata = {
-              ...fetchedMetadata,
-              // Keep transcoded_audio_url if we already have it
-              transcoded_audio_url: existingTranscodedUrl || fetchedMetadata.transcoded_audio_url
-            };
-            chapters = fetchedMetadata.chapters || [];
-            
-            console.log(`found ${fetchedMetadata.audio_tracks.length} audio tracks`);
-            console.log(`found ${fetchedMetadata.subtitle_tracks.length} subtitle tracks`);
-            console.log(`found ${chapters.length} chapters`);
-            console.log(`needs audio transcoding: ${fetchedMetadata.needs_audio_transcoding}`);
-            console.log(`transcoded audio URL: ${videoMetadata.transcoded_audio_url}`);
-            
-            // Initialize demuxer in background for subtitle and audio track extraction
-            // Don't block video loading - demuxer initializes after playback starts
-            if (fetchedMetadata.subtitle_tracks.length > 0 || fetchedMetadata.audio_tracks.length > 1) {
-              console.log("initializing MKV demuxer in background for subtitle/audio extraction");
-              
-              // Initialize demuxer asynchronously without blocking
-              (async () => {
-                try {
-                  demuxer = new MKVDemuxer();
-                  console.log("[demuxer] MKV demuxer instance created, initializing with src:", src);
-                  await demuxer.initialize(src);
-                  console.log("[demuxer] MKV demuxer initialized successfully");
-                  
-                  // Extract and save fonts from MKV if any (for ASS subtitles)
-                  try {
-                    if (demuxer.attachments && demuxer.attachments.length > 0) {
-                      console.log(`found ${demuxer.attachments.length} font attachments, extracting...`);
-                      extractedFonts = await demuxer.extractAndSaveFonts();
-                      console.log(`extracted ${extractedFonts.length} fonts:`, extractedFonts);
-                    }
-                  } catch (fontError) {
-                    console.warn("failed to extract fonts (non-fatal):", fontError);
-                    extractedFonts = [];
-                  }
-                } catch (error) {
-                  console.error("[demuxer] failed to initialize MKV demuxer:", error);
-                  console.error("[demuxer] error details:", { message: error.message, stack: error.stack });
-                  demuxer = null;
-                }
-              })();
-            }
-            
-            loadingPhase = "ready";
-            loadingStatus.status = "Ready to play";
-            loadingStatus.phaseProgress = 100;
-            loading = false;
-            // Now trigger autoplay after all loading is complete
-            startAutoplay();
-            
-            // Load and apply track preferences after everything is ready
-            setTimeout(() => loadTrackPreferences(), 500);
-          } else {
-            console.error("failed to fetch metadata:", response.status, response.statusText);
-            loadingPhase = "error";
-            loadingStatus.status = "Error: Failed to load video metadata";
-            loading = false;
-          }
-        } catch (error) {
-          console.error("error fetching metadata:", error);
-          loadingPhase = "error";
-          loadingStatus.status = "Error: " + (error.message || "Failed to load metadata");
-          loading = false;
-        }
-      } else {
-        console.error("could not parse session_id and file_id from URL:", src);
-        loadingPhase = "error";
-        loadingStatus.status = "Error: Invalid stream URL";
-        loading = false;
-      }
-      
-      // Use native video element for playback
-      useMkvDemuxer = false;
-      if (videoElement) {
-        videoElement.muted = false;
-      }
-      
-      return;
-    }
-
-    // For non-torrent sources, use native video element
-    console.log("using native video element playback");
-    useMkvDemuxer = false;
-    loadingPhase = "ready";
-    loadingStatus.status = "Ready to play";
-    loadingStatus.phaseProgress = 100;
-    loading = false;
-    
-    // Unmute video element to use native audio
-    if (videoElement) {
-      videoElement.muted = false;
-    }
-    
-    // Trigger autoplay for non-torrent sources
-    startAutoplay();
-    
-    // If native audioTracks API exists, build metadata from it
-    if (hasNativeAudioTracks && videoElement.audioTracks && videoElement.audioTracks.length > 0) {
-      console.log("found", videoElement.audioTracks.length, "native audio tracks");
-      metadata = {
-        audio_tracks: Array.from(videoElement.audioTracks).map((track, index) => ({
-          id: track.id,
-          name: track.label || `Audio Track ${index + 1}`,
-          language: track.language || 'und',
-          enabled: track.enabled
-        })),
-        subtitle_tracks: videoElement.textTracks ? Array.from(videoElement.textTracks).map((track, index) => ({
-          id: track.id,
-          name: track.label || `Subtitle Track ${index + 1}`,
-          language: track.language || 'und'
-        })) : [],
-        chapters: []
-      };
-      console.log("native track metadata:", metadata);
-    }
+  async function togglePlay() {
+    await invoke("cycle_pause").catch(e => console.error("cycle_pause failed:", e));
   }
 
-  async function startAutoplay() {
-    // Wait a tick for loading overlay to hide
-    await new Promise(resolve => setTimeout(resolve, 50));
-    
-    if (!videoElement) return;
-
-    // Check if we need to use transcoded audio
-    const hasTranscodedAudio = videoMetadata?.needs_audio_transcoding || videoMetadata?.transcoded_audio_url;
-
-    console.log("=== startAutoplay ===");
-    console.log("videoMetadata:", videoMetadata);
-    console.log("needs_audio_transcoding:", videoMetadata?.needs_audio_transcoding);
-
-    // Start muted to ensure autoplay works
-    const wasMuted = videoElement.muted;
-    videoElement.muted = true;
-    await videoElement.play();
-    console.log("video started playing (muted)");
-
-    // If we have transcoded audio, stream it live from the backend
-    if (hasTranscodedAudio && src.includes('/torrents/')) {
-      console.log("setting up transcoded audio streaming");
-
-      try {
-        // Extract base URL and session ID from the video stream URL
-        const urlMatch = src.match(/^(https?:\/\/[^\/]+)\/torrents\/(\d+)\/stream\//);
-        if (!urlMatch) {
-          throw new Error("Could not extract server URL from video source");
-        }
-
-        const baseUrl = urlMatch[1];
-        const sessionId = urlMatch[2];
-
-        // Construct the transcoded stream URL - no waiting, direct streaming
-        const transcodedStreamUrl = `${baseUrl}/torrents/${sessionId}/transcoded-audio-stream/${fileIndex}`;
-        console.log("transcoded audio stream URL (piped, no buffering):", transcodedStreamUrl);
-
-        // Stop existing audio if any
-        if (audioPlayer && audioPlayer instanceof Audio) {
-          audioPlayer.pause();
-          audioPlayer.src = '';
-        }
-
-        const targetStartTime = Number.isFinite(initialTimestamp) && initialTimestamp > 0
-          ? initialTimestamp
-          : videoElement.currentTime || 0;
-
-        console.log("Target audio start time:", targetStartTime);
-
-        // Setup audio element with transcoded stream
-        prefetchedAudio = prefetchedAudio || new Audio();
-        prefetchedAudio.preload = 'auto';
-        prefetchedAudio.crossOrigin = 'anonymous';
-        prefetchedAudio.src = transcodedStreamUrl;
-        audioPlayer = prefetchedAudio;
-
-        // Sync volume/mute
-        audioPlayer.volume = volume;
-        audioPlayer.muted = muted;
-        videoElement.muted = true;
-
-        // Add audio event listeners for buffering
-        audioPlayer.addEventListener('waiting', () => {
-          console.log('Audio waiting - showing buffer indicator');
-          showBufferingIndicator = true;
-          if (videoElement && !videoElement.paused) {
-            videoElement.pause();
-          }
-        });
-        
-        audioPlayer.addEventListener('canplay', () => {
-          console.log('Audio can play - hiding buffer indicator');
-          showBufferingIndicator = false;
-          if (playing && videoElement?.paused) {
-            videoElement.play().catch(err => console.warn('video resume failed:', err));
-          }
-        });
-        
-        audioPlayer.addEventListener('stalled', () => {
-          console.log('Audio stalled');
-          showBufferingIndicator = true;
-          if (videoElement && !videoElement.paused) {
-            videoElement.pause();
-          }
-        });
-
-        // Wait for metadata to set time
-        await new Promise((resolve) => {
-          if (audioPlayer.readyState >= 1) {
-            resolve();
-          } else {
-            audioPlayer.addEventListener('loadedmetadata', resolve, { once: true });
-          }
-        });
-        
-        try {
-          audioPlayer.currentTime = targetStartTime;
-        } catch (e) {
-          console.warn('Failed to set audio time:', e);
-        }
-
-        // Hide loading and start playback
-        loading = false;
-        
-        await audioPlayer.play();
-        
-        // Resume video playback
-        if (videoElement.paused && playing) {
-          await videoElement.play();
-        }
-
-        selectedAudioTrack = 0;
-        needsAudioTranscoding = true;
-      } catch (audioErr) {
-        console.error("Failed to setup transcoded audio streaming:", audioErr);
-        // Fall back to native audio
-        setTimeout(() => {
-          if (videoElement && !wasMuted) {
-            videoElement.muted = false;
-          }
-        }, 100);
-      }
-    } else {
-      // No transcoded audio - unmute video after play starts successfully
-      setTimeout(() => {
-        if (videoElement && !wasMuted) {
-          videoElement.muted = false;
-        }
-      }, 100);
-    }
-
-    playing = true;
-  }
-
-  function togglePlay() {
-    console.log("togglePlay called");
-    const usingTranscodedAudio = needsAudioTranscoding && audioPlayer instanceof Audio;
-
-    if (playing) {
-      videoElement.pause();
-      if ((selectedAudioTrack > 0 || usingTranscodedAudio) && audioPlayer instanceof Audio) {
-        audioPlayer.pause();
-      }
-      playing = false;
-    } else {
-      if (videoElement.paused) {
-        videoElement.play();
-        if ((selectedAudioTrack > 0 || usingTranscodedAudio) && audioPlayer instanceof Audio) {
-          audioPlayer.play();
-        }
-        playing = true;
-      } else {
-        videoElement.pause();
-        playing = false;
-      }
-    }
+  async function setSpeed(rate) {
+    playbackRate = rate;
+    await invoke("mpv_set_option_string", { name: "speed", value: String(rate) }).catch(() => {});
   }
 
   async function startStreamProcess() {
@@ -875,39 +339,22 @@
         loadingStatus.speed = status.download_speed
           ? status.download_speed * 125000
           : 0;
-        loadingStatus.transcodeProgress = status.transcode_progress;
 
-        if (status.status === "transcoding") {
-          loadingPhase = "transcoding";
-          loadingStatus.status = "Transcoding audio...";
-          loadingStatus.phaseProgress = 70;
-        } else if (
-          status.status === "ready" &&
-          (loadingPhase === "initializing" || loadingPhase === "buffering")
-        ) {
-          loadingPhase = "buffering";
-          loadingStatus.status = "Finalizing stream...";
-          loadingStatus.phaseProgress = 90;
-        } else if (loadingPhase === "initializing") {
-          loadingPhase = "buffering";
-          loadingStatus.status = "Buffering stream...";
-          loadingStatus.phaseProgress = 50;
-        }
-
-        if (status.stream_info && status.stream_info.url) {
-          if (!src) {
-            src = status.stream_info.url;
-          }
-          if (!videoMetadata && status.stream_info.metadata) {
-            videoMetadata = status.stream_info.metadata;
-          }
-        }
-
-        if (status.status === "ready" && status.stream_info) {
+        if (status.status === "ready" && status.stream_info?.url && !src) {
+          src = status.stream_info.url;
           if (pollInterval) {
             clearInterval(pollInterval);
             pollInterval = null;
           }
+          // Hand off to mpv
+          loadingStatus.status = "Starting player...";
+          loadingStatus.phaseProgress = 90;
+          await invoke("load_file", { path: src });
+          // loading = false will be set by the file_loaded mpv event listener
+        } else if (loadingPhase === "initializing") {
+          loadingPhase = "buffering";
+          loadingStatus.status = "Buffering stream...";
+          loadingStatus.phaseProgress = 50;
         }
       } catch (error) {
         console.error("Failed to poll stream status:", error);
@@ -936,7 +383,7 @@
   }
 
   async function toggleFullscreen() {
-    const container = videoElement.closest(".video-player");
+    const container = document.querySelector(".video-player");
     const appWindow = getCurrentWindow();
 
     if (!fullscreen) {
@@ -1005,14 +452,10 @@
     isSeeking = false;
     document.body.style.userSelect = "";
     handleProgressHover(event);
-    if (hoverTime !== null && videoElement && isFinite(duration)) {
+    if (hoverTime !== null && isFinite(duration)) {
       const newTime = Math.min(Math.max(hoverTime, 0), duration);
-      currentTime = newTime; // Update immediately to prevent visual snap-back
-      videoElement.currentTime = newTime;
-      if (useMkvDemuxer) {
-        if (demuxer) demuxer.seek(newTime, selectedAudioTrack);
-        if (audioPlayer) audioPlayer.seek(newTime);
-      }
+      currentTime = newTime;
+      invoke("seek_video", { seconds: newTime }).catch(e => console.error("seek_video failed:", e));
     }
     justSeeked = true;
     setTimeout(() => {
@@ -1020,73 +463,24 @@
     }, 500);
   }
 
-  function handleTimeUpdate() {
-    if (!videoElement) return;
+  function handleMpvProgress(payload) {
+    if (payload.time_pos !== undefined && payload.time_pos !== null) {
+      currentTime = payload.time_pos;
+    }
+    if (payload.duration !== undefined && payload.duration !== null && payload.duration > 0) {
+      duration = payload.duration;
+    }
+    playing = payload.is_playing;
+    showBufferingIndicator = !!payload.is_buffering;
 
-    if (isFinite(videoElement.currentTime)) {
-      currentTime = videoElement.currentTime;
-    } else {
-      console.warn("Video currentTime is not finite:", videoElement.currentTime);
-    }
-    
-    // Calculate effective duration from multiple sources
-    let effectiveDuration = 0;
-    if (isFinite(videoElement.duration)) {
-      effectiveDuration = videoElement.duration;
-    }
-    
-    // Prefer metadata duration if available and significantly larger
-    // This fixes issues where browser reports partial duration for streamed content
-    const metaDuration = demuxer?.mediaInfo?.duration || videoMetadata?.duration;
-    if (metaDuration && metaDuration > effectiveDuration + 1) {
-      effectiveDuration = metaDuration;
-    }
-
-    if (effectiveDuration > 0) {
-      if (duration !== effectiveDuration) {
-        duration = effectiveDuration;
-      }
-    }
-
-    // SubtitlesOctopus updates automatically via video element binding
-    // SRT renderer auto-updates via timeupdate event listener
-
-    if (videoElement.buffered.length > 0 && duration > 0) {
-      bufferedRanges = [];
-      for (let i = 0; i < videoElement.buffered.length; i++) {
-        const start = videoElement.buffered.start(i);
-        const end = videoElement.buffered.end(i);
-        bufferedRanges.push({
-          start: (start / duration) * 100,
-          width: ((end - start) / duration) * 100
-        });
-      }
-    } else {
-      bufferedRanges = [];
-    }
-    
-    // Sync HTML5 Audio playback with video (for extracted/transcoded audio tracks)
-    const usingTranscodedAudio = needsAudioTranscoding && audioPlayer instanceof Audio;
-    if ((selectedAudioTrack > 0 || usingTranscodedAudio) && audioPlayer && audioPlayer instanceof Audio && playing) {
-      const drift = Math.abs(audioPlayer.currentTime - videoElement.currentTime);
-      // Resync if drift exceeds 200ms
-      if (drift > 0.2) {
-        console.log(`Audio drift detected: ${drift.toFixed(3)}s, resyncing...`);
-        audioPlayer.currentTime = videoElement.currentTime;
-      }
-    }
-    
     // Check for cache clearing on completion
     if (duration > 0 && currentTime / duration > 0.9 && clearCacheAfterWatch && !cacheCleared && mediaId) {
       cacheCleared = true;
-      invoke('clear_cache_item', { id: mediaId.toString() })
-        .then(() => console.log('Cleared cache for watched item:', mediaId))
-        .catch(e => console.error('Failed to clear cache', e));
+      invoke('clear_cache_item', { id: mediaId.toString() }).catch(e => console.error('Failed to clear cache', e));
     }
 
-    // Check for skip sections in chapters
     checkSkipSections();
-    
+
     // Track progress periodically (every 10 seconds)
     if (playing && !loading && currentTime > 0 && mediaId && mediaType) {
       if (!progressTrackingInterval) {
@@ -1096,16 +490,11 @@
               currentTimestamp: Math.floor(currentTime),
               duration: Math.floor(duration)
             };
-            
-            // Add season/episode for TV shows
             if (seasonNum !== null && episodeNum !== null) {
               progressData.currentSeason = seasonNum;
               progressData.currentEpisode = episodeNum;
             }
-            
             watchProgressStore.updateProgress(mediaId, mediaType, progressData);
-            
-            // Add to watch history (only once when first playing)
             if (!watchHistoryAdded && metadata) {
               const historyItem = {
                 id: mediaId,
@@ -1117,126 +506,16 @@
                 vote_average: metadata.vote_average,
                 ...progressData
               };
-              console.log('[Watch History] Adding item:', historyItem);
               watchHistoryStore.addItem(historyItem);
               watchHistoryAdded = true;
             }
           }
         }, 10000);
       }
-    } else if (progressTrackingInterval) {
-      // Clear interval when not playing
+    } else if (progressTrackingInterval && !playing) {
       clearInterval(progressTrackingInterval);
       progressTrackingInterval = null;
     }
-  }
-
-  function syncExternalAudio(targetTime) {
-    if (audioPlayer && audioPlayer instanceof Audio) {
-      const desiredTime = Number.isFinite(targetTime) ? targetTime : videoElement?.currentTime || 0;
-      try {
-        audioPlayer.currentTime = desiredTime;
-        console.log(`[Audio Sync] Synced external audio to ${desiredTime.toFixed(3)}s`);
-      } catch (e) {
-        console.warn('Failed to sync external audio time:', e);
-      }
-    }
-  }
-
-  async function ensureTranscodedAudioPrepared(url, targetTime, existingAudio) {
-    const audioEl = existingAudio || new Audio();
-    audioEl.preload = 'auto';
-    audioEl.crossOrigin = 'anonymous';
-    
-    // Only reload if URL changed
-    if (audioEl.src !== url) {
-      audioEl.src = url;
-      audioEl.load();
-    }
-
-    const desiredTime = Number.isFinite(targetTime) ? targetTime : 0;
-
-    // Wait for metadata and set position
-    const waitForMetadata = () => new Promise((resolve) => {
-      if (audioEl.readyState >= 1) { // HAVE_METADATA
-        resolve();
-      } else {
-        audioEl.addEventListener('loadedmetadata', resolve, { once: true });
-      }
-    });
-    
-    await waitForMetadata();
-    try { audioEl.currentTime = desiredTime; } catch (e) { /* best effort */ }
-    
-    // Don't wait for buffering - let browser handle it naturally
-    // The cached file on disk will load progressively
-    return audioEl;
-  }
-
-  function handleSeekingEvent() {
-    // Sync audio for both transcoded AND extracted audio tracks
-    const usingExternalAudio = (selectedAudioTrack > 0 || needsAudioTranscoding) && audioPlayer instanceof Audio;
-    if (usingExternalAudio) {
-      const targetTime = videoElement?.currentTime || 0;
-      syncExternalAudio(targetTime);
-    }
-
-    // Clear SRT subtitle cache on seek for fresh data
-    if (srtRenderer && srtRenderer.httpPort) {
-      srtRenderer.clearCache();
-    }
-  }
-
-  function handleWaitingEvent() {
-    // Always show buffering indicator when video is waiting
-    console.log('Video waiting - showing buffer indicator');
-    showBufferingIndicator = true;
-
-    if (needsAudioTranscoding && audioPlayer instanceof Audio) {
-      console.log('Video waiting - checking audio state');
-      isBufferingSeek = true;
-      waitingForAudio = true;
-      
-      // Pause video to wait for audio
-      if (videoElement && !videoElement.paused) {
-        videoElement.pause();
-      }
-    }
-  }
-
-  function handleCanPlayEvent() {
-    // Always hide buffering indicator when video can play
-    // Unless we are specifically waiting for audio
-    if (!waitingForAudio) {
-        showBufferingIndicator = false;
-    }
-
-    if (!isBufferingSeek && !waitingForAudio) return;
-
-    console.log('Video can play - checking audio state');
-    
-    // Ensure audio is ready before resuming
-    if (needsAudioTranscoding && audioPlayer instanceof Audio) {
-      if (audioPlayer.readyState < 2) { // HAVE_CURRENT_DATA
-        console.log('Audio not ready yet, keeping buffer indicator');
-        return; // Keep buffering
-      }
-      
-      console.log('Audio ready, syncing and resuming');
-      syncExternalAudio(videoElement?.currentTime);
-      
-      if (audioPlayer.paused) {
-        audioPlayer.play().catch((err) => console.warn('Audio resume failed:', err));
-      }
-    }
-
-    if (playing && videoElement?.paused) {
-      videoElement.play().catch((err) => console.warn('Video resume failed:', err));
-    }
-
-    isBufferingSeek = false;
-    waitingForAudio = false;
-    showBufferingIndicator = false;
   }
 
   function checkSkipSections() {
@@ -1346,8 +625,8 @@
   }
 
   function skipSection() {
-    if (currentSkipSection && videoElement) {
-      videoElement.currentTime = currentSkipSection.end_time;
+    if (currentSkipSection) {
+      invoke("seek_video", { seconds: currentSkipSection.end_time }).catch(e => console.error("seek_video failed:", e));
       showSkipButton = false;
       skipTimerActive = false;
       currentSkipSection = null;
@@ -1424,43 +703,6 @@
       // Fallback to torrent selector
       window.location.hash = `/media/${mediaType}/${mediaId}?season=${seasonNum}&episode=${nextEpisode}`;
     }
-  }
-
-  function handleLoadedMetadata() {
-    console.log("=== handleLoadedMetadata called ===");
-    duration = videoElement.duration;
-    
-    // Check if audio track switching is supported
-    audioTrackSwitchingSupported = videoElement && 'audioTracks' in videoElement && 
-                                   videoElement.audioTracks && videoElement.audioTracks.length > 1;
-    console.log("Audio track switching supported:", audioTrackSwitchingSupported, 
-                "(tracks:", videoElement.audioTracks?.length || 0, ")");
-    
-    console.log("Duration:", duration);
-    console.log("Initial timestamp:", initialTimestamp);
-    console.log("Has seeked:", hasSeekedToInitial);
-    console.log("Current time before seek:", videoElement.currentTime);
-
-    // Seek to initial timestamp if provided and not already seeked
-    if (initialTimestamp > 0 && !hasSeekedToInitial && isFinite(initialTimestamp) && isFinite(duration)) {
-      console.log("attempting to seek to initial timestamp:", initialTimestamp);
-      videoElement.currentTime = Math.min(initialTimestamp, duration);
-      hasSeekedToInitial = true;
-      console.log("Immediately after setting currentTime:", videoElement.currentTime);
-      // Verify seek after a short delay
-      setTimeout(() => {
-        console.log("Seek verification - Current time:", videoElement.currentTime, "Target was:", initialTimestamp, "Difference:", Math.abs(videoElement.currentTime - initialTimestamp));
-      }, 100);
-    } else if (initialTimestamp > 0) {
-      console.log("skipping seek - already seeked to initial timestamp");
-    } else {
-      console.log("no initial timestamp to seek to (initialTimestamp:", initialTimestamp, ")");
-    }
-
-    // Keep external audio aligned after metadata is ready
-    syncExternalAudio(videoElement.currentTime);
-
-    // SubtitlesOctopus automatically manages canvas size based on video dimensions
   }
 
   async function handleFullscreenChange() {
@@ -1828,502 +1070,80 @@
   }
 
   async function selectAudioTrack(index) {
-    console.log("[Audio] selectAudioTrack called:", { index, currentlySelected: selectedAudioTrack, loading: loadingAudio });
-    
-    const previousTrack = selectedAudioTrack;
+    const track = videoMetadata?.audio_tracks?.[index];
+    if (!track) return;
     selectedAudioTrack = index;
     loadingAudio = true;
-
     try {
-      // Track 0 is always the default native audio - just unmute video and stop AudioPlayer
-      if (index === 0) {
-        console.log("switching to default (native) audio track");
-        
-        // Stop and cleanup HTML5 Audio if active
-        if (audioPlayer && audioPlayer instanceof Audio) {
-          audioPlayer.pause();
-          audioPlayer.src = '';
-          audioPlayer = null;
-        }
-        
-        // Unmute video element
-        if (videoElement) {
-          videoElement.muted = false;
-        }
-        
-        // Check if selection changed while we were working
-        if (selectedAudioTrack !== index) return;
-
-        showAudioMenu = false;
-        loadingAudio = false;
-        saveTrackPreferences();
-        return;
-      }
-
-      // For other tracks, try native switching first
-      if (videoElement && 'audioTracks' in videoElement && videoElement.audioTracks && videoElement.audioTracks.length > 0) {
-        console.log("Attempting native audioTracks API, available tracks:", videoElement.audioTracks.length);
-        try {
-          for (let i = 0; i < videoElement.audioTracks.length; i++) {
-            videoElement.audioTracks[i].enabled = false;
-          }
-          if (videoElement.audioTracks[index]) {
-            videoElement.audioTracks[index].enabled = true;
-            console.log(`switched to native audio track ${index}`);
-            
-            if (selectedAudioTrack !== index) return;
-
-            showAudioMenu = false;
-            loadingAudio = false;
-            saveTrackPreferences();
-            return;
-          }
-        } catch (error) {
-          console.error('Error switching native audio track:', error);
-        }
-      }
-
-      // Native switching not available - extract and cache audio to disk
-      console.log("native audioTracks API not available, using audio file caching");
-      
-      if (!demuxer) {
-        throw new Error('Demuxer not available for audio extraction');
-      }
-
-      if (!videoMetadata?.audio_tracks?.[index]) {
-        throw new Error(`Audio track ${index} not found in metadata`);
-      }
-
-      const trackInfo = videoMetadata.audio_tracks[index];
-      
-      // Check if track needs transcoding and has transcoded_url
-      if (trackInfo.transcoded_url) {
-        console.log(`[Audio] Using transcoded stream for track ${index}: ${trackInfo.transcoded_url}`);
-        
-        // Stop existing audio
-        if (audioPlayer && audioPlayer instanceof Audio) {
-          audioPlayer.pause();
-          audioPlayer.src = '';
-        }
-        
-        // Create and prepare audio element with transcoded stream
-        audioPlayer = new Audio();
-        audioPlayer.preload = 'auto';
-        audioPlayer.crossOrigin = 'anonymous';
-        audioPlayer.src = trackInfo.transcoded_url;
-        audioPlayer.volume = volume;
-        audioPlayer.muted = muted;
-        
-        // Mute video
-        if (videoElement) {
-          videoElement.muted = true;
-        }
-        
-        // Wait for audio to be ready
-        showBufferingIndicator = true;
-        await ensureTranscodedAudioPrepared(trackInfo.transcoded_url, videoElement?.currentTime || 0, audioPlayer);
-        
-        if (selectedAudioTrack !== index) return;
-
-        // Sync and play
-        syncExternalAudio(videoElement?.currentTime || 0);
-        if (!videoElement.paused) {
-          await audioPlayer.play();
-        }
-        showBufferingIndicator = false;
-        showAudioMenu = false;
-        loadingAudio = false;
-        saveTrackPreferences();
-        return;
-      }
-
-      // Check cache first
-      const stableCacheId = getStableCacheId();
-      let audioBlobUrl = null;
-
-      // Determine MIME type based on codec
-      const codec = trackInfo.codec.toLowerCase();
-      let mimeType = 'audio/webm';
-      
-      if (codec === 'aac') {
-        mimeType = 'audio/aac';
-      } else if (codec === 'mp3' || codec === 'mp3float') {
-        mimeType = 'audio/mpeg';
-      } else if (codec === 'opus') {
-        mimeType = 'audio/ogg; codecs=opus';
-      } else if (codec === 'vorbis') {
-        mimeType = 'audio/ogg; codecs=vorbis';
-      } else if (codec === 'flac') {
-        mimeType = 'audio/flac';
-      }
-      
-      console.log(`Audio codec: ${codec}, using MIME type: ${mimeType}`);
-
-      // Check filesystem cache
-      const cachedAudio = await loadCachedAudio(stableCacheId, fileIndex, index);
-      
-      // Check if selection changed while we were awaiting
-      if (selectedAudioTrack !== index) {
-        console.log('Audio selection changed during load, aborting');
-        return;
-      }
-      
-      if (cachedAudio) {
-        console.log(`[Audio Cache] Filesystem HIT - Loaded from disk`);
-        // Use MKV container format (all audio is now extracted as MKV)
-        const blob = new Blob([cachedAudio], { type: 'video/x-matroska' });
-        const blobUrl = URL.createObjectURL(blob);
-        
-        // Stop existing audio
-        if (audioPlayer && audioPlayer instanceof Audio) {
-          audioPlayer.pause();
-          audioPlayer.src = '';
-        }
-        
-        // Create and prepare audio element
-        audioPlayer = new Audio();
-        audioPlayer.preload = 'auto';
-        audioPlayer.crossOrigin = 'anonymous';
-        audioPlayer.src = blobUrl;
-        audioPlayer.volume = volume;
-        audioPlayer.muted = muted;
-        
-        // Mute video
-        if (videoElement) {
-          videoElement.muted = true;
-        }
-        
-        // Wait for audio to be ready
-        showBufferingIndicator = true;
-        await ensureTranscodedAudioPrepared(blobUrl, videoElement?.currentTime || 0, audioPlayer);
-        
-        if (selectedAudioTrack !== index) return;
-
-        // Sync and play
-        syncExternalAudio(videoElement?.currentTime || 0);
-        if (!videoElement.paused) {
-          await audioPlayer.play();
-        }
-        showBufferingIndicator = false;
-        saveTrackPreferences();
-      } else {
-        console.log(`[Audio Cache] MISS - Extracting and saving audio`);
-        // Extract audio using backend FFmpeg (properly remuxed)
-        showBufferingIndicator = true;
-        
-        try {
-          // Use backend to extract audio track with proper remuxing
-          const audioData = await invoke("extract_audio_track", {
-            handleId: handleId,
-            fileIndex: fileIndex,
-            trackIndex: index
-          });
-          
-          if (selectedAudioTrack !== index) return;
-
-          console.log(`[Audio Cache] Received ${audioData.length} bytes from backend`);
-          
-          // Convert to Uint8Array (Tauri returns Vec<u8> as regular array)
-          const audioBuffer = new Uint8Array(audioData);
-          
-          // Save to filesystem cache
-          console.log(`[Audio Cache] STORE - Saving ${audioBuffer.length} bytes to disk`);
-          await saveCachedAudio(stableCacheId, fileIndex, index, audioBuffer);
-          
-          // Create blob with proper MIME type for MKV container
-          const blob = new Blob([audioBuffer], { type: 'video/x-matroska' });
-          const blobUrl = URL.createObjectURL(blob);
-          
-          // Stop existing audio
-          if (audioPlayer && audioPlayer instanceof Audio) {
-            audioPlayer.pause();
-            audioPlayer.src = '';
-          }
-          
-          // Create and prepare audio element
-          audioPlayer = new Audio();
-          audioPlayer.preload = 'auto';
-          audioPlayer.crossOrigin = 'anonymous';
-          audioPlayer.src = blobUrl;
-          audioPlayer.volume = volume;
-          audioPlayer.muted = muted;
-          
-          // Mute video
-          if (videoElement) {
-            videoElement.muted = true;
-          }
-          
-          // Wait for audio to be ready
-          await ensureTranscodedAudioPrepared(blobUrl, videoElement?.currentTime || 0, audioPlayer);
-          
-          if (selectedAudioTrack !== index) return;
-
-          // Sync and play
-          syncExternalAudio(videoElement?.currentTime || 0);
-          if (!videoElement.paused) {
-            await audioPlayer.play();
-          }
-          showBufferingIndicator = false;
-          saveTrackPreferences();
-        } catch (extractError) {
-          console.error("Backend audio extraction failed:", extractError);
-          showBufferingIndicator = false;
-          throw extractError;
-        }
-      }
-
-      console.log(`switched to cached audio track ${index} using HTML5 audio`);
-    } catch (error) {
-      console.error("Failed to switch audio track:", error);
-      selectedAudioTrack = previousTrack;
+      await invoke("mpv_run_command", { args: ["set", "aid", String(track.id)] });
+    } catch (e) {
+      console.error("Failed to switch audio track:", e);
     } finally {
-      if (selectedAudioTrack === index) {
-        loadingAudio = false;
-        showAudioMenu = false;
-      }
+      loadingAudio = false;
+      showAudioMenu = false;
     }
+    saveTrackPreferences();
   }
 
   async function selectSubtitle(track, trackIndex) {
-    console.log('[Subtitle] selectSubtitle called:', { track, trackIndex, currentlySelected: selectedSubtitleTrack, loading: loadingSubtitle });
-    
     selectedSubtitleTrack = trackIndex;
     loadingSubtitle = true;
-
     try {
-      // Hide any previously active subtitle renderers
-      if (subtitleRenderer) {
-        subtitleRenderer.hide();
-      }
-      // Note: Don't hide srtRenderer yet - we might be selecting an SRT subtitle
-
-      // Save track preference
-      saveTrackPreferences();
-      
-      // Handle external subtitles from Wyzie
       if (track.source === "wyzie") {
-        // Use streaming fetcher for Wyzie SRT subtitles
-        const stableCacheId = getStableCacheId();
-        const trackCacheIndex = 8000 + trackIndex; // Prefix to avoid collisions with MKV tracks
-        
-        streamingSrtFetcher = new StreamingSrtFetcher(
-          track.url,
-          stableCacheId,
-          fileIndex,
-          trackCacheIndex,
-          {
-            load: loadCachedSubtitle,
-            save: saveCachedSubtitle
-          }
-        );
-        
-        // Initialize fetcher (loads from cache or fetches)
-        await streamingSrtFetcher.initialize();
-        
-        if (selectedSubtitleTrack !== trackIndex) return;
-
-        if (!srtRenderer && videoElement) {
-          srtRenderer = new SRTSubtitleRenderer(videoElement);
-          srtRenderer.initialize();
-        }
-        
-        if (srtRenderer) {
-          const subtitles = streamingSrtFetcher.getSubtitles();
-          // Pass the fetcher to the renderer for streaming updates
-          srtRenderer.setStreamingFetcher(streamingSrtFetcher);
-          srtRenderer.setSubtitles(subtitles);
-          srtRenderer.show();
-        }
-      } else if (demuxer) {
-        // Determine codec from track info first to decide extraction method
-        const subtitleTrack = demuxer.subtitleTracks[trackIndex];
-        const codec = subtitleTrack?.codec?.toLowerCase() || 'ass';
-        console.log(`[Subtitle] Loading subtitle with codec: ${codec}`);
-        
-        // For SRT/SubRip subtitles, use demuxer streaming (extract around playhead)
-        if (codec === 'srt' || codec === 'subrip' || codec === 'sub') {
-          // Hide ASS renderer if active
-          if (subtitleRenderer) {
-            subtitleRenderer.hide();
-          }
-          
-          if (!srtRenderer && videoElement) {
-            srtRenderer = new SRTSubtitleRenderer(videoElement);
-            srtRenderer.initialize();
-          }
-          
-          if (srtRenderer && demuxer) {
-            console.log('[Subtitle] Setting up streaming SRT subtitle extraction via demuxer');
-            // Set up streaming fetcher that uses demuxer
-            srtRenderer.setDemuxerStreaming(demuxer, trackIndex, duration);
-            srtRenderer.show();
-            
-            // Start background task to extract complete subtitles for caching
-            const stableCacheId = getStableCacheId();
-            extractCompleteSubtitleInBackground(stableCacheId, fileIndex, trackIndex);
-          }
-        } else {
-          // For ASS/SSA subtitles, use full extraction with caching
-          // Hide SRT renderer if active
-          if (srtRenderer) {
-            srtRenderer.hide();
-            srtRenderer.setStreamingFetcher(null);
-          }
-          
-          // Use stable cache ID based on magnet link info hash
-          const stableCacheId = getStableCacheId();
-          const cacheKey = `${stableCacheId}-${fileIndex}-${trackIndex}`;
-          let subtitleData = subtitleCache[cacheKey];
-          
-          console.log(`[Subtitle Cache] Using stable cache ID: ${stableCacheId}`);
-          
-          if (subtitleData) {
-            console.log(`[Subtitle Cache] Memory HIT - Using cached subtitle for key: ${cacheKey}`);
-          } else {
-            // Check filesystem cache
-            subtitleData = await loadCachedSubtitle(stableCacheId, fileIndex, trackIndex);
-            
-            if (selectedSubtitleTrack !== trackIndex) return;
-
-            if (subtitleData) {
-              console.log(`[Subtitle Cache] Filesystem HIT - Loaded from disk for key: ${cacheKey}`);
-              // Store in memory cache for faster access
-              subtitleCache[cacheKey] = subtitleData;
-            } else {
-              console.log(`[Subtitle Cache] MISS - Extracting subtitle for key: ${cacheKey}`);
-              // Extract subtitle from demuxer
-              subtitleData = await demuxer.extractSubtitleTrack(trackIndex);
-              
-              if (selectedSubtitleTrack !== trackIndex) return;
-
-              if (!subtitleData) {
-                throw new Error('No subtitle data extracted');
-              }
-              
-              console.log(`[Subtitle Cache] STORE - Cached ${subtitleData.length} bytes for key: ${cacheKey}`);
-              // Cache in memory and filesystem
-              subtitleCache[cacheKey] = subtitleData;
-              await saveCachedSubtitle(stableCacheId, fileIndex, trackIndex, subtitleData);
-            }
-          }
-          
-          // Embed fonts into ASS data if we have extracted fonts
-          if ((codec === 'ass' || codec === 'ssa') && extractedFonts && extractedFonts.length > 0) {
-            console.log('[Subtitle] Embedding fonts into ASS data');
-            subtitleData = await demuxer.embedFontsIntoASS(subtitleData, extractedFonts);
-          }
-          
-          // Hide SRT renderer if active
-          // Hide SRT renderer if active
-          if (srtRenderer) {
-            srtRenderer.hide();
-          }
-          
-          // Use SubtitlesOctopus for ASS/SSA
-          // Create renderer if not exists, or use existing one (it will reinitialize internally)
-          if (!subtitleRenderer) {
-            subtitleRenderer = new SubtitleRenderer(null, videoElement);
-          }
-          
-          // Set extracted fonts served via HTTP backend
-          if (extractedFonts && extractedFonts.length > 0) {
-            const fontUrls = extractedFonts
-              .filter(f => f.url && !f.skipped)
-              .map(f => f.url);
-            if (fontUrls.length > 0) {
-              console.log('[Subtitle] Setting extracted fonts via HTTP:', fontUrls);
-              subtitleRenderer.setFonts(fontUrls);
-            }
-          }
-          
-          // loadSubtitleTrack will reinitialize the octopus instance for proper track switching
-          await subtitleRenderer.loadSubtitleTrack(subtitleData, codec);
-          subtitleRenderer.show();
-          
-          // Seek backward slightly to fix ASS subtitle stutter
-          if (videoElement && videoElement.currentTime > 0.25) {
-            const currentTime = videoElement.currentTime;
-            videoElement.currentTime = currentTime - 0.25;
-            console.log(`[Subtitle] Seeked back 0.25s to fix stutter (${currentTime} → ${currentTime - 0.25})`);
-          }
-        }
+        // Load external subtitle via mpv sub-add
+        await invoke("mpv_run_command", { args: ["sub-add", track.url, "select"] });
       } else {
-        // Demuxer not available for embedded subtitle extraction
-        console.error('[Subtitle] Demuxer is null or undefined:', { demuxer, trackSource: track?.source });
-        throw new Error('Demuxer not initialized. Cannot extract embedded subtitles.');
+        // Embedded subtitle — use mpv track id
+        const subTrack = videoMetadata?.subtitle_tracks?.[trackIndex];
+        if (subTrack) {
+          await invoke("mpv_run_command", { args: ["set", "sid", String(subTrack.id)] });
+        }
       }
+      saveTrackPreferences();
     } catch (error) {
       console.error("Failed to load subtitle:", error);
     } finally {
-      if (selectedSubtitleTrack === trackIndex) {
-        loadingSubtitle = false;
-        showSubtitleMenu = false;
-      }
+      loadingSubtitle = false;
+      showSubtitleMenu = false;
     }
   }
 
-  function disableSubtitles() {
+  async function disableSubtitles() {
     selectedSubtitleTrack = -1;
     loadingSubtitle = false;
-
-    if (subtitleRenderer) {
-      subtitleRenderer.hide();
-    }
-    
-    if (srtRenderer) {
-      srtRenderer.hide();
-    }
-
+    await invoke("mpv_run_command", { args: ["set", "sid", "no"] }).catch(() => {});
     showSubtitleMenu = false;
   }
 
-  function jumpToChapter(startTime) {
-    if (videoElement && isFinite(startTime) && isFinite(duration)) {
-      videoElement.currentTime = Math.min(startTime, duration);
-      console.log(`Jumped to chapter at ${formatTime(startTime)}`);
-      
-      if (useMkvDemuxer) {
-        if (demuxer) demuxer.seek(startTime, selectedAudioTrack);
-        if (audioPlayer) audioPlayer.seek(startTime);
-      }
+  async function jumpToChapter(startTime) {
+    if (isFinite(startTime)) {
+      const newTime = duration > 0 ? Math.min(startTime, duration) : startTime;
+      currentTime = newTime;
+      await invoke("seek_video", { seconds: newTime }).catch(e => console.error("seek_video failed:", e));
     }
     showChaptersMenu = false;
   }
 
   async function openInExternalPlayer() {
     try {
-      // Get player setting from backend
       const settings = await invoke('get_settings');
       const externalPlayer = settings.external_player || 'mpv';
-      
-      // Check if player is installed
       const installed = await invoke('check_external_player', { player: externalPlayer });
-      
       if (!installed) {
         alert(`${externalPlayer.toUpperCase()} is not installed or not in PATH. Please install it to use external playback.`);
         return;
       }
-      
-      // Open stream in external player
       await invoke('open_in_external_player', {
         player: externalPlayer,
         streamUrl: src,
         title: title
       });
-      
-      // Switch to external player mode
       playingInExternal = true;
+      // Pause mpv when switching to external
       if (playing) {
-        videoElement?.pause();
+        await invoke("cycle_pause").catch(() => {});
       }
-      
-      // Stop audio player if active
-      if (audioPlayer && audioPlayer instanceof Audio) {
-        audioPlayer.pause();
-      }
-      
       showPlayerMenu = false;
-      
     } catch (error) {
       console.error('Failed to open in external player:', error);
       alert(`Failed to open external player: ${error}`);
@@ -2444,37 +1264,37 @@
     if (showSubtitleSettings && subtitleSettingsElement && !subtitleSettingsElement.contains(event.target)) {
       showSubtitleSettings = false;
     }
+    if (showEpisodesPanel && !event.target.closest('.episodes-panel') && !event.target.closest('.episodes-btn')) {
+      showEpisodesPanel = false;
+    }
   }
 
   function updateSubtitleSettings(key, value) {
     subtitleSettings = { ...subtitleSettings, [key]: value };
     localStorage.setItem('subtitleSettings', JSON.stringify(subtitleSettings));
-    if (srtRenderer) {
-      srtRenderer.setStyles(subtitleSettings);
+    // Map settings to mpv options
+    const mpvMappings = {
+      fontSize: ["sub-font-size", String(value)],
+      color: ["sub-color", value],
+      backgroundOpacity: ["sub-back-color", `#${Math.round((1 - value) * 255).toString(16).padStart(2, '0')}000000`],
+      windowMargin: ["sub-margin-y", String(value)]
+    };
+    const mapping = mpvMappings[key];
+    if (mapping) {
+      invoke("mpv_set_option_string", { name: mapping[0], value: mapping[1] }).catch(() => {});
     }
   }
 
   function updateSubtitleOffset(delta) {
     subtitleOffset = parseFloat((subtitleOffset + delta).toFixed(1));
-    if (srtRenderer) {
-      srtRenderer.setOffset(subtitleOffset);
-    }
-    if (subtitleRenderer) {
-      subtitleRenderer.setOffset(subtitleOffset);
-    }
-    // Debounce saving preferences
+    invoke("mpv_set_option_string", { name: "sub-delay", value: String(subtitleOffset) }).catch(() => {});
     if (saveTimeout) clearTimeout(saveTimeout);
     saveTimeout = setTimeout(() => saveTrackPreferences(), 1000);
   }
 
   function resetSubtitleOffset() {
     subtitleOffset = 0;
-    if (srtRenderer) {
-      srtRenderer.setOffset(subtitleOffset);
-    }
-    if (subtitleRenderer) {
-      subtitleRenderer.setOffset(subtitleOffset);
-    }
+    invoke("mpv_set_option_string", { name: "sub-delay", value: "0" }).catch(() => {});
     saveTrackPreferences();
   }
 
@@ -2643,61 +1463,37 @@
         break;
       case "arrowleft":
         event.preventDefault();
-        if (videoElement && isFinite(videoElement.currentTime)) {
-          const newTime = Math.max(
-            0,
-            videoElement.currentTime - SEEK_TIME_SHORT,
-          );
-          videoElement.currentTime = newTime;
-          if (useMkvDemuxer) {
-            if (demuxer) demuxer.seek(newTime, selectedAudioTrack);
-            if (audioPlayer) audioPlayer.seek(newTime);
-          }
+        if (isFinite(currentTime)) {
+          const newTime = Math.max(0, currentTime - SEEK_TIME_SHORT);
+          currentTime = newTime;
+          invoke("seek_video", { seconds: newTime }).catch(() => {});
           showShortcutIndicator("seek-backward", "-5s", "ri-rewind-fill", -5);
         }
         break;
       case "arrowright":
         event.preventDefault();
-        if (videoElement && isFinite(videoElement.currentTime) && isFinite(duration)) {
-          const newTime = Math.min(
-            duration,
-            videoElement.currentTime + SEEK_TIME_SHORT,
-          );
-          videoElement.currentTime = newTime;
-          if (useMkvDemuxer) {
-            if (demuxer) demuxer.seek(newTime, selectedAudioTrack);
-            if (audioPlayer) audioPlayer.seek(newTime);
-          }
+        if (isFinite(currentTime) && isFinite(duration)) {
+          const newTime = Math.min(duration, currentTime + SEEK_TIME_SHORT);
+          currentTime = newTime;
+          invoke("seek_video", { seconds: newTime }).catch(() => {});
           showShortcutIndicator("seek-forward", "+5s", "ri-speed-fill", 5);
         }
         break;
       case "j":
         event.preventDefault();
-        if (videoElement && isFinite(videoElement.currentTime)) {
-          const newTime = Math.max(
-            0,
-            videoElement.currentTime - SEEK_TIME_LONG,
-          );
-          videoElement.currentTime = newTime;
-          if (useMkvDemuxer) {
-            if (demuxer) demuxer.seek(newTime, selectedAudioTrack);
-            if (audioPlayer) audioPlayer.seek(newTime);
-          }
+        if (isFinite(currentTime)) {
+          const newTime = Math.max(0, currentTime - SEEK_TIME_LONG);
+          currentTime = newTime;
+          invoke("seek_video", { seconds: newTime }).catch(() => {});
           showShortcutIndicator("seek-backward", "-10s", "ri-rewind-fill", -10);
         }
         break;
       case "l":
         event.preventDefault();
-        if (videoElement && isFinite(videoElement.currentTime) && isFinite(duration)) {
-          const newTime = Math.min(
-            duration,
-            videoElement.currentTime + SEEK_TIME_LONG,
-          );
-          videoElement.currentTime = newTime;
-          if (useMkvDemuxer) {
-            if (demuxer) demuxer.seek(newTime, selectedAudioTrack);
-            if (audioPlayer) audioPlayer.seek(newTime);
-          }
+        if (isFinite(currentTime) && isFinite(duration)) {
+          const newTime = Math.min(duration, currentTime + SEEK_TIME_LONG);
+          currentTime = newTime;
+          invoke("seek_video", { seconds: newTime }).catch(() => {});
           showShortcutIndicator("seek-forward", "+10s", "ri-speed-fill", 10);
         }
         break;
@@ -2769,6 +1565,98 @@
     }
   }
 
+  async function toggleEpisodesPanel() {
+    showEpisodesPanel = !showEpisodesPanel;
+    if (showEpisodesPanel) {
+      // Close other menus
+      showAudioMenu = false;
+      showSubtitleMenu = false;
+      showChaptersMenu = false;
+      showPlayerMenu = false;
+      // Default to current season
+      const targetSeason = episodesPanelSeason ?? seasonNum ?? metadata?.seasons?.find(s => s.season_number > 0)?.season_number;
+      if (targetSeason && !episodesData[targetSeason]) {
+        await loadSeasonEpisodes(targetSeason);
+      } else {
+        episodesPanelSeason = targetSeason;
+      }
+    }
+  }
+
+  async function loadSeasonEpisodes(sNum) {
+    if (!mediaId || !sNum) return;
+    episodesPanelSeason = sNum;
+    if (episodesData[sNum]) return;
+    loadingEpisodesPanel = true;
+    try {
+      const data = await getSeasonDetails(mediaId, sNum);
+      episodesData = { ...episodesData, [sNum]: data };
+    } catch (e) {
+      console.error('[episode panel] failed to load season:', e);
+    } finally {
+      loadingEpisodesPanel = false;
+    }
+  }
+
+  async function playEpisodeFromPanel(targetSeason, targetEpisode) {
+    showEpisodesPanel = false;
+
+    // Update progress for current episode before switching
+    if (mediaId && mediaType && currentTime > 0) {
+      watchProgressStore.updateProgress(mediaId, mediaType, {
+        currentTimestamp: Math.floor(currentTime),
+        duration: Math.floor(duration),
+        currentSeason: seasonNum,
+        currentEpisode: episodeNum,
+      });
+    }
+
+    try {
+      const saved = await invoke('get_saved_selection', {
+        showId: Number(mediaId),
+        season: targetSeason,
+        episode: targetEpisode,
+      });
+
+      if (saved && saved.magnet_link) {
+        dispatch('close');
+        const handleResult = await invoke('add_torrent', { magnetOrUrl: saved.magnet_link });
+        const showName = metadata?.name || metadata?.title || title;
+        window.dispatchEvent(new CustomEvent('openVideoPlayer', {
+          detail: {
+            src: null,
+            title: `${showName} - S${targetSeason}E${targetEpisode}`,
+            metadata,
+            handleId: handleResult,
+            fileIndex: saved.file_index,
+            magnetLink: saved.magnet_link,
+            initialTimestamp: 0,
+            mediaId,
+            mediaType,
+            seasonNum: targetSeason,
+            episodeNum: targetEpisode,
+          },
+        }));
+      } else {
+        // No saved torrent — open MediaDetail to select one
+        dispatch('close');
+        window.dispatchEvent(new CustomEvent('openMediaDetail', {
+          detail: {
+            id: Number(mediaId),
+            media_type: mediaType,
+            name: metadata?.name,
+            title: metadata?.title,
+            poster_path: metadata?.poster_path,
+            autoPlay: true,
+            resumeProgress: { currentSeason: targetSeason, currentEpisode: targetEpisode, currentTimestamp: 0 },
+          },
+        }));
+      }
+    } catch (err) {
+      console.error('[episode panel] error switching episode:', err);
+    }
+  }
+
   onMount(async () => {
     console.log("VideoPlayer mounted");
     
@@ -2777,7 +1665,6 @@
       const settings = await invoke('get_settings');
       showSkipPrompts = settings.show_skip_prompts;
       clearCacheAfterWatch = settings.clear_cache_after_watch;
-      console.log('Loaded settings from backend:', settings);
     } catch (error) {
       console.error('Failed to load settings:', error);
     }
@@ -2799,30 +1686,54 @@
       }
     }
 
-    // Initialize SRT subtitle renderer for non-demuxer playback
-    if (videoElement) {
-      srtRenderer = new SRTSubtitleRenderer(videoElement);
-      srtRenderer.setStyles(subtitleSettings);
-      srtRenderer.initialize();
-    }
+    // Listen to mpv events
+    mpvUnlisteners.push(await listen("mpv-progress-update", (event) => {
+      handleMpvProgress(event.payload);
+    }));
 
-    // Periodic check for skip section state (catches edge cases like keyboard seeking)
+    mpvUnlisteners.push(await listen("mpv-tracks-update", (event) => {
+      const tracks = event.payload.tracks || [];
+      videoMetadata = {
+        audio_tracks: tracks.filter(t => t.track_type === "audio"),
+        subtitle_tracks: tracks.filter(t => t.track_type === "sub"),
+      };
+    }));
+
+    mpvUnlisteners.push(await listen("mpv-chapters-update", (event) => {
+      const raw = Array.isArray(event.payload) ? event.payload : [];
+      chapters = raw.map((ch, i) => ({
+        ...ch,
+        start_time: ch.time ?? ch.start_time ?? 0,
+        index: i,
+      }));
+    }));
+
+    mpvUnlisteners.push(await listen("file_loaded", async () => {
+      loading = false;
+      playing = true;
+      loadingPhase = "ready";
+      if (initialTimestamp > 0 && !hasSeekedToInitial) {
+        hasSeekedToInitial = true;
+        await invoke("seek_video", { seconds: initialTimestamp }).catch(() => {});
+      }
+      setTimeout(() => loadTrackPreferences(), 500);
+    }));
+
+    mpvUnlisteners.push(await listen("mpv-end-file", () => {
+      playing = false;
+    }));
+
+    // Periodic skip section check
     skipSectionCheckInterval = setInterval(() => {
-      if (currentSkipSection && videoElement) {
-        const stillInSection = videoElement.currentTime >= currentSkipSection.start_time && 
-                               videoElement.currentTime < currentSkipSection.end_time;
+      if (currentSkipSection) {
+        const stillInSection = currentTime >= currentSkipSection.start_time &&
+                               currentTime < currentSkipSection.end_time;
         if (!stillInSection) {
           currentSkipSection = null;
           showSkipButton = false;
           skipTimerActive = false;
-          if (skipButtonTimeout) {
-            clearTimeout(skipButtonTimeout);
-            skipButtonTimeout = null;
-          }
-          if (skipTimerInterval) {
-            clearInterval(skipTimerInterval);
-            skipTimerInterval = null;
-          }
+          if (skipButtonTimeout) { clearTimeout(skipButtonTimeout); skipButtonTimeout = null; }
+          if (skipTimerInterval) { clearInterval(skipTimerInterval); skipTimerInterval = null; }
         }
       }
     }, 500);
@@ -2836,65 +1747,24 @@
 
   onDestroy(async () => {
     clearInterval(pollInterval);
-    if (progressTrackingInterval) {
-      clearInterval(progressTrackingInterval);
-    }
-    if (skipButtonTimeout) {
-      clearTimeout(skipButtonTimeout);
-    }
-    if (skipTimerInterval) {
-      clearInterval(skipTimerInterval);
-    }
-    if (skipSectionCheckInterval) {
-      clearInterval(skipSectionCheckInterval);
-    }
+    if (progressTrackingInterval) clearInterval(progressTrackingInterval);
+    if (skipButtonTimeout) clearTimeout(skipButtonTimeout);
+    if (skipTimerInterval) clearInterval(skipTimerInterval);
+    if (skipSectionCheckInterval) clearInterval(skipSectionCheckInterval);
     skipTimerActive = false;
     document.removeEventListener("fullscreenchange", handleFullscreenChange);
-    document.removeEventListener(
-      "webkitfullscreenchange",
-      handleFullscreenChange,
-    );
+    document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
     window.removeEventListener("mousemove", handleDrag);
     window.removeEventListener("mouseup", stopDrag);
     window.removeEventListener("keydown", handleKeyPress);
     window.removeEventListener("click", handleGlobalClick);
     clearTimeout(controlsTimeout);
     clearTimeout(indicatorTimeout);
-
-    // Files will be cleaned up when switching torrents or on app exit
-    // No need to delete files here
-
-    // Cleanup DASH instance
-    if (videoElement && videoElement.dashInstance) {
-      videoElement.dashInstance.reset();
-      videoElement.dashInstance = null;
-    }
-
-    if (demuxer) {
-      demuxer.destroy();
-      demuxer = null;
-    }
-
-    if (subtitleRenderer) {
-      subtitleRenderer.dispose();
-      subtitleRenderer = null;
-    }
-
-    if (audioPlayer) {
-      // HTML5 Audio cleanup
-      if (audioPlayer instanceof Audio) {
-        audioPlayer.pause();
-        audioPlayer.src = '';
-      } else {
-        audioPlayer.dispose();
-      }
-      audioPlayer = null;
-    }
-
-    if (srtRenderer) {
-      srtRenderer.dispose();
-      srtRenderer = null;
-    }
+    // Remove mpv event listeners
+    for (const unlisten of mpvUnlisteners) unlisten();
+    mpvUnlisteners = [];
+    // Stop mpv playback so the native layer goes dark
+    await invoke("mpv_run_command", { args: ["stop"] }).catch(() => {});
   });
 </script>
 
@@ -2906,82 +1776,16 @@
   class:fullscreen
   class:hide-cursor={!showControls && playing}
 >
-  <!-- svelte-ignore a11y-media-has-caption -->
-  <video
-    bind:this={videoElement}
-    {src}
-    on:timeupdate={handleTimeUpdate}
-    on:loadedmetadata={handleLoadedMetadata}
-    on:seeking={handleSeekingEvent}
-    on:seeked={handleCanPlayEvent}
-    on:waiting={handleWaitingEvent}
-    on:canplay={handleCanPlayEvent}
-    on:play={() => { if (!showBufferingIndicator) playing = true; }}
-    on:pause={() => { if (!showBufferingIndicator) playing = false; }}
+  <!-- mpv renders into native view below this transparent WebView -->
+  <div
+    bind:this={mpvContainer}
+    class="mpv-container"
     on:click={togglePlay}
-  />
+  ></div>
 
   {#if loading}
     <div class="loading-overlay">
       <div class="loading-content">
-        <!-- Phase indicator -->
-        <div class="loading-phases">
-          <div class="loading-phase" class:active={loadingPhase === 'initializing'} class:complete={['buffering', 'metadata', 'transcoding', 'demuxing', 'ready'].includes(loadingPhase)}>
-            <div class="phase-icon">
-              {#if ['buffering', 'metadata', 'transcoding', 'demuxing', 'ready'].includes(loadingPhase)}
-                <i class="ri-check-line"></i>
-              {:else}
-                <span>1</span>
-              {/if}
-            </div>
-            <span class="phase-label">Initialize</span>
-          </div>
-          <div class="phase-connector" class:complete={['buffering', 'metadata', 'transcoding', 'demuxing', 'ready'].includes(loadingPhase)}></div>
-          <div class="loading-phase" class:active={loadingPhase === 'buffering'} class:complete={['metadata', 'transcoding', 'demuxing', 'ready'].includes(loadingPhase)}>
-            <div class="phase-icon">
-              {#if ['metadata', 'transcoding', 'demuxing', 'ready'].includes(loadingPhase)}
-                <i class="ri-check-line"></i>
-              {:else}
-                <span>2</span>
-              {/if}
-            </div>
-            <span class="phase-label">Buffer</span>
-          </div>
-          <div class="phase-connector" class:complete={['metadata', 'transcoding', 'demuxing', 'ready'].includes(loadingPhase)}></div>
-          <div class="loading-phase" class:active={loadingPhase === 'metadata'} class:complete={['transcoding', 'demuxing', 'ready'].includes(loadingPhase)}>
-            <div class="phase-icon">
-              {#if ['transcoding', 'demuxing', 'ready'].includes(loadingPhase)}
-                <i class="ri-check-line"></i>
-              {:else}
-                <span>3</span>
-              {/if}
-            </div>
-            <span class="phase-label">Metadata</span>
-          </div>
-          <div class="phase-connector" class:complete={['transcoding', 'demuxing', 'ready'].includes(loadingPhase)}></div>
-          <div class="loading-phase" class:active={loadingPhase === 'transcoding'} class:complete={['demuxing', 'ready'].includes(loadingPhase)}>
-            <div class="phase-icon">
-              {#if ['demuxing', 'ready'].includes(loadingPhase)}
-                <i class="ri-check-line"></i>
-              {:else}
-                <span>4</span>
-              {/if}
-            </div>
-            <span class="phase-label">Transcode</span>
-          </div>
-          <div class="phase-connector" class:complete={['demuxing', 'ready'].includes(loadingPhase)}></div>
-          <div class="loading-phase" class:active={loadingPhase === 'demuxing'} class:complete={loadingPhase === 'ready'}>
-            <div class="phase-icon">
-              {#if loadingPhase === 'ready'}
-                <i class="ri-check-line"></i>
-              {:else}
-                <span>5</span>
-              {/if}
-            </div>
-            <span class="phase-label">Prepare</span>
-          </div>
-        </div>
-
         <div class="loading-status">{loadingStatus.status}</div>
         
         <!-- Progress bar -->
@@ -3230,6 +2034,16 @@
         </div>
       </div>
 
+      {#if metadata && metadata.seasons && metadata.seasons.length > 0}
+        <button
+          class="episodes-btn control-btn"
+          on:click|stopPropagation={toggleEpisodesPanel}
+          title="Episodes"
+        >
+          <i class="ri-film-line"></i>
+        </button>
+      {/if}
+
       {#if chapters && chapters.length > 0}
         <div class="player-track-menu-container">
           <button
@@ -3304,6 +2118,20 @@
               </div>
             {/if}
 
+            <!-- Speed -->
+            <div class="menu-section-header">Speed</div>
+            <div class="speed-options">
+              {#each [0.5, 0.75, 1, 1.25, 1.5, 2] as rate}
+                <button
+                  class="player-track-option"
+                  class:active={playbackRate === rate}
+                  on:click={() => setSpeed(rate)}
+                >
+                  {rate}x
+                </button>
+              {/each}
+            </div>
+
             <div class="menu-divider"></div>
 
             <!-- Actions -->
@@ -3329,21 +2157,21 @@
                 on:click={() => selectAudioTrack(i)}
               >
                 <span class="player-track-info">
-                  {#if track.language}
-                    {@const countryCode = getCountryCode(track.language)}
+                  {#if track.lang}
+                    {@const countryCode = getCountryCode(track.lang)}
                     {#if countryCode}
                       <img 
                         src="https://flagcdn.com/w40/{countryCode.toLowerCase()}.png" 
-                        alt={track.language}
+                        alt={track.lang}
                         class="track-flag"
                       />
                     {/if}
-                    <span class="player-track-lang">{track.language.toUpperCase()}</span>
+                    <span class="player-track-lang">{track.lang.toUpperCase()}</span>
                   {:else}
                     Track {i + 1}
                   {/if}
-                  {#if track.name}
-                    <span class="player-track-detail">({track.name})</span>
+                  {#if track.title}
+                    <span class="player-track-detail">({track.title})</span>
                   {/if}
                 </span>
                 {#if loadingAudio && selectedAudioTrack === i}
@@ -3387,21 +2215,21 @@
                     disabled={loadingSubtitle && selectedSubtitleTrack !== i}
                   >
                     <span class="player-track-info">
-                      {#if track.language}
-                        {@const countryCode = getCountryCode(track.language)}
+                      {#if track.lang}
+                        {@const countryCode = getCountryCode(track.lang)}
                         {#if countryCode}
                           <img 
                             src="https://flagcdn.com/w40/{countryCode.toLowerCase()}.png" 
-                            alt={track.language}
+                            alt={track.lang}
                             class="track-flag"
                           />
                         {/if}
-                        <span class="player-track-lang">{track.language.toUpperCase()}</span>
+                        <span class="player-track-lang">{track.lang.toUpperCase()}</span>
                       {:else}
                         <span class="player-track-lang">Subtitle {i + 1}</span>
                       {/if}
-                      {#if track.name}
-                        <span class="player-track-detail">{track.name}</span>
+                      {#if track.title}
+                        <span class="player-track-detail">{track.title}</span>
                       {/if}
                     </span>
                     <span class="player-track-badge">{track.codec || 'MKV'}</span>
@@ -3580,9 +2408,77 @@
     </div>
   </div>
 
+  <!-- Episodes Panel -->
+  {#if showEpisodesPanel && metadata && metadata.seasons}
+    <!-- svelte-ignore a11y-click-events-have-key-events -->
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div class="episodes-panel" on:click|stopPropagation>
+      <div class="episodes-panel-header">
+        <span class="episodes-panel-title">{metadata.name || metadata.title}</span>
+        <button class="episodes-panel-close" on:click={() => showEpisodesPanel = false}>
+          <i class="ri-close-line"></i>
+        </button>
+      </div>
+
+      <!-- Season tabs -->
+      {#if metadata.seasons.filter(s => s.season_number > 0).length > 1}
+        <div class="episodes-season-tabs">
+          {#each metadata.seasons.filter(s => s.season_number > 0) as season}
+            <button
+              class="episodes-season-tab"
+              class:active={episodesPanelSeason === season.season_number}
+              on:click={() => loadSeasonEpisodes(season.season_number)}
+            >S{season.season_number}</button>
+          {/each}
+        </div>
+      {/if}
+
+      <!-- Episode list -->
+      <div class="episodes-list-scroll">
+        {#if loadingEpisodesPanel}
+          <div class="episodes-loading">
+            <div class="episodes-loading-spinner"></div>
+          </div>
+        {:else if episodesData[episodesPanelSeason]}
+          {#each episodesData[episodesPanelSeason].episodes as ep}
+            {@const epKey = `${mediaId}-${mediaType}-S${episodesPanelSeason}-E${ep.episode_number}`}
+            {@const epProgress = $watchProgressStore[epKey]}
+            {@const epPct = epProgress?.duration ? (epProgress.currentTimestamp / epProgress.duration) * 100 : 0}
+            {@const isCurrent = episodesPanelSeason === seasonNum && ep.episode_number === episodeNum}
+            <!-- svelte-ignore a11y-click-events-have-key-events -->
+            <!-- svelte-ignore a11y-no-static-element-interactions -->
+            <div
+              class="episodes-panel-item"
+              class:current={isCurrent}
+              on:click={() => playEpisodeFromPanel(episodesPanelSeason, ep.episode_number)}
+            >
+              <div class="episodes-panel-still">
+                {#if ep.still_path}
+                  <img src={getImageUrl(ep.still_path, 'w300')} alt={ep.name} />
+                {:else}
+                  <div class="episodes-panel-still-placeholder"><i class="ri-film-line"></i></div>
+                {/if}
+                {#if isCurrent}
+                  <div class="episodes-panel-now-playing"><i class="ri-play-fill"></i></div>
+                {:else if epPct > 85}
+                  <div class="episodes-panel-watched"><i class="ri-check-line"></i></div>
+                {:else if epPct > 0}
+                  <div class="episodes-panel-progress-bar"><div style="width:{epPct}%"></div></div>
+                {/if}
+              </div>
+              <div class="episodes-panel-info">
+                <span class="episodes-panel-num">E{ep.episode_number}</span>
+                <span class="episodes-panel-name">{ep.name}</span>
+              </div>
+            </div>
+          {/each}
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   <!-- External Player Overlay -->
-  {#if playingInExternal}
-    <div class="external-player-overlay">
+  {#if playingInExternal}    <div class="external-player-overlay">
       <div class="external-player-content">
         <i class="ri-external-link-line external-icon"></i>
         <h2>Playing in External Player</h2>

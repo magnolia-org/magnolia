@@ -282,6 +282,12 @@
     padding: 10px 20px;
 }
 
+.genre-tag-button {
+    cursor: pointer;
+    font-family: inherit;
+    color: inherit;
+}
+
 .detail-overview {
     font-size: 15px;
     line-height: 1.6;
@@ -687,6 +693,29 @@
     font-size: 14px;
     color: var(--text-primary);
     font-weight: 500;
+}
+
+.detail-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-xs);
+}
+
+.detail-tag-btn {
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+    border-radius: var(--border-radius-pill);
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.detail-tag-btn:hover {
+    border-color: color-mix(in srgb, var(--accent-color) 60%, rgba(255, 255, 255, 0.2));
+    background: color-mix(in srgb, var(--accent-color) 20%, rgba(255, 255, 255, 0.08));
 }
 
 /* Seasons and Episodes */

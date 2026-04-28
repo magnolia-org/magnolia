@@ -6,6 +6,8 @@
     getSeasonDetails,
     getMovieCredits,
     getTVCredits,
+    getMovieKeywords,
+    getTVKeywords,
     getMovieRecommendations,
     getTVRecommendations,
     getImageUrl,
@@ -38,6 +40,7 @@
   let selectedEpisode = null;
   let credits = null;
   let recommendations = [];
+  let keywords = [];
   let activeTab = "";
   let availableTabs = [];
   let viewMode = "list"; // 'list' or 'grid'
@@ -123,6 +126,7 @@
     allSeasonsData = {};
     selectedEpisode = null;
     recommendations = [];
+    keywords = [];
     autoPlayTriggered = false; // Reset autoplay flag for new media
     selectedTorrentName = ""; // Reset torrent name for new media
   }
@@ -192,13 +196,18 @@
   async function loadDetails() {
     loading = true;
     details = null;
+    keywords = [];
     try {
       if (media.media_type === "movie") {
         details = await getMovieDetails(media.id);
         credits = await getMovieCredits(media.id);
+        const keywordResponse = await getMovieKeywords(media.id);
+        keywords = keywordResponse?.keywords || [];
       } else {
         details = await getTVDetails(media.id);
         credits = await getTVCredits(media.id);
+        const keywordResponse = await getTVKeywords(media.id);
+        keywords = keywordResponse?.results || [];
       }
 
       if (details && details.backdrop_path) {
@@ -209,6 +218,23 @@
       details = null;
     }
     loading = false;
+  }
+
+  function openTagView(tag, tagType) {
+    if (!tag?.id) return;
+
+    window.dispatchEvent(
+      new CustomEvent("viewAll", {
+        detail: {
+          title: tag.name,
+          type: "all",
+          category: tagType === "genre" ? "discover_by_genre" : "discover_by_keyword",
+          filterId: tag.id,
+        },
+      }),
+    );
+
+    dispatch("close");
   }
 
   async function loadSeasonDetails() {
@@ -1370,7 +1396,13 @@
               {#if details.genres && details.genres.length > 0}
                 <div class="detail-genres">
                   {#each details.genres as genre}
-                    <span class="genre-tag genre-tag-large">{genre.name}</span>
+                    <button
+                      class="genre-tag genre-tag-large genre-tag-button"
+                      type="button"
+                      on:click={() => openTagView(genre, "genre")}
+                    >
+                      {genre.name}
+                    </button>
                   {/each}
                 </div>
               {/if}
@@ -1738,6 +1770,38 @@
                       .map((c) => c.name)
                       .join(", ")}</span
                   >
+                </div>
+              {/if}
+              {#if details.genres && details.genres.length > 0}
+                <div class="detail-item full-width">
+                  <span class="label">Genres</span>
+                  <div class="value detail-tags">
+                    {#each details.genres as genre}
+                      <button
+                        class="detail-tag-btn"
+                        type="button"
+                        on:click={() => openTagView(genre, "genre")}
+                      >
+                        {genre.name}
+                      </button>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+              {#if keywords && keywords.length > 0}
+                <div class="detail-item full-width">
+                  <span class="label">Keywords</span>
+                  <div class="value detail-tags">
+                    {#each keywords as keyword}
+                      <button
+                        class="detail-tag-btn"
+                        type="button"
+                        on:click={() => openTagView(keyword, "keyword")}
+                      >
+                        {keyword.name}
+                      </button>
+                    {/each}
+                  </div>
                 </div>
               {/if}
               {#if details.networks && details.networks.length > 0}

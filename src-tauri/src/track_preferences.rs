@@ -7,9 +7,14 @@ use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackPreference {
-    pub audio_track_index: Option<usize>,
-    pub subtitle_track_index: Option<i32>,
+    /// mpv track-list `id` for the preferred audio track.
+    pub audio_track_id: Option<i64>,
+    /// mpv track-list `id` for the preferred subtitle track.
+    /// `None` when no subtitle is selected or an external subtitle URL is used.
+    pub subtitle_track_id: Option<i64>,
+    /// Language tag used to match saved external subtitles across sessions.
     pub subtitle_language: Option<String>,
+    /// Sub-delay in seconds (positive = delay, negative = advance).
     pub subtitle_offset: Option<f64>,
 }
 
@@ -42,16 +47,16 @@ impl TrackPreferencesManager {
     pub async fn save_preference(
         &self,
         magnet_link: String,
-        audio_track_index: Option<usize>,
-        subtitle_track_index: Option<i32>,
+        audio_track_id: Option<i64>,
+        subtitle_track_id: Option<i64>,
         subtitle_language: Option<String>,
         subtitle_offset: Option<f64>,
     ) {
         let mut data = self.data.write().await;
         
         data.torrents.insert(magnet_link, TrackPreference {
-            audio_track_index,
-            subtitle_track_index,
+            audio_track_id,
+            subtitle_track_id,
             subtitle_language,
             subtitle_offset,
         });

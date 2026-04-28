@@ -44,6 +44,8 @@
   $: watchProgress = $watchProgressStore;
   $: activeModal = $modalStore.activeModal;
 
+  $: document.body.classList.toggle('video-active', showVideoPlayer);
+
   onMount(async () => {
     try {
       const settings = await invoke('get_settings');
@@ -128,12 +130,12 @@
 
       switch (e.key) {
         case "Escape":
-          if (viewAllData) {
+          if (selectedMedia) {
+            e.preventDefault();
+            navigateBack();
+          } else if (viewAllData) {
             e.preventDefault();
             viewAllData = null;
-          } else if (selectedMedia) {
-            e.preventDefault();
-            closeDetail();
           } else if (showTorrentDebug) {
             e.preventDefault();
             showTorrentDebug = false;
@@ -259,7 +261,7 @@
   }
 </script>
 
-<main>
+<main class:video-active={showVideoPlayer}>
   <Onboarding bind:visible={onboardingVisible} />
   
   {#if activeModal === 'cache'}
