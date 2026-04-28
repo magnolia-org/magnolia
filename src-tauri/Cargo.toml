@@ -1,6 +1,6 @@
 [package]
 name = "magnolia-tauri-app"
-version = "1.2.0"
+version = "2.0.0beta"
 description = "Media torrent client"
 authors = ["chair"]
 license = "MIT"
