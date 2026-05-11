@@ -175,9 +175,6 @@ jobs:
       - name: Build (DMG)
         run: node scripts/run_tauri.mjs build --bundles dmg --target aarch64-apple-darwin
 
-      - name: Bundle runtime libraries (macOS)
-        run: bash scripts/bundle_runtime_libs_macos.sh src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Magnolia.app --skip-sign
-
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
@@ -229,6 +226,8 @@ jobs:
 
       - name: Set up mpv runtime libraries
         run: bash scripts/setup_runtime_libs_linux.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build (AppImage)
         run: node scripts/run_tauri.mjs build --bundles appimage
