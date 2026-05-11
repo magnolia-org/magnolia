@@ -30,7 +30,6 @@
     "@tauri-apps/plugin-dialog": "^2.4.2",
     "@tauri-apps/plugin-fs": "^2.4.4",
     "@tauri-apps/plugin-shell": "^2.0.0",
-    "remixicon": "^4.7.0",
-    "wyzie-lib": "^2.2.5"
+    "remixicon": "^4.7.0"
   }
 }

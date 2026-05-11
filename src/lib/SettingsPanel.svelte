@@ -11,7 +11,6 @@
   let rememberPreferences = true;
   let showSkipPrompts = true;
   let hideRecommendations = false;
-  let clearCacheAfterWatch = false;
   let checkForUpdates = true;
   let settingsPanel;
   let playerDropdownOpen = false;
@@ -29,7 +28,6 @@
       rememberPreferences = settings.remember_preferences;
       showSkipPrompts = settings.show_skip_prompts;
       hideRecommendations = settings.hide_recommendations;
-      clearCacheAfterWatch = settings.clear_cache_after_watch;
       checkForUpdates = settings.check_for_updates !== undefined ? settings.check_for_updates : true;
       console.log('loaded settings from backend:', settings);
       // Set loaded flag after a tick to ensure reactive statements see the loaded values
@@ -50,7 +48,6 @@
         remember_preferences: rememberPreferences,
         show_skip_prompts: showSkipPrompts,
         hide_recommendations: hideRecommendations,
-        clear_cache_after_watch: clearCacheAfterWatch,
         check_for_updates: checkForUpdates
       };
       await invoke('save_settings', { settings });
@@ -66,7 +63,7 @@
   // Auto-save when any setting changes (tracks the actual variables)
   $: if (settingsLoaded) {
     // This will re-run whenever externalPlayer, rememberPreferences, or showSkipPrompts change
-    externalPlayer, rememberPreferences, showSkipPrompts, hideRecommendations, clearCacheAfterWatch, checkForUpdates;
+    externalPlayer, rememberPreferences, showSkipPrompts, hideRecommendations, checkForUpdates;
     saveSettings();
   }
   
@@ -189,18 +186,6 @@
 
         <div class="setting-item">
           <div class="setting-label">
-            <span>Clear cache after watch</span>
-          </div>
-          <div class="setting-control">
-            <label class="toggle-switch">
-              <input type="checkbox" bind:checked={clearCacheAfterWatch} />
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
-        </div>
-
-        <div class="setting-item">
-          <div class="setting-label">
             <span>Check for updates on startup</span>
           </div>
           <div class="setting-control">
@@ -208,17 +193,6 @@
               <input type="checkbox" bind:checked={checkForUpdates} />
               <span class="toggle-slider"></span>
             </label>
-          </div>
-        </div>
-
-        <div class="setting-item">
-          <div class="setting-label">
-            <span>Storage</span>
-          </div>
-          <div class="setting-control">
-            <button class="btn-standard" on:click={() => { openModal('cache'); closeSettings(); }}>
-              Manage Cache
-            </button>
           </div>
         </div>
       </div>

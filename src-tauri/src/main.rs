@@ -11,6 +11,7 @@ mod track_preferences;
 mod settings;
 mod logger;
 mod cache_metadata;
+mod subtitles;
 
 use search::{nyaa::NyaaProvider, limetorrents::LimeTorrentsProvider, piratebay::PirateBayProvider,
              SearchProvider};
@@ -818,6 +819,7 @@ fn main() {
             download_update,
             install_update,
             open_external_url,
+            subtitles::fetch_wyzie_subtitles,
             load_file,
             cycle_pause,
             seek_video,

@@ -124,8 +124,9 @@ jobs:
 
       - name: Build (NSIS)
         run: node scripts/run_tauri.mjs build --bundles nsis
-        env:
-          SOIA_SKIP_APPLY_RUNTIME_LIBS: "1"
+
+      - name: Bundle runtime libraries (Windows)
+        run: node scripts/bundle_runtime_libs_windows.mjs --profile release
 
       - name: Upload NSIS installer
         uses: actions/upload-artifact@v4
@@ -173,8 +174,9 @@ jobs:
 
       - name: Build (DMG)
         run: node scripts/run_tauri.mjs build --bundles dmg --target aarch64-apple-darwin
-        env:
-          SOIA_SKIP_APPLY_RUNTIME_LIBS: "1"
+
+      - name: Bundle runtime libraries (macOS)
+        run: bash scripts/bundle_runtime_libs_macos.sh src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Magnolia.app --skip-sign
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4
@@ -230,8 +232,9 @@ jobs:
 
       - name: Build (AppImage)
         run: node scripts/run_tauri.mjs build --bundles appimage
-        env:
-          SOIA_SKIP_APPLY_RUNTIME_LIBS: "1"
+
+      - name: Bundle runtime libraries (Linux)
+        run: node scripts/bundle_runtime_libs_linux.mjs --profile release
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4

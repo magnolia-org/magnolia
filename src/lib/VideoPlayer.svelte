@@ -4,7 +4,6 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { formatTime } from "./utils/timeUtils.js";
-  import { fetchSubtitles } from "./wyzieSubs.js";
   import { watchProgressStore } from "./stores/watchProgressStore.js";
   import { watchHistoryStore } from "./stores/watchHistoryStore.js";
   import { getSeasonDetails, getImageUrl } from "./tmdb.js";
@@ -93,6 +92,8 @@
   
   let subtitleSettings = { ...defaultSubtitleSettings };
 
+  let selectedSubtitleLanguage = null;
+
   let playerMenuElement = null;
   let audioSubmenuElement = null;
   let subtitleSubmenuElement = null;
@@ -113,6 +114,7 @@
   let playingInExternal = false;
   let showSkipPrompts = true;
   let clearCacheAfterWatch = false;
+  let hideChapterMarkers = false;
   let cacheCleared = false;
   
   let torrentSessionId = null;
@@ -145,25 +147,59 @@
     }
   }
 
+  // Convert #RRGGBB to mpv #RRGGBBAA (full opacity)
+  function hexToMpvColor(hex) {
+    return hex.replace(/^#/, '#') + 'FF';
+  }
+
+  async function applyAllSubtitleSettingsToMpv() {
+    const { fontSize, color, backgroundOpacity, textShadow, textShadowColor, windowMargin } = subtitleSettings;
+    const alpha = Math.round(backgroundOpacity * 255).toString(16).padStart(2, '0');
+    const cmds = [
+      ["sub-font-size", String(fontSize)],
+      ["sub-color", hexToMpvColor(color)],
+      ["sub-back-color", `#000000${alpha}`],
+      ["sub-shadow-offset", textShadow ? "2" : "0"],
+      ["sub-shadow-color", hexToMpvColor(textShadowColor)],
+      ["sub-margin-y", String(windowMargin)],
+    ];
+    for (const [name, value] of cmds) {
+      await invoke("mpv_set_option_string", { name, value }).catch(() => {});
+    }
+  }
+
+  async function applyWyzieLangPreference(lang) {
+    const match = externalSubtitles.find(s => s.language === lang);
+    if (!match) return;
+    const embeddedCount = videoMetadata?.subtitle_tracks?.length || 0;
+    const idx = externalSubtitles.indexOf(match);
+    await selectSubtitle(match, embeddedCount + idx);
+  }
+
   async function loadTrackPreferences() {
     if (!magnetLink) return;
     try {
       const prefs = await invoke('get_track_preference', { magnetLink });
-      if (!prefs) return;
 
-      // audio_track_id is the mpv track id (i64)
-      if (prefs.audio_track_id != null) {
-        await invoke("mpv_run_command", { args: ["set", "aid", String(prefs.audio_track_id)] }).catch(() => {});
+      // Determine language to restore: prefer per-torrent, fall back to last-used
+      const langToRestore = prefs?.subtitle_language ||
+        (!prefs?.subtitle_track_id ? localStorage.getItem('lastSubtitleLanguage') : null);
+
+      if (prefs) {
+        if (prefs.audio_track_id != null) {
+          await invoke("mpv_run_command", { args: ["set", "aid", String(prefs.audio_track_id)] }).catch(() => {});
+        }
+        if (prefs.subtitle_track_id != null && prefs.subtitle_track_id > 0) {
+          await invoke("mpv_run_command", { args: ["set", "sid", String(prefs.subtitle_track_id)] }).catch(() => {});
+        }
+        if (prefs.subtitle_offset != null) {
+          subtitleOffset = prefs.subtitle_offset;
+          await invoke("mpv_set_option_string", { name: "sub-delay", value: String(subtitleOffset) }).catch(() => {});
+        }
       }
 
-      // subtitle_track_id is the mpv track id or -1 for external/disabled
-      if (prefs.subtitle_track_id != null && prefs.subtitle_track_id > 0) {
-        await invoke("mpv_run_command", { args: ["set", "sid", String(prefs.subtitle_track_id)] }).catch(() => {});
-      }
-
-      if (prefs.subtitle_offset != null) {
-        subtitleOffset = prefs.subtitle_offset;
-        await invoke("mpv_set_option_string", { name: "sub-delay", value: String(subtitleOffset) }).catch(() => {});
+      if (langToRestore && externalSubtitles.length > 0) {
+        await applyWyzieLangPreference(langToRestore);
       }
     } catch (error) {
       console.error('[track prefs] error loading preferences:', error);
@@ -174,11 +210,24 @@
     if (!magnetLink) return;
     try {
       const audioTrackId = selectedAudioTrack > 0 ? selectedAudioTrack : null;
-      const subtitleTrackId = selectedSubtitleTrack >= 0 ? selectedSubtitleTrack : null;
+      const embeddedCount = videoMetadata?.subtitle_tracks?.length || 0;
+      let subtitleTrackId = null;
+      let subtitleLanguage = null;
+      if (selectedSubtitleTrack >= 0) {
+        if (selectedSubtitleTrack < embeddedCount) {
+          // embedded — save the mpv track id for sid restoration
+          subtitleTrackId = videoMetadata?.subtitle_tracks?.[selectedSubtitleTrack]?.id ?? null;
+        } else {
+          // wyzie — save language for cross-episode restoration
+          subtitleLanguage = selectedSubtitleLanguage;
+          if (subtitleLanguage) localStorage.setItem('lastSubtitleLanguage', subtitleLanguage);
+        }
+      }
       await invoke('save_track_preference', {
         magnetLink,
         audioTrackId,
         subtitleTrackId,
+        subtitleLanguage,
         subtitleOffset: subtitleOffset !== 0 ? subtitleOffset : null
       });
     } catch (error) {
@@ -266,7 +315,12 @@
     lastSubtitleFetchKey = fetchKey;
     
     try {
-      const subs = await fetchSubtitles(mediaId, mediaType, seasonNum, episodeNum);
+      const subs = await invoke('fetch_wyzie_subtitles', {
+        tmdbId: String(mediaId),
+        mediaType,
+        season: seasonNum != null ? Number(seasonNum) : null,
+        episode: episodeNum != null ? Number(episodeNum) : null,
+      });
       // Sort subtitles alphabetically by language
       subs.sort((a, b) => {
         const langA = (a.language || "").toLowerCase();
@@ -1092,12 +1146,14 @@
       if (track.source === "wyzie") {
         // Load external subtitle via mpv sub-add
         await invoke("mpv_run_command", { args: ["sub-add", track.url, "select"] });
+        selectedSubtitleLanguage = track.language;
       } else {
         // Embedded subtitle — use mpv track id
         const subTrack = videoMetadata?.subtitle_tracks?.[trackIndex];
         if (subTrack) {
           await invoke("mpv_run_command", { args: ["set", "sid", String(subTrack.id)] });
         }
+        selectedSubtitleLanguage = null;
       }
       saveTrackPreferences();
     } catch (error) {
@@ -1110,8 +1166,10 @@
 
   async function disableSubtitles() {
     selectedSubtitleTrack = -1;
+    selectedSubtitleLanguage = null;
     loadingSubtitle = false;
     await invoke("mpv_run_command", { args: ["set", "sid", "no"] }).catch(() => {});
+    saveTrackPreferences();
     showSubtitleMenu = false;
   }
 
@@ -1272,16 +1330,22 @@
   function updateSubtitleSettings(key, value) {
     subtitleSettings = { ...subtitleSettings, [key]: value };
     localStorage.setItem('subtitleSettings', JSON.stringify(subtitleSettings));
-    // Map settings to mpv options
-    const mpvMappings = {
-      fontSize: ["sub-font-size", String(value)],
-      color: ["sub-color", value],
-      backgroundOpacity: ["sub-back-color", `#${Math.round((1 - value) * 255).toString(16).padStart(2, '0')}000000`],
-      windowMargin: ["sub-margin-y", String(value)]
-    };
-    const mapping = mpvMappings[key];
-    if (mapping) {
-      invoke("mpv_set_option_string", { name: mapping[0], value: mapping[1] }).catch(() => {});
+    // Apply individual setting to mpv
+    if (key === 'fontSize') {
+      invoke("mpv_set_option_string", { name: "sub-font-size", value: String(value) }).catch(() => {});
+    } else if (key === 'color') {
+      invoke("mpv_set_option_string", { name: "sub-color", value: hexToMpvColor(value) }).catch(() => {});
+    } else if (key === 'backgroundOpacity') {
+      const alpha = Math.round(value * 255).toString(16).padStart(2, '0');
+      invoke("mpv_set_option_string", { name: "sub-back-color", value: `#000000${alpha}` }).catch(() => {});
+    } else if (key === 'textShadow') {
+      invoke("mpv_set_option_string", { name: "sub-shadow-offset", value: value ? "2" : "0" }).catch(() => {});
+    } else if (key === 'textShadowColor') {
+      if (subtitleSettings.textShadow) {
+        invoke("mpv_set_option_string", { name: "sub-shadow-color", value: hexToMpvColor(value) }).catch(() => {});
+      }
+    } else if (key === 'windowMargin') {
+      invoke("mpv_set_option_string", { name: "sub-margin-y", value: String(value) }).catch(() => {});
     }
   }
 
@@ -1300,6 +1364,17 @@
 
   function resetSubtitleSetting(key) {
     updateSubtitleSettings(key, defaultSubtitleSettings[key]);
+  }
+
+  async function toggleHideChapters() {
+    hideChapterMarkers = !hideChapterMarkers;
+    try {
+      const settings = await invoke('get_settings');
+      settings.hide_chapter_markers = hideChapterMarkers;
+      await invoke('save_settings', { settings });
+    } catch (error) {
+      console.error('failed to save hideChapterMarkers:', error);
+    }
   }
 
   async function toggleSkipPrompts() {
@@ -1665,6 +1740,7 @@
       const settings = await invoke('get_settings');
       showSkipPrompts = settings.show_skip_prompts;
       clearCacheAfterWatch = settings.clear_cache_after_watch;
+      hideChapterMarkers = settings.hide_chapter_markers ?? false;
     } catch (error) {
       console.error('Failed to load settings:', error);
     }
@@ -1720,7 +1796,10 @@
         hasSeekedToInitial = true;
         await invoke("seek_video", { seconds: initialTimestamp }).catch(() => {});
       }
-      setTimeout(() => loadTrackPreferences(), 500);
+      setTimeout(async () => {
+        await applyAllSubtitleSettingsToMpv();
+        await loadTrackPreferences();
+      }, 500);
     }));
 
     mpvUnlisteners.push(await listen("mpv-end-file", () => {
@@ -1943,10 +2022,10 @@
         <div class="progress-handle"></div>
       </div>
 
-      <!-- Chapter markers -->
-      {#if chapters && chapters.length > 0}
+            <!-- Chapter markers -->
+      {#if !hideChapterMarkers && chapters && chapters.length > 0}
         {#each chapters as chapter}
-          {#if chapter.start_time > 0}
+          {#if chapter.start_time > 1}
             <div
               class="chapter-marker"
               style="left: {(chapter.start_time / duration) * 100}%"
@@ -2123,20 +2202,35 @@
             {/if}
 
             <!-- Speed -->
-            <div class="menu-section-header">Speed</div>
-            <div class="speed-options">
-              {#each [0.5, 0.75, 1, 1.25, 1.5, 2] as rate}
-                <button
-                  class="player-track-option"
-                  class:active={playbackRate === rate}
-                  on:click={() => setSpeed(rate)}
-                >
-                  {rate}x
-                </button>
-              {/each}
+            <div class="player-track-option menu-item speed-item">
+              <div class="speed-item-header">
+                <span class="player-track-info">
+                  <i class="ri-speed-line"></i> Speed
+                </span>
+                <span class="menu-speed-value">{playbackRate}x</span>
+              </div>
+              <input
+                type="range"
+                class="speed-slider"
+                min="0.25"
+                max="3"
+                step="0.25"
+                value={playbackRate}
+                on:input={(e) => setSpeed(parseFloat(e.target.value))}
+              />
             </div>
 
             <div class="menu-divider"></div>
+
+            <!-- Chapter options -->
+            {#if chapters && chapters.length > 0}
+              <button class="player-track-option menu-item" on:click={toggleHideChapters}>
+                <span class="player-track-info">
+                  <i class="ri-bookmark-line"></i> Chapter markers
+                </span>
+                <span class="menu-toggle-indicator" class:on={!hideChapterMarkers}></span>
+              </button>
+            {/if}
 
             <!-- Actions -->
             <button

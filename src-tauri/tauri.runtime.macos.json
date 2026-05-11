@@ -1,0 +1,51 @@
+{
+  "bundle": {
+    "macOS": {
+      "frameworks": [
+        "libs/mpv/libarchive.13.8.7.dylib",
+        "libs/mpv/libass.dylib",
+        "libs/mpv/libavcodec.62.28.100.dylib",
+        "libs/mpv/libavdevice.62.3.100.dylib",
+        "libs/mpv/libavfilter.11.14.100.dylib",
+        "libs/mpv/libavformat.62.12.100.dylib",
+        "libs/mpv/libavutil.60.26.100.dylib",
+        "libs/mpv/libbluray.3.dylib",
+        "libs/mpv/libbrotlicommon.1.2.0.dylib",
+        "libs/mpv/libbrotlidec.1.2.0.dylib",
+        "libs/mpv/libbz2.1.0.8.dylib",
+        "libs/mpv/libcharset.1.dylib",
+        "libs/mpv/libcrypto.3.dylib",
+        "libs/mpv/libdav1d.7.dylib",
+        "libs/mpv/libdvdcss.2.dylib",
+        "libs/mpv/libdvdnav.4.dylib",
+        "libs/mpv/libdvdread.8.dylib",
+        "libs/mpv/libfftw3.3.dylib",
+        "libs/mpv/libfreetype.6.20.6.dylib",
+        "libs/mpv/libfribidi.0.dylib",
+        "libs/mpv/libharfbuzz.0.dylib",
+        "libs/mpv/libiconv.2.dylib",
+        "libs/mpv/libjpeg.62.4.0.dylib",
+        "libs/mpv/liblcms2.2.dylib",
+        "libs/mpv/liblz4.1.10.0.dylib",
+        "libs/mpv/liblzma.5.8.3.dylib",
+        "libs/mpv/libMoltenVK.dylib",
+        "libs/mpv/libmpv.2.dylib",
+        "libs/mpv/libopus.0.10.1.dylib",
+        "libs/mpv/libplacebo.dylib",
+        "libs/mpv/libpng16.16.58.0.dylib",
+        "libs/mpv/librubberband.3.dylib",
+        "libs/mpv/libsamplerate.0.2.2.dylib",
+        "libs/mpv/libsoia_utils.dylib",
+        "libs/mpv/libssl.3.dylib",
+        "libs/mpv/libswresample.6.3.100.dylib",
+        "libs/mpv/libswscale.9.5.100.dylib",
+        "libs/mpv/libuchardet.0.0.8.dylib",
+        "libs/mpv/libudfread.3.dylib",
+        "libs/mpv/libvulkan.1.dylib",
+        "libs/mpv/libxml2.16.1.3.dylib",
+        "libs/mpv/libz.1.3.2.dylib",
+        "libs/mpv/libzstd.1.5.7.dylib"
+      ]
+    }
+  }
+}

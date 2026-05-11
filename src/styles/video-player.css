@@ -1253,7 +1253,9 @@
 .menu-item .ri-skip-forward-line,
 .menu-item .ri-music-2-line,
 .menu-item .ri-closed-captioning-line,
-.menu-item .ri-skip-forward-mini-line {
+.menu-item .ri-skip-forward-mini-line,
+.menu-item .ri-speed-line,
+.menu-item .ri-bookmark-line {
     margin-right: 8px;
     font-size: 16px;
 }
@@ -1505,6 +1507,103 @@
     font-size: 12px;
     font-family: 'Geist Mono Variable', monospace;
     padding: 6px 4px;
+}
+
+/* Speed slider */
+.menu-speed-value {
+    font-family: 'Geist Mono Variable', monospace;
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 400;
+}
+
+.speed-item {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 16px;
+    cursor: default;
+    padding-bottom: 18px;
+}
+
+.speed-item:hover {
+    background: var(--bg-secondary);
+    border-color: transparent;
+}
+
+.speed-item-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.speed-slider-wrap {
+    padding: 2px 16px 12px;
+}
+
+.speed-slider {
+    width: 100%;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 3px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.15);
+    outline: none;
+    cursor: pointer;
+    display: block;
+}
+
+.speed-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: var(--text-primary);
+    cursor: pointer;
+}
+
+.speed-slider::-moz-range-thumb {
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: var(--text-primary);
+    border: none;
+    cursor: pointer;
+}
+
+/* Chapter markers toggle indicator */
+.menu-toggle-indicator {
+    width: 32px;
+    height: 18px;
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.15);
+    position: relative;
+    flex-shrink: 0;
+    pointer-events: none;
+    transition: background 0.2s;
+}
+
+.menu-toggle-indicator::before {
+    content: '';
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #fff;
+    top: 3px;
+    left: 3px;
+    transition: transform 0.2s;
+}
+
+.menu-toggle-indicator.on {
+    background: var(--accent-color, rgba(255, 255, 255, 0.5));
+}
+
+.menu-toggle-indicator.on::before {
+    transform: translateX(14px);
 }
 
 /* Episodes Panel */

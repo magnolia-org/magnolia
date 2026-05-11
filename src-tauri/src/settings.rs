@@ -15,6 +15,8 @@ pub struct Settings {
     pub clear_cache_after_watch: bool,
     #[serde(default = "default_true")]
     pub check_for_updates: bool,
+    #[serde(default)]
+    pub hide_chapter_markers: bool,
 }
 
 fn default_true() -> bool {
@@ -30,6 +32,7 @@ impl Default for Settings {
             hide_recommendations: false,
             clear_cache_after_watch: false,
             check_for_updates: true,
+            hide_chapter_markers: false,
         }
     }
 }

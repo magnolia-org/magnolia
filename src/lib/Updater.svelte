@@ -11,6 +11,25 @@
   let installing = false;
   let checkForUpdatesEnabled = true;
 
+  function parseVersion(v) {
+    const [main, preRelease] = v.split('-');
+    const [major, minor, patch] = main.split('.').map(Number);
+    return { major: major || 0, minor: minor || 0, patch: patch || 0, preRelease: preRelease || null };
+  }
+
+  function isNewerVersion(latest, current) {
+    const l = parseVersion(latest);
+    const c = parseVersion(current);
+    if (l.major !== c.major) return l.major > c.major;
+    if (l.minor !== c.minor) return l.minor > c.minor;
+    if (l.patch !== c.patch) return l.patch > c.patch;
+    // Same major.minor.patch: stable (no pre-release) > pre-release
+    if (l.preRelease === null && c.preRelease !== null) return true;
+    if (l.preRelease !== null && c.preRelease === null) return false;
+    if (l.preRelease === null && c.preRelease === null) return false;
+    return l.preRelease > c.preRelease;
+  }
+
   async function checkForUpdates() {
     if (!checkForUpdatesEnabled) {
       console.log('update check disabled in settings');
@@ -27,7 +46,7 @@
       latestVersion = release.tag_name.replace('v', '');
       console.log(`latest version: ${latestVersion}`);
       
-      if (latestVersion !== currentVersion) {
+      if (isNewerVersion(latestVersion, currentVersion)) {
         const asset = release.assets.find(a => a.name.endsWith('.exe'));
         if (asset) {
           updateAvailable = true;
