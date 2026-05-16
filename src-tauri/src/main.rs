@@ -42,42 +42,57 @@ async fn load_file(
     #[allow(non_snake_case)] resumePosition: Option<f64>,
     #[allow(non_snake_case)] autoPlay: Option<bool>,
 ) -> Result<(), String> {
-    let guard = state.mpv_player.lock().map_err(|e| e.to_string())?;
-    let start_opt;
-    let mut args: Vec<&str> = vec!["loadfile", &path, "replace"];
-    if let Some(pos) = resumePosition {
-        if pos > 0.0 {
-            start_opt = format!("start={pos}");
-            args.push(&start_opt);
+    let mpv = state.mpv_player.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let guard = mpv.lock().map_err(|e| e.to_string())?;
+        let start_opt;
+        let mut args: Vec<&str> = vec!["loadfile", &path, "replace"];
+        if let Some(pos) = resumePosition {
+            if pos > 0.0 {
+                start_opt = format!("start={pos}");
+                args.push(&start_opt);
+            }
         }
-    }
-    guard.command(&args);
-    let pause_val = if autoPlay.unwrap_or(true) { "no" } else { "yes" };
-    guard.set_option_string("pause", pause_val);
-    Ok(())
+        guard.command(&args);
+        let pause_val = if autoPlay.unwrap_or(true) { "no" } else { "yes" };
+        guard.set_option_string("pause", pause_val);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 async fn cycle_pause(state: State<'_, AppState>) -> Result<(), String> {
-    let guard = state.mpv_player.lock().map_err(|e| e.to_string())?;
-    if guard.eof_reached() {
-        guard.command(&["seek", "0", "absolute"]);
-        guard.set_option_string("pause", "no");
-    } else {
-        guard.command(&["cycle", "pause"]);
-    }
-    Ok(())
+    let mpv = state.mpv_player.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let guard = mpv.lock().map_err(|e| e.to_string())?;
+        if guard.eof_reached() {
+            guard.command(&["seek", "0", "absolute"]);
+            guard.set_option_string("pause", "no");
+        } else {
+            guard.command(&["cycle", "pause"]);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 async fn seek_video(state: State<'_, AppState>, seconds: f64) -> Result<(), String> {
-    let guard = state.mpv_player.lock().map_err(|e| e.to_string())?;
-    let pos_str = seconds.to_string();
-    guard.command(&["seek", &pos_str, "absolute"]);
-    if guard.eof_reached() {
-        guard.set_option_string("pause", "no");
-    }
-    Ok(())
+    let mpv = state.mpv_player.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let guard = mpv.lock().map_err(|e| e.to_string())?;
+        let pos_str = seconds.to_string();
+        guard.command(&["seek", &pos_str, "absolute"]);
+        if guard.eof_reached() {
+            guard.set_option_string("pause", "no");
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -85,10 +100,15 @@ async fn mpv_run_command(
     state: State<'_, AppState>,
     args: Vec<String>,
 ) -> Result<(), String> {
-    let guard = state.mpv_player.lock().map_err(|e| e.to_string())?;
-    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    guard.command(&refs);
-    Ok(())
+    let mpv = state.mpv_player.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let guard = mpv.lock().map_err(|e| e.to_string())?;
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        guard.command(&refs);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -97,9 +117,14 @@ async fn mpv_set_option_string(
     name: String,
     value: String,
 ) -> Result<(), String> {
-    let guard = state.mpv_player.lock().map_err(|e| e.to_string())?;
-    guard.set_option_string(&name, &value);
-    Ok(())
+    let mpv = state.mpv_player.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let guard = mpv.lock().map_err(|e| e.to_string())?;
+        guard.set_option_string(&name, &value);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── search commands ──────────────────────────────────────────────────────────

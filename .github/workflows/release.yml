@@ -136,13 +136,13 @@ jobs:
           if-no-files-found: error
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # macOS - DMG
+  # macOS — .app in zip
   # ─────────────────────────────────────────────────────────────────────────────
   build-macos:
-    name: Build (macOS DMG)
+    name: Build (macOS .app)
     needs: bump-version
     if: inputs.build_macos
-    runs-on: macos-26
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -172,14 +172,25 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build (DMG)
-        run: node scripts/run_tauri.mjs build --bundles dmg --target aarch64-apple-darwin
+      - name: Build (.app)
+        run: node scripts/run_tauri.mjs build --bundles app --target aarch64-apple-darwin
 
-      - name: Upload DMG
+      - name: Bundle runtime libraries into .app (embed libsoia + dylibs)
+        run: |
+          bash scripts/bundle_runtime_libs_macos.sh \
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Magnolia.app \
+            --skip-sign
+
+      - name: Zip .app
+        run: |
+          cd src-tauri/target/aarch64-apple-darwin/release/bundle/macos
+          zip -r --symlinks Magnolia.zip Magnolia.app
+
+      - name: Upload .app zip
         uses: actions/upload-artifact@v4
         with:
-          name: magnolia-macos-dmg
-          path: src-tauri/target/*/release/bundle/dmg/*.dmg
+          name: magnolia-macos-zip
+          path: src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Magnolia.zip
           if-no-files-found: error
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -266,5 +277,5 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/magnolia-windows-nsis/*.exe
-            artifacts/magnolia-macos-dmg/*.dmg
+            artifacts/magnolia-macos-zip/*.zip
             artifacts/magnolia-linux-appimage/*.AppImage

@@ -1,6 +1,7 @@
 <script>
   import { createEventDispatcher } from "svelte";
   import { fade, scale } from "svelte/transition";
+  import { sineOut } from 'svelte/easing';
 
   export let message = "";
   export let title = "Error";
@@ -25,7 +26,7 @@
 <div class="modal-overlay" transition:fade on:click={close}>
   <!-- svelte-ignore a11y-click-events-have-key-events -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="modal-content" transition:scale on:click|stopPropagation>
+  <div class="modal-content" in:scale={{ duration: 180, start: 0.94 }} out:scale={{ duration: 220, start: 0.8, easing: sineOut }} on:click|stopPropagation>
     <div class="modal-header">
       <i class="ri-error-warning-line error-icon"></i>
       <h3>{title}</h3>

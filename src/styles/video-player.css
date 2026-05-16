@@ -108,12 +108,24 @@
 
 .player-title {
     color: var(--text-primary);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
+}
+
+.player-title-main {
     font-size: 15px;
     font-weight: 600;
-    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
-    display: flex;
-    align-items: center;
-    line-height: 40px;
+    line-height: 1.2;
+}
+
+.player-title-sub {
+    font-size: 12px;
+    font-weight: 400;
+    color: rgba(255, 255, 255, 0.65);
+    line-height: 1.2;
 }
 
 /* Video Player Controls */
@@ -757,12 +769,136 @@
     left: 0;
     width: 100%;
     height: 100%;
-    background: color-mix(in srgb, var(--bg-primary) 92%, transparent);
+    background: transparent;
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 50;
-    backdrop-filter: blur(30px);
+}
+
+.loading-overlay::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    background: rgb(6, 6, 6);
+    mask-image:
+        repeating-linear-gradient(0deg, black 0px, black 36px, transparent 36px, transparent 37px),
+        repeating-linear-gradient(90deg, black 0px, black 36px, transparent 36px, transparent 37px);
+    mask-composite: intersect;
+    -webkit-mask-image:
+        repeating-linear-gradient(0deg, black 0px, black 36px, transparent 36px, transparent 37px),
+        repeating-linear-gradient(90deg, black 0px, black 36px, transparent 36px, transparent 37px);
+    -webkit-mask-composite: source-in;
+    pointer-events: none;
+}
+
+.loading-overlay::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    background: radial-gradient(ellipse at center, transparent 25%, rgba(0, 0, 0, 0.55) 70%, rgba(0, 0, 0, 0.88) 100%);
+    pointer-events: none;
+}
+
+.loading-backdrop-img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    opacity: 1;
+    filter: blur(48px) brightness(20%) saturate(70%);
+    transform: scale(1.1);
+    pointer-events: none;
+    z-index: 0;
+}
+
+.loading-card {
+    position: relative;
+    z-index: 3;
+    display: flex;
+    align-items: flex-start;
+    gap: 20px;
+    padding: 24px;
+    background: rgba(10, 10, 10, 0.88);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.7);
+    min-width: 340px;
+    max-width: 520px;
+}
+
+.loading-poster {
+    width: 80px;
+    border-radius: 8px;
+    object-fit: cover;
+    flex-shrink: 0;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+.loading-info {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+    padding-top: 2px;
+}
+
+.loading-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.loading-episode-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    letter-spacing: 0.03em;
+}
+
+.loading-progress-row {
+    margin-top: 4px;
+}
+
+.loading-bar {
+    width: 100%;
+    height: 3px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.1);
+    overflow: hidden;
+    position: relative;
+}
+
+.loading-bar::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -60%;
+    width: 60%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, var(--accent-color), transparent);
+    animation: loading-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes loading-slide {
+    from { left: -60%; }
+    to { left: 110%; }
+}
+
+.loading-status-text {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.4;
 }
 
 /* Buffering Indicator - Compact overlay */
@@ -803,142 +939,25 @@
     }
 }
 
-.loading-content {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--spacing-lg);
-    padding: var(--spacing-2xl) var(--spacing-3xl);
-    background: color-mix(in srgb, var(--bg-primary) 95%, transparent);
-    backdrop-filter: blur(20px);
-    border-radius: var(--border-radius-lg);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    min-width: 420px;
-    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
-}
-
-.loading-status {
-    color: var(--text-primary);
-    font-size: 14px;
-    font-weight: 500;
-    text-align: center;
-    min-height: 20px;
-}
-
-.loading-progress {
-    width: 100%;
-    display: flex;
-    flex-direction: column;
-    gap: var(--spacing-sm);
-}
-
-.progress-bar-loading {
-    width: 100%;
-    height: 6px;
-    background: rgba(255, 255, 255, 0.1);
-    border-radius: 3px;
-    overflow: hidden;
-    position: relative;
-}
-
-.progress-fill {
-    height: 100%;
-    background: var(--accent-color);
-    transition: width 0.3s ease;
-    border-radius: 3px;
-    min-width: 0;
-}
-
-/* Indeterminate progress bar animation */
-.progress-bar-loading.indeterminate {
-    background: rgba(255, 255, 255, 0.06);
-}
-
-.progress-fill-indeterminate {
-    position: absolute;
-    top: 0;
-    left: 0;
-    height: 100%;
-    width: 40%;
-    background: linear-gradient(90deg, transparent, var(--accent-color), transparent);
-    border-radius: 3px;
-    animation: indeterminate 1.5s ease-in-out infinite;
-}
-
-@keyframes indeterminate {
-    0% {
-        left: -40%;
-    }
-    100% {
-        left: 100%;
-    }
-}
-
-.loading-stats {
-    display: flex;
-    justify-content: center;
-    gap: var(--spacing-lg);
-    font-family: "Geist Mono Variable", monospace;
-    font-size: 12px;
-    color: var(--text-secondary);
-}
-
-.loading-stats span {
-    white-space: nowrap;
-    display: flex;
-    align-items: center;
-    gap: var(--spacing-xs);
-}
-
-.loading-stats .speed-stat {
-    color: var(--accent-color);
-}
-
-.loading-stats.peer-stats {
-    margin-top: calc(-1 * var(--spacing-xs));
-}
-
-.loading-stats .peer-stat {
-    color: var(--text-tertiary);
-}
-
-.loading-stats .peer-stat i {
-    font-size: 13px;
-    opacity: 0.7;
-}
-
+/* Loading overlay cancel button */
 .cancel-loading-btn {
-    margin-top: var(--spacing-sm);
-    padding: var(--spacing-sm) var(--spacing-lg);
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    align-self: flex-start;
+    margin-top: 4px;
+    padding: 5px 14px;
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: var(--border-radius-sm);
     color: var(--text-secondary);
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 500;
     cursor: pointer;
     transition: all 0.2s ease;
-    display: flex;
-    align-items: center;
-    gap: var(--spacing-xs);
 }
 
 .cancel-loading-btn:hover {
     background: rgba(255, 255, 255, 0.12);
     color: var(--text-primary);
-    border-color: rgba(255, 255, 255, 0.2);
-}
-
-.cancel-loading-btn i {
-    font-size: 16px;
-}
-
-.peer-count {
-    font-family: "Geist Mono Variable", monospace;
-    font-size: 14px;
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    border-color: rgba(255, 255, 255, 0.22);
 }
 
 /* Skip Section Button */
@@ -1606,30 +1625,43 @@
     transform: translateX(14px);
 }
 
-/* Episodes Panel */
-.episodes-panel {
+/* Episodes Island (floating centered modal) */
+.episodes-island-backdrop {
     position: absolute;
-    top: var(--titlebar-height, 50px);
-    right: 0;
-    width: 340px;
-    height: calc(100% - var(--titlebar-height, 50px));
-    background: color-mix(in srgb, var(--bg-primary) 92%, transparent);
-    backdrop-filter: blur(24px);
-    border-left: 1px solid rgba(255, 255, 255, 0.07);
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 115;
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+}
+
+.episodes-island {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: min(520px, 90vw);
+    max-height: 72vh;
+    background: color-mix(in srgb, var(--bg-primary) 94%, transparent);
+    backdrop-filter: blur(28px);
+    -webkit-backdrop-filter: blur(28px);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 18px;
+    box-shadow: 0 32px 100px rgba(0, 0, 0, 0.7);
     display: flex;
     flex-direction: column;
     z-index: 120;
-    animation: slideInRight 0.2s ease;
+    overflow: hidden;
+    animation: islandIn 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-.video-player.fullscreen .episodes-panel {
-    top: 0;
-    height: 100%;
+@keyframes islandIn {
+    from { opacity: 0; transform: translate(-50%, -48%) scale(0.94); }
+    to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
 }
 
-@keyframes slideInRight {
-    from { transform: translateX(100%); opacity: 0; }
-    to   { transform: translateX(0);    opacity: 1; }
+.episodes-island .episodes-list-scroll {
+    padding-bottom: 12px;
 }
 
 .episodes-panel-header {
@@ -1817,10 +1849,15 @@
    On macOS (-webkit-backdrop-filter capable), the system compositor blurs
    through to the native Metal layer, so we keep the normal rules there.      */
 
-html:not(.macos) .episodes-panel {
+html:not(.macos) .episodes-island {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
     background: color-mix(in srgb, var(--bg-primary) 97%, transparent);
+}
+
+html:not(.macos) .episodes-island-backdrop {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
 }
 
 html:not(.macos) .player-header .back-btn {

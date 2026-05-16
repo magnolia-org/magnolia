@@ -1,6 +1,7 @@
 <script>
   import { createEventDispatcher, onMount } from 'svelte';
   import { fade, scale } from 'svelte/transition';
+  import { sineOut } from 'svelte/easing';
   import { getVersion } from '@tauri-apps/api/app';
 
   const dispatch = createEventDispatcher();
@@ -31,7 +32,7 @@
 </script>
 
 <div class="modal-overlay" on:click={() => dispatch('close')} transition:fade>
-  <div class="modal-content" on:click|stopPropagation transition:scale>
+  <div class="modal-content" on:click|stopPropagation in:scale={{ duration: 180, start: 0.94 }} out:scale={{ duration: 220, start: 0.8, easing: sineOut }}>
     <div class="about-header">
       <div class="logo"></div>
       <h1>Magnolia</h1>

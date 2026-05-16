@@ -275,6 +275,13 @@
   let episodesData = {};
   let loadingEpisodesPanel = false;
 
+  // Episode name for player header
+  let episodeName = null;
+
+  // Seek/volume throttle to avoid IPC flooding when holding arrow keys
+  let lastSeekTime = 0;
+  let lastVolumeTime = 0;
+
   $: hasNextEpisode = (() => {
     if (!metadata || !metadata.seasons || seasonNum === null || episodeNum === null) return false;
     
@@ -305,6 +312,17 @@
       if (fetchKey !== lastSubtitleFetchKey) {
         loadExternalSubtitles(fetchKey);
       }
+    }
+  }
+
+  async function fetchEpisodeName() {
+    if (!mediaId || seasonNum == null || episodeNum == null) return;
+    try {
+      const seasonData = await getSeasonDetails(mediaId, seasonNum);
+      const ep = seasonData?.episodes?.find(e => e.episode_number === episodeNum);
+      episodeName = ep?.name || null;
+    } catch (e) {
+      // non-critical, ignore
     }
   }
 
@@ -1546,7 +1564,11 @@
         if (isFinite(currentTime)) {
           const newTime = Math.max(0, currentTime - SEEK_TIME_SHORT);
           currentTime = newTime;
-          invoke("seek_video", { seconds: newTime }).catch(() => {});
+          const _now1 = Date.now();
+          if (!event.repeat || _now1 - lastSeekTime >= 80) {
+            lastSeekTime = _now1;
+            invoke("seek_video", { seconds: newTime }).catch(() => {});
+          }
           showShortcutIndicator("seek-backward", "-5s", "ri-rewind-fill", -5);
         }
         break;
@@ -1555,7 +1577,11 @@
         if (isFinite(currentTime) && isFinite(duration)) {
           const newTime = Math.min(duration, currentTime + SEEK_TIME_SHORT);
           currentTime = newTime;
-          invoke("seek_video", { seconds: newTime }).catch(() => {});
+          const _now2 = Date.now();
+          if (!event.repeat || _now2 - lastSeekTime >= 80) {
+            lastSeekTime = _now2;
+            invoke("seek_video", { seconds: newTime }).catch(() => {});
+          }
           showShortcutIndicator("seek-forward", "+5s", "ri-speed-fill", 5);
         }
         break;
@@ -1564,7 +1590,11 @@
         if (isFinite(currentTime)) {
           const newTime = Math.max(0, currentTime - SEEK_TIME_LONG);
           currentTime = newTime;
-          invoke("seek_video", { seconds: newTime }).catch(() => {});
+          const _now3 = Date.now();
+          if (!event.repeat || _now3 - lastSeekTime >= 80) {
+            lastSeekTime = _now3;
+            invoke("seek_video", { seconds: newTime }).catch(() => {});
+          }
           showShortcutIndicator("seek-backward", "-10s", "ri-rewind-fill", -10);
         }
         break;
@@ -1573,30 +1603,47 @@
         if (isFinite(currentTime) && isFinite(duration)) {
           const newTime = Math.min(duration, currentTime + SEEK_TIME_LONG);
           currentTime = newTime;
-          invoke("seek_video", { seconds: newTime }).catch(() => {});
+          const _now4 = Date.now();
+          if (!event.repeat || _now4 - lastSeekTime >= 80) {
+            lastSeekTime = _now4;
+            invoke("seek_video", { seconds: newTime }).catch(() => {});
+          }
           showShortcutIndicator("seek-forward", "+10s", "ri-speed-fill", 10);
         }
         break;
       case "arrowup":
-        event.preventDefault();
-        volume = Math.min(1, volume + VOLUME_STEP_SMALL);
-        if (volume > 0 && muted) {
-          muted = false;
+        event.preventDefault(); {
+          const _vt = Date.now();
+          if (!event.repeat || _vt - lastVolumeTime >= 50) {
+            lastVolumeTime = _vt;
+            volume = Math.min(1, volume + VOLUME_STEP_SMALL);
+            if (volume > 0 && muted) muted = false;
+          }
+          const iconUp = volume === 0 ? "ri-volume-mute-fill" : volume < 0.5 ? "ri-volume-down-fill" : "ri-volume-up-fill";
+          showShortcutIndicator("volume", `${Math.round(volume * 100)}%`, iconUp, 0, 'up');
         }
-        const iconUp = volume === 0 ? "ri-volume-mute-fill" : volume < 0.5 ? "ri-volume-down-fill" : "ri-volume-up-fill";
-        showShortcutIndicator("volume", `${Math.round(volume * 100)}%`, iconUp, 0, 'up');
         break;
       case "arrowdown":
-        event.preventDefault();
-        volume = Math.max(0, volume - VOLUME_STEP_SMALL);
-        const iconDown = volume === 0 ? "ri-volume-mute-fill" : volume < 0.5 ? "ri-volume-down-fill" : "ri-volume-up-fill";
-        showShortcutIndicator("volume", `${Math.round(volume * 100)}%`, iconDown, 0, 'down');
+        event.preventDefault(); {
+          const _vt2 = Date.now();
+          if (!event.repeat || _vt2 - lastVolumeTime >= 50) {
+            lastVolumeTime = _vt2;
+            volume = Math.max(0, volume - VOLUME_STEP_SMALL);
+          }
+          const iconDown = volume === 0 ? "ri-volume-mute-fill" : volume < 0.5 ? "ri-volume-down-fill" : "ri-volume-up-fill";
+          showShortcutIndicator("volume", `${Math.round(volume * 100)}%`, iconDown, 0, 'down');
+        }
         break;
       case "u":
-        event.preventDefault();
-        volume = Math.max(0, volume - VOLUME_STEP_LARGE);
-        const iconU = volume === 0 ? "ri-volume-mute-fill" : volume < 0.5 ? "ri-volume-down-fill" : "ri-volume-up-fill";
-        showShortcutIndicator("volume", `${Math.round(volume * 100)}%`, iconU, 0, 'down');
+        event.preventDefault(); {
+          const _vt3 = Date.now();
+          if (!event.repeat || _vt3 - lastVolumeTime >= 50) {
+            lastVolumeTime = _vt3;
+            volume = Math.max(0, volume - VOLUME_STEP_LARGE);
+          }
+          const iconU = volume === 0 ? "ri-volume-mute-fill" : volume < 0.5 ? "ri-volume-down-fill" : "ri-volume-up-fill";
+          showShortcutIndicator("volume", `${Math.round(volume * 100)}%`, iconU, 0, 'down');
+        }
         break;
       case "m":
         event.preventDefault();
@@ -1827,6 +1874,8 @@
       }
     }, 500);
 
+    fetchEpisodeName();
+
     if (handleId !== null && fileIndex !== null) {
       startStreamProcess();
     } else {
@@ -1873,58 +1922,24 @@
 
   {#if loading}
     <div class="loading-overlay">
-      <div class="loading-content">
-        <div class="loading-status">{loadingStatus.status}</div>
-        
-        <!-- Progress bar -->
-        <div class="loading-progress">
-          {#if loadingPhase === 'buffering' && loadingStatus.total > 0 && loadingStatus.peers === 0}
-            <!-- Determinate progress bar for buffering with actual progress -->
-            <div class="progress-bar-loading">
-              <div 
-                class="progress-fill"
-                style="width: {(loadingStatus.progress / loadingStatus.total) * 100}%"
-              ></div>
-            </div>
-            <div class="loading-stats">
-              <span>{(loadingStatus.progress / 1024 / 1024).toFixed(1)} MB / {(loadingStatus.total / 1024 / 1024).toFixed(1)} MB</span>
-              {#if loadingStatus.speed > 0}
-                <span class="speed-stat">{(loadingStatus.speed / 1024 / 1024).toFixed(1)} MB/s</span>
-              {/if}
-            </div>
-          {:else if loadingPhase === 'transcoding' && loadingStatus.transcodeProgress !== undefined}
-            <!-- Determinate progress bar for transcoding -->
-            <div class="progress-bar-loading">
-              <div 
-                class="progress-fill"
-                style="width: {loadingStatus.transcodeProgress}%"
-              ></div>
-            </div>
-            <div class="loading-stats">
-              <span>{loadingStatus.transcodeProgress.toFixed(0)}% complete</span>
-            </div>
-          {:else}
-            <!-- Indeterminate progress bar for other phases -->
-            <div class="progress-bar-loading indeterminate">
-              <div class="progress-fill-indeterminate"></div>
-            </div>
-          {/if}
-        </div>
-        
-        <!-- Peer count during buffering -->
-        {#if loadingPhase === 'buffering' && loadingStatus.peers > 0}
-          <div class="loading-stats peer-stats">
-            <span class="peer-stat">
-              <i class="ri-group-line"></i>
-              {loadingStatus.peers} peer{loadingStatus.peers !== 1 ? 's' : ''}
-            </span>
-          </div>
+      {#if metadata?.backdrop_path}
+        <img src={getImageUrl(metadata.backdrop_path, 'w1280')} alt="" class="loading-backdrop-img" aria-hidden="true" />
+      {/if}
+      <div class="loading-card">
+        {#if metadata?.poster_path}
+          <img src={getImageUrl(metadata.poster_path, 'w185')} alt="" class="loading-poster" />
         {/if}
-        
-        <button class="cancel-loading-btn" on:click={close}>
-          <i class="ri-close-line"></i>
-          Cancel
-        </button>
+        <div class="loading-info">
+          <div class="loading-title">{metadata?.title || metadata?.name || title}</div>
+          {#if seasonNum != null && episodeNum != null}
+            <div class="loading-episode-label">Season {seasonNum} &bull; Episode {episodeNum}</div>
+          {/if}
+          <div class="loading-progress-row">
+            <div class="loading-bar"></div>
+          </div>
+          <div class="loading-status-text">{loadingStatus.status}</div>
+          <button class="cancel-loading-btn" on:click={close}>Cancel</button>
+        </div>
       </div>
     </div>
   {/if}
@@ -1942,7 +1957,14 @@
     <button class="back-btn" on:click={close}>
       <i class="ri-arrow-left-line"></i>
     </button>
-    <div class="player-title">{title}</div>
+    <div class="player-title">
+      <span class="player-title-main">{metadata?.title || metadata?.name || title}</span>
+      {#if episodeName}
+        <span class="player-title-sub">S{String(seasonNum).padStart(2,'0')}E{String(episodeNum).padStart(2,'0')} &bull; {episodeName}</span>
+      {:else if seasonNum != null && episodeNum != null}
+        <span class="player-title-sub">S{String(seasonNum).padStart(2,'0')}E{String(episodeNum).padStart(2,'0')}</span>
+      {/if}
+    </div>
   </div>
 
   <!-- SubtitlesOctopus automatically creates and manages its own canvas as a sibling of the video element -->
@@ -2515,10 +2537,13 @@
   {#if showEpisodesPanel && metadata && metadata.seasons}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <div class="episodes-panel" on:click|stopPropagation>
+    <div class="episodes-island-backdrop" on:click={() => showEpisodesPanel = false}></div>
+    <!-- svelte-ignore a11y-click-events-have-key-events -->
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div class="episodes-island" on:click|stopPropagation>
       <div class="episodes-panel-header">
         <span class="episodes-panel-title">{metadata.name || metadata.title}</span>
-        <button class="episodes-panel-close" on:click={() => showEpisodesPanel = false}>
+        <button class="episodes-panel-close" on:click={() => showEpisodesPanel = false} title="Close">
           <i class="ri-close-line"></i>
         </button>
       </div>
