@@ -142,7 +142,7 @@ jobs:
     name: Build (macOS .app)
     needs: bump-version
     if: inputs.build_macos
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
         with:

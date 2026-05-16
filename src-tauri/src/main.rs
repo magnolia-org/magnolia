@@ -682,10 +682,14 @@ fn main() {
 
             // ── initialise libmpv and embed it under the WebView ──────────
             {
-                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 
                 let wh = main_window
                     .window_handle()
+                    .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
+                let dh = main_window
+                    .display_handle()
                     .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 
                 let (raw_window_ptr, display_ptr): (
@@ -701,11 +705,15 @@ fn main() {
                         (h.hwnd.get() as *const std::ffi::c_void, None)
                     }
                     #[cfg(target_os = "linux")]
-                    RawWindowHandle::Xcb(h) => (
-                        h.window.get() as *const std::ffi::c_void,
-                        h.connection
-                            .map(|p| p.as_ptr() as *const std::ffi::c_void),
-                    ),
+                    RawWindowHandle::Xcb(h) => {
+                        let connection = match dh.as_raw() {
+                            RawDisplayHandle::Xcb(d) => {
+                                d.connection.map(|p| p.as_ptr() as *const std::ffi::c_void)
+                            }
+                            _ => None,
+                        };
+                        (h.window.get() as *const std::ffi::c_void, connection)
+                    }
                     #[cfg(target_os = "linux")]
                     RawWindowHandle::Wayland(h) => {
                         (h.surface.as_ptr() as *const std::ffi::c_void, None)
