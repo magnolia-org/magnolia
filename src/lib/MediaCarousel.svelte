@@ -1,8 +1,9 @@
 <script>
 import { onMount, afterUpdate, onDestroy, createEventDispatcher } from 'svelte';
+import { invoke } from '@tauri-apps/api/core';
 import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopRatedTV, getNowPlaying, discoverTV, getImageUrl } from './tmdb.js';
 import { myListStore } from './stores/listStore.js';
-import { getRatingClass } from './utils/colorUtils.js';
+import { getRatingColor } from './utils/colorUtils.js';
 
 const dispatch = createEventDispatcher();
 
@@ -24,41 +25,34 @@ let carouselElement;
 let showLeftArrow = false;
 let showRightArrow = false;
 let cardColors = {};
+let playingItemKey = null;
 
 function getItemKey(item) {
   return `${item.id}-${item.media_type || type}`;
 }
 
 $: myListItems = new Set($myListStore.map(item => `${item.id}-${item.media_type}`));
-$: {
-  if (title === "My List") console.log('📺 My List carousel updated:', myListItems.size, 'items in store');
-}
-$: {
-  if (myListItems && items.length > 0) {
-    console.log(`🔄 ${title}: myListItems updated, size:`, myListItems.size);
-  }
-}
-$: {
-  if (isRecentlyWatched && watchProgress) {
-    console.log('📊 watchProgress updated in carousel:', Object.keys(watchProgress).length, 'entries');
-  }
-}
 
 $: if (customItems) {
-  cardColors = {};
   items = customItems;
   loading = false;
-  console.log('🔄 Custom items updated:', customItems.length, 'items');
+  // Prune colors for items no longer in the list
+  const activeKeys = new Set(customItems.map(getItemKey));
+  let pruned = false;
+  for (const key of Object.keys(cardColors)) {
+    if (!activeKeys.has(key)) { delete cardColors[key]; pruned = true; }
+  }
+  // Only extract colors for items we haven't processed yet
   customItems.forEach(item => {
     const itemKey = getItemKey(item);
-    if (isRecentlyWatched || title === 'My List') {
-      cardColors[itemKey] = accentColor;
-    } else if (item.poster_path) {
+    if (cardColors[itemKey]) return;
+    if (item.poster_path) {
       extractDominantColor(itemKey, getImageUrl(item.poster_path, 'w92'));
     } else {
       cardColors[itemKey] = accentColor;
     }
   });
+  if (pruned) cardColors = cardColors;
 }
 
 onMount(async () => {
@@ -138,7 +132,6 @@ const date = new Date(dateStr);
 return date.getFullYear();
 }
 
-// getRatingColor was moved to `src/lib/utils/colorUtils.js`. Use getRatingClass to apply semantic classes.
 
 function updateArrows() {
 if (!carouselElement) return;
@@ -251,14 +244,76 @@ function toggleMyList(event, item) {
   myListStore.toggleItem(item);
 }
 
-function handleQuickPlay(event, item) {
+async function handleQuickPlay(event, item) {
   event.stopPropagation();
-  
-  // Get saved progress
-  const key = `${item.id}-${item.media_type}`;
+
+  const itemMediaType = item.media_type || type;
+  const key = `${item.id}-${itemMediaType}`;
+  if (playingItemKey === key) return; // already in-flight
   const progress = watchProgress[key];
-  
-  // Open detail and trigger autoplay with resume progress
+  const isMovie = itemMediaType === 'movie';
+  playingItemKey = key;
+
+  // Determine which season/episode to check for a saved torrent
+  let targetSeason = 0;
+  let targetEpisode = 0;
+  if (!isMovie) {
+    if (progress?.currentSeason && progress?.currentEpisode) {
+      targetSeason = progress.currentSeason;
+      targetEpisode = progress.currentEpisode;
+    } else {
+      targetSeason = 1;
+      targetEpisode = 1;
+    }
+  }
+
+  // Fast path: if a saved torrent exists, open the video player directly
+  try {
+    const saved = await invoke('get_saved_selection', {
+      showId: Number(item.id),
+      season: targetSeason,
+      episode: targetEpisode
+    });
+
+    if (saved && saved.magnet_link) {
+      const handleId = await invoke('add_torrent', { magnetOrUrl: saved.magnet_link });
+
+      const mediaTitle = item.title || item.name || '';
+      const playerTitle = isMovie
+        ? mediaTitle
+        : `${mediaTitle} - S${targetSeason}E${targetEpisode}`;
+
+      let initialTimestamp = 0;
+      if (isMovie && progress?.currentTimestamp) {
+        initialTimestamp = progress.currentTimestamp;
+      } else if (!isMovie && progress?.currentSeason === targetSeason && progress?.currentEpisode === targetEpisode) {
+        initialTimestamp = progress.currentTimestamp || 0;
+      }
+
+      window.dispatchEvent(new CustomEvent('openVideoPlayer', {
+        detail: {
+          src: null,
+          title: playerTitle,
+          metadata: item,
+          handleId,
+          fileIndex: saved.file_index,
+          magnetLink: saved.magnet_link,
+          initialTimestamp,
+          mediaId: item.id,
+          mediaType: itemMediaType,
+          seasonNum: isMovie ? null : targetSeason,
+          episodeNum: isMovie ? null : targetEpisode,
+        }
+      }));
+      playingItemKey = null;
+      return;
+    }
+  } catch (err) {
+    console.warn('Quick play: saved selection check failed, falling back to detail view', err);
+  }
+
+  playingItemKey = null;
+  // Slow path: no saved torrent — open media detail with autoPlay
   window.dispatchEvent(new CustomEvent('openMediaDetail', { 
     detail: { ...item, autoPlay: true, resumeProgress: progress } 
   }));
@@ -377,14 +432,18 @@ function handleViewAll() {
 <h3 class="media-title">{item.title || item.name || 'Unknown'}</h3>
 <div class="media-meta">
 <span>{formatDate(item.release_date || item.first_air_date)}</span>
-<span class="rating-badge {getRatingClass(item.vote_average)}">
+<span class="rating-badge" style="background: {getRatingColor(item.vote_average)}">
 {formatRating(item.vote_average)}
 </span>
 </div>
 </div>
 <div class="media-actions">
-<button class="action-btn" title="Play" on:click={(e) => handleQuickPlay(e, item)}>
-<i class="ri-play-fill"></i>
+<button class="action-btn" class:loading={playingItemKey === getItemKey(item)} title="Play" disabled={playingItemKey !== null} on:click={(e) => handleQuickPlay(e, item)}>
+{#if playingItemKey === getItemKey(item)}
+  <i class="ri-loader-4-line spin"></i>
+{:else}
+  <i class="ri-play-fill"></i>
+{/if}
 </button>
 {#if isRecentlyWatched}
 <button 

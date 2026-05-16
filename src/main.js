@@ -12,11 +12,12 @@ import '@fontsource/geist-sans/600.css'
 import '@fontsource/geist-sans/700.css'
 import '@fontsource-variable/geist-mono'
 import 'remixicon/fonts/remixicon.css'
+import { mount } from 'svelte'
 import App from './App.svelte'
 
 // document.addEventListener('contextmenu', (e) => e.preventDefault());
 
-const app = new App({
+const app = mount(App, {
   target: document.getElementById('app'),
 })
 

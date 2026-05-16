@@ -1,8 +1,10 @@
 <script>
 import { onMount, onDestroy, createEventDispatcher } from 'svelte';
+import { invoke } from '@tauri-apps/api/core';
 import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopRatedTV, getNowPlaying, discoverMovies, discoverTV, getImageUrl } from './tmdb.js';
 import { myListStore } from './stores/listStore.js';
-import { getRatingClass } from './utils/colorUtils.js';
+import { watchProgressStore } from './stores/watchProgressStore.js';
+import { getRatingColor } from './utils/colorUtils.js';
 
 const dispatch = createEventDispatcher();
 
@@ -19,6 +21,7 @@ let error = null;
 let page = 1;
 let totalPages = 1;
 let cardColors = {};
+let playingItemKey = null;
 
 let showStickyHeader = false;
 
@@ -210,6 +213,75 @@ function openDetail(item) {
   window.dispatchEvent(new CustomEvent('openMediaDetail', { detail: item }));
 }
 
+async function handleQuickPlay(event, item) {
+  event.stopPropagation();
+
+  const itemMediaType = item.media_type || (type === 'tv' ? 'tv' : 'movie');
+  const key = `${item.id}-${itemMediaType}`;
+  if (playingItemKey === key) return;
+  const progress = $watchProgressStore[key];
+  const isMovie = itemMediaType === 'movie';
+  playingItemKey = key;
+
+  let targetSeason = 0;
+  let targetEpisode = 0;
+  if (!isMovie) {
+    if (progress?.currentSeason && progress?.currentEpisode) {
+      targetSeason = progress.currentSeason;
+      targetEpisode = progress.currentEpisode;
+    } else {
+      targetSeason = 1;
+      targetEpisode = 1;
+    }
+  }
+
+  try {
+    const saved = await invoke('get_saved_selection', {
+      showId: Number(item.id),
+      season: targetSeason,
+      episode: targetEpisode
+    });
+
+    if (saved && saved.magnet_link) {
+      const handleId = await invoke('add_torrent', { magnetOrUrl: saved.magnet_link });
+      const mediaTitle = item.title || item.name || '';
+      const playerTitle = isMovie
+        ? mediaTitle
+        : `${mediaTitle} - S${targetSeason}E${targetEpisode}`;
+      let initialTimestamp = 0;
+      if (isMovie && progress?.currentTimestamp) {
+        initialTimestamp = progress.currentTimestamp;
+      } else if (!isMovie && progress?.currentSeason === targetSeason && progress?.currentEpisode === targetEpisode) {
+        initialTimestamp = progress.currentTimestamp || 0;
+      }
+      playingItemKey = null;
+      window.dispatchEvent(new CustomEvent('openVideoPlayer', {
+        detail: {
+          src: null,
+          title: playerTitle,
+          metadata: item,
+          handleId,
+          fileIndex: saved.file_index,
+          magnetLink: saved.magnet_link,
+          initialTimestamp,
+          mediaId: item.id,
+          mediaType: itemMediaType,
+          seasonNum: isMovie ? null : targetSeason,
+          episodeNum: isMovie ? null : targetEpisode,
+        }
+      }));
+      return;
+    }
+  } catch (err) {
+    console.warn('Quick play: saved selection check failed, falling back to detail view', err);
+  }
+
+  playingItemKey = null;
+  window.dispatchEvent(new CustomEvent('openMediaDetail', {
+    detail: { ...item, autoPlay: true, resumeProgress: progress }
+  }));
+}
+
 function handleCardEnter(_item) {}
 function handleCardLeave(_item) {}
 
@@ -232,7 +304,6 @@ function formatDate(dateString) {
   return new Date(dateString).getFullYear();
 }
 
-// getRatingColor replaced by getRatingClass in src/lib/utils/colorUtils.js
 </script>
 
 <div class="view-all-overlay" bind:this={overlayEl}>
@@ -289,7 +360,7 @@ function formatDate(dateString) {
             
             {#if item.vote_average > 0}
               <div class="grid-card-rating">
-                <span class="rating-badge {getRatingClass(item.vote_average)}">
+                <span class="rating-badge" style="background: {getRatingColor(item.vote_average)}">
                   {item.vote_average.toFixed(1)}
                 </span>
               </div>
@@ -301,7 +372,7 @@ function formatDate(dateString) {
                 <div class="grid-card-meta">
                   <span class="year">{formatDate(item.release_date || item.first_air_date)}</span>
                   {#if item.vote_average > 0}
-                    <span class="rating-badge {getRatingClass(item.vote_average)}">
+                    <span class="rating-badge" style="background: {getRatingColor(item.vote_average)}">
                       {item.vote_average.toFixed(1)}
                     </span>
                   {/if}
@@ -309,8 +380,12 @@ function formatDate(dateString) {
               </div>
               
               <div class="grid-card-actions">
-                <button class="action-btn" title="Play" on:click={(e) => { e.stopPropagation(); }}>
-                  <i class="ri-play-fill"></i>
+                <button class="action-btn" class:loading={playingItemKey === `${item.id}-${item.media_type}`} title="Play" disabled={playingItemKey !== null} on:click={(e) => handleQuickPlay(e, item)}>
+                  {#if playingItemKey === `${item.id}-${item.media_type}`}
+                    <i class="ri-loader-4-line spin"></i>
+                  {:else}
+                    <i class="ri-play-fill"></i>
+                  {/if}
                 </button>
                 <button 
                   class="action-btn" 

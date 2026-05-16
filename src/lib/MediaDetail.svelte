@@ -434,7 +434,7 @@
     }).format(amount);
   }
 
-  import { getRatingClass } from "./utils/colorUtils.js";
+  import { getRatingColor } from "./utils/colorUtils.js";
   import { formatTime } from "./utils/timeUtils.js";
 
   function showError(message, title = "Error") {
@@ -1356,7 +1356,7 @@
 
               <div class="detail-meta">
                 {#if details.vote_average !== undefined && details.vote_average !== null}
-                <div class="rating-box {getRatingClass(details.vote_average)}">
+                <div class="rating-box" style="background: {getRatingColor(details.vote_average)}">
                   {details.vote_average.toFixed(1)}
                 </div>
                 {/if}
@@ -1601,7 +1601,7 @@
                                   </div>
                                   <div class="episode-meta">
                                     {#if episode.vote_average}
-                                      <span class="episode-rating {getRatingClass(episode.vote_average)}">
+                                      <span class="episode-rating" style="background: {getRatingColor(episode.vote_average)}">
                                         {episode.vote_average.toFixed(1)}
                                       </span>
                                     {/if}
@@ -1635,9 +1635,8 @@
                             <!-- svelte-ignore a11y-click-events-have-key-events -->
                             <!-- svelte-ignore a11y-no-static-element-interactions -->
                             <div
-                              class="heatmap-cell loaded {episode.vote_average
-                                ? getRatingClass(episode.vote_average)
-                                : 'rating-none'}"
+                              class="heatmap-cell loaded"
+                              style="background: {episode.vote_average ? getRatingColor(episode.vote_average) : 'rgba(255,255,255,0.12)'}"
                               on:click={() => {
                                 selectedSeason = season.season_number;
                                 selectedEpisode = episode;
@@ -1850,7 +1849,7 @@
                       </div>
                     {/if}
                     {#if rec.vote_average}
-                      <div class="rec-rating-badge {getRatingClass(rec.vote_average)}">
+                      <div class="rec-rating-badge" style="background: {getRatingColor(rec.vote_average)}">
                         {rec.vote_average.toFixed(1)}
                       </div>
                     {/if}
@@ -1934,9 +1933,8 @@
               <span class="stat-label">Rating</span>
               <div class="stat-value">
                 <span
-                  class="rating-badge {getRatingClass(
-                    selectedEpisode.vote_average,
-                  )}"
+                  class="rating-badge"
+                  style="background: {getRatingColor(selectedEpisode.vote_average)}"
                 >
                   {selectedEpisode.vote_average.toFixed(1)}
                 </span>

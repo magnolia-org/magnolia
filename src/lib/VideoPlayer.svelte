@@ -59,7 +59,6 @@
   let volume = 1;
   let muted = false;
   let fullscreen = false;
-  let wasMaximizedBeforeFullscreen = false;
   let showControls = true;
   let justSeeked = false;
   let showBufferingIndicator = false;
@@ -437,40 +436,12 @@
   }
 
   async function toggleFullscreen() {
-    const container = document.querySelector(".video-player");
     const appWindow = getCurrentWindow();
-
-    if (!fullscreen) {
-      try {
-        // Check if window is maximized and unmaximize it before entering fullscreen
-        const isMaximized = await appWindow.isMaximized();
-        wasMaximizedBeforeFullscreen = isMaximized;
-        if (isMaximized) {
-          await appWindow.unmaximize();
-          // Wait for the window state to fully update
-          await new Promise((resolve) => setTimeout(resolve, 200));
-        }
-
-        // Request fullscreen
-        if (container.requestFullscreen) {
-          await container.requestFullscreen();
-        } else if (container.webkitRequestFullscreen) {
-          await container.webkitRequestFullscreen();
-        }
-      } catch (err) {
-        console.error("Fullscreen error:", err);
-      }
-    } else {
-      try {
-        // Exit fullscreen - restoration is handled by handleFullscreenChange
-        if (document.exitFullscreen) {
-          await document.exitFullscreen();
-        } else if (document.webkitExitFullscreen) {
-          await document.webkitExitFullscreen();
-        }
-      } catch (err) {
-        console.error("Exit fullscreen error:", err);
-      }
+    try {
+      await appWindow.setFullscreen(!fullscreen);
+      fullscreen = !fullscreen;
+    } catch (err) {
+      console.error("Fullscreen error:", err);
     }
   }
 
@@ -748,36 +719,45 @@
           }),
         );
       } else {
-        // Go back to media details to select torrent for next episode
-        console.log('No saved torrent found, navigating to torrent selector');
-        window.location.hash = `/media/${mediaType}/${mediaId}?season=${seasonNum}&episode=${nextEpisode}`;
+        // No saved torrent — open media detail so the user can pick a torrent for the next episode
+        console.log('No saved torrent found, opening media detail for torrent selection');
+        dispatch('close');
+        window.dispatchEvent(new CustomEvent('openMediaDetail', {
+          detail: {
+            ...metadata,
+            id: Number(mediaId),
+            media_type: mediaType,
+            autoPlay: true,
+            resumeProgress: {
+              currentSeason: seasonNum,
+              currentEpisode: nextEpisode,
+              currentTimestamp: 0
+            }
+          }
+        }));
       }
     } catch (error) {
       console.error('Error navigating to next episode:', error);
-      // Fallback to torrent selector
-      window.location.hash = `/media/${mediaType}/${mediaId}?season=${seasonNum}&episode=${nextEpisode}`;
+      dispatch('close');
+      window.dispatchEvent(new CustomEvent('openMediaDetail', {
+        detail: {
+          ...metadata,
+          id: Number(mediaId),
+          media_type: mediaType,
+          autoPlay: true,
+          resumeProgress: {
+            currentSeason: seasonNum,
+            currentEpisode: nextEpisode,
+            currentTimestamp: 0
+          }
+        }
+      }));
     }
   }
 
-  async function handleFullscreenChange() {
-    const wasFullscreen = fullscreen;
-    fullscreen = !!(
-      document.fullscreenElement || document.webkitFullscreenElement
-    );
-    
-    // If exiting fullscreen and window was maximized before, restore it
-    if (wasFullscreen && !fullscreen && wasMaximizedBeforeFullscreen) {
-      try {
-        const appWindow = getCurrentWindow();
-        // Give more time for fullscreen exit to complete
-        await new Promise((resolve) => setTimeout(resolve, 300));
-        await appWindow.maximize();
-        wasMaximizedBeforeFullscreen = false;
-        console.log("Window maximized after exiting fullscreen");
-      } catch (err) {
-        console.error("Error restoring maximize state:", err);
-      }
-    }
+  async function syncFullscreenState() {
+    const appWindow = getCurrentWindow();
+    fullscreen = await appWindow.isFullscreen();
   }
 
   function close() {
@@ -1437,14 +1417,39 @@
           }),
         );
       } else {
-        // Go back to media details to select torrent for next episode
-        console.log('No saved torrent found, navigating to torrent selector');
-        window.location.hash = `/media/${mediaType}/${mediaId}?season=${seasonNum}&episode=${nextEpisode}`;
+        // No saved torrent — open media detail so the user can pick a torrent for the next episode
+        console.log('No saved torrent found, opening media detail for torrent selection');
+        dispatch('close');
+        window.dispatchEvent(new CustomEvent('openMediaDetail', {
+          detail: {
+            ...metadata,
+            id: Number(mediaId),
+            media_type: mediaType,
+            autoPlay: true,
+            resumeProgress: {
+              currentSeason: seasonNum,
+              currentEpisode: nextEpisode,
+              currentTimestamp: 0
+            }
+          }
+        }));
       }
     } catch (error) {
       console.error('Error navigating to next episode:', error);
-      // Fallback to torrent selector
-      window.location.hash = `/media/${mediaType}/${mediaId}?season=${seasonNum}&episode=${nextEpisode}`;
+      dispatch('close');
+      window.dispatchEvent(new CustomEvent('openMediaDetail', {
+        detail: {
+          ...metadata,
+          id: Number(mediaId),
+          media_type: mediaType,
+          autoPlay: true,
+          resumeProgress: {
+            currentSeason: seasonNum,
+            currentEpisode: nextEpisode,
+            currentTimestamp: 0
+          }
+        }
+      }));
     }
   }
 
@@ -1745,8 +1750,9 @@
       console.error('Failed to load settings:', error);
     }
     
-    document.addEventListener("fullscreenchange", handleFullscreenChange);
-    document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+    // Sync fullscreen state when the native window changes (e.g. macOS green traffic light)
+    const appWindow = getCurrentWindow();
+    mpvUnlisteners.push(await appWindow.listen("tauri://resize", syncFullscreenState));
     window.addEventListener("mousemove", handleDrag);
     window.addEventListener("mouseup", stopDrag);
     window.addEventListener("keydown", handleKeyPress);
@@ -1835,8 +1841,7 @@
     if (skipTimerInterval) clearInterval(skipTimerInterval);
     if (skipSectionCheckInterval) clearInterval(skipSectionCheckInterval);
     skipTimerActive = false;
-    document.removeEventListener("fullscreenchange", handleFullscreenChange);
-    document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
+
     window.removeEventListener("mousemove", handleDrag);
     window.removeEventListener("mouseup", stopDrag);
     window.removeEventListener("keydown", handleKeyPress);

@@ -211,6 +211,12 @@ pre {
   transform: scale(1.05);
 }
 
+.btn-standard.loading {
+  cursor: default;
+  opacity: 0.75;
+  pointer-events: none;
+}
+
 /* Rating Badge and Color Classes */
 .rating-badge {
   display: inline-flex;
@@ -228,30 +234,6 @@ pre {
   transform: scale(0.8);
   transition: all 0.2s ease;
   text-shadow: none !important;
-}
-
-.rating--aqua {
-  background: #5fedd8;
-}
-
-.rating--green {
-  background: #6bdb8f;
-}
-
-.rating--yellow {
-  background: #f5d95a;
-}
-
-.rating--orange {
-  background: #ffa368;
-}
-
-.rating--red {
-  background: #ff6b6b;
-}
-
-.rating--purple {
-  background: #d65db1;
 }
 
 /* Progress Badge */

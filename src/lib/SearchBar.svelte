@@ -1,7 +1,7 @@
 <script>
   import { searchMulti, getImageUrl } from './tmdb.js';
   import { onMount } from 'svelte';
-  import { getRatingClass } from './utils/colorUtils.js';
+  import { getRatingColor } from './utils/colorUtils.js';
   
   export let searchActive = false;
   let searchQuery = '';
@@ -173,7 +173,6 @@
     return rating ? rating.toFixed(1) : 'N/A';
   }
   
-  // getRatingColor replaced by getRatingClass in src/lib/utils/colorUtils.js
 
   function openDetail(item) {
     const exists = recentSearches.findIndex(s => s.id === item.id && s.media_type === item.media_type);
@@ -257,7 +256,7 @@
                   <span>{(result.release_date || result.first_air_date).split('-')[0]}</span>
                 {/if}
                 {#if result.vote_average}
-                  <span class="rating-badge {getRatingClass(result.vote_average)}">
+                  <span class="rating-badge" style="background: {getRatingColor(result.vote_average)}">
                     {formatRating(result.vote_average)}
                   </span>
                 {/if}
@@ -290,7 +289,7 @@
                   <span>{(result.release_date || result.first_air_date).split('-')[0]}</span>
                 {/if}
                 {#if result.vote_average}
-                  <span class="rating-badge {getRatingClass(result.vote_average)}">
+                  <span class="rating-badge" style="background: {getRatingColor(result.vote_average)}">
                     {formatRating(result.vote_average)}
                   </span>
                 {/if}

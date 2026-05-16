@@ -1,8 +1,10 @@
 <script>
 import { onMount } from 'svelte';
+import { invoke } from '@tauri-apps/api/core';
 import { getMovieRecommendations, getTVRecommendations, getImageUrl } from './tmdb.js';
-import { getRatingClass } from './utils/colorUtils.js';
+import { getRatingColor } from './utils/colorUtils.js';
 import { myListStore } from './stores/listStore.js';
+import { watchProgressStore } from './stores/watchProgressStore.js';
 
 let allRecommendations = [];
 let displayedRecommendations = [];
@@ -13,6 +15,7 @@ let prominentColor = '#1a1a1a';
 let textColor = '#ffffff';
 let isTransitioning = false;
 let slideDirection = 'right';
+let playingItem = false;
 
 // Backdrop crossfade management - use array to keep both images in DOM
 let backdropImages = []; // Array of {url, id, visible}
@@ -228,6 +231,74 @@ function openDetail() {
   }
 }
 
+async function handleQuickPlay() {
+  if (!currentItem || playingItem) return;
+  const item = currentItem;
+  const itemMediaType = item.media_type;
+  const key = `${item.id}-${itemMediaType}`;
+  const progress = $watchProgressStore[key];
+  const isMovie = itemMediaType === 'movie';
+  playingItem = true;
+
+  let targetSeason = 0;
+  let targetEpisode = 0;
+  if (!isMovie) {
+    if (progress?.currentSeason && progress?.currentEpisode) {
+      targetSeason = progress.currentSeason;
+      targetEpisode = progress.currentEpisode;
+    } else {
+      targetSeason = 1;
+      targetEpisode = 1;
+    }
+  }
+
+  try {
+    const saved = await invoke('get_saved_selection', {
+      showId: Number(item.id),
+      season: targetSeason,
+      episode: targetEpisode
+    });
+
+    if (saved && saved.magnet_link) {
+      const handleId = await invoke('add_torrent', { magnetOrUrl: saved.magnet_link });
+      const mediaTitle = item.title || item.name || '';
+      const playerTitle = isMovie
+        ? mediaTitle
+        : `${mediaTitle} - S${targetSeason}E${targetEpisode}`;
+      let initialTimestamp = 0;
+      if (isMovie && progress?.currentTimestamp) {
+        initialTimestamp = progress.currentTimestamp;
+      } else if (!isMovie && progress?.currentSeason === targetSeason && progress?.currentEpisode === targetEpisode) {
+        initialTimestamp = progress.currentTimestamp || 0;
+      }
+      playingItem = false;
+      window.dispatchEvent(new CustomEvent('openVideoPlayer', {
+        detail: {
+          src: null,
+          title: playerTitle,
+          metadata: item,
+          handleId,
+          fileIndex: saved.file_index,
+          magnetLink: saved.magnet_link,
+          initialTimestamp,
+          mediaId: item.id,
+          mediaType: itemMediaType,
+          seasonNum: isMovie ? null : targetSeason,
+          episodeNum: isMovie ? null : targetEpisode,
+        }
+      }));
+      return;
+    }
+  } catch (err) {
+    console.warn('Quick play: saved selection check failed, falling back to detail view', err);
+  }
+
+  playingItem = false;
+  window.dispatchEvent(new CustomEvent('openMediaDetail', {
+    detail: { ...item, autoPlay: true, resumeProgress: progress }
+  }));
+}
+
 function isInMyList(item) {
   const inList = myListItems.has(`${item.id}-${item.media_type}`);
   return inList;
@@ -320,7 +391,7 @@ function getGenres(item) {
               <h1 class="detail-title">{currentItem.title || currentItem.name}</h1>
 
             <div class="detail-meta">
-              <div class="rating-box {getRatingClass(currentItem.vote_average)}">
+              <div class="rating-box" style="background: {getRatingColor(currentItem.vote_average)}">
                 {formatRating(currentItem.vote_average)}
               </div>
               <span>{formatDate(currentItem.release_date || currentItem.first_air_date)}</span>
@@ -339,8 +410,12 @@ function getGenres(item) {
             {/if}
 
             <div class="detail-actions">
-              <button class="btn-standard primary" on:click={openDetail}>
-                <i class="ri-play-fill"></i>
+              <button class="btn-standard primary" class:loading={playingItem} disabled={playingItem} on:click={handleQuickPlay}>
+                {#if playingItem}
+                  <i class="ri-loader-4-line spin"></i>
+                {:else}
+                  <i class="ri-play-fill"></i>
+                {/if}
                 Play
               </button>
               <button class="btn-standard" on:click={toggleMyList}>

@@ -338,6 +338,24 @@
     transform: translateY(0) scale(1);
 }
 
+.action-btn.loading {
+    cursor: default;
+    opacity: 0.75;
+    transform: none;
+}
+
+.action-btn:disabled {
+    pointer-events: none;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.spin {
+    animation: spin 0.7s linear infinite;
+}
+
 /* Recommendations Carousel */
 .recommendations-empty {
     width: 100%;
