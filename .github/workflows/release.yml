@@ -227,7 +227,9 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
-            libfuse2
+            libfuse2 \
+            libssl-dev \
+            pkg-config
 
       - name: Install JS dependencies
         run: npm ci
