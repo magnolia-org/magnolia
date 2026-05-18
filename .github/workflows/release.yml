@@ -242,10 +242,29 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Cache tauri-cli (PR #12491 new AppImage format)
+        id: cache-tauri-cli
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/tauri
+            ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-pr12491-${{ runner.os }}
+
+      - name: Install tauri-cli from PR #12491
+        if: steps.cache-tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --git https://github.com/tauri-apps/tauri --branch feat/truly-portable-appimage --locked
+
+      - name: Pre-build (sync + apply runtime libs)
+        run: |
+          node scripts/sync_runtime_libs.mjs --platform linux --check
+          node scripts/apply_runtime_libs.mjs --platform linux --mode bundle --profile release
+
       - name: Build (AppImage)
-        run: node scripts/run_tauri.mjs build --bundles appimage
+        run: cargo tauri build --bundles appimage
         env:
           NO_STRIP: "true"
+          TAURI_BUNDLER_NEW_APPIMAGE_FORMAT: "1"
 
       - name: Bundle runtime libraries (Linux)
         run: node scripts/bundle_runtime_libs_linux.mjs --profile release
