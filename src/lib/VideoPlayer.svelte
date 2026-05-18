@@ -208,7 +208,8 @@
   async function saveTrackPreferences() {
     if (!magnetLink) return;
     try {
-      const audioTrackId = selectedAudioTrack > 0 ? selectedAudioTrack : null;
+      const audioTrack = selectedAudioTrack > 0 ? videoMetadata?.audio_tracks?.[selectedAudioTrack] : null;
+      const audioTrackId = audioTrack?.id ?? null;
       const embeddedCount = videoMetadata?.subtitle_tracks?.length || 0;
       let subtitleTrackId = null;
       let subtitleLanguage = null;

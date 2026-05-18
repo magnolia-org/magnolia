@@ -449,6 +449,16 @@
     line-height: 1.2;
 }
 
+.play-loading-icon {
+    font-size: 20px;
+    animation: play-btn-spin 0.7s linear infinite;
+}
+
+@keyframes play-btn-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
 .detail-tabs {
     display: flex;
     gap: var(--spacing-xs);

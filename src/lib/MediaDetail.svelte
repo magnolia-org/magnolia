@@ -71,6 +71,7 @@
   let showMoreMenu = false;
   let torrentManagerRefresh = 0;
   let torrentFileCache = {};
+  let isPlayLoading = false;
 
   $: {
     if (media && !media.media_type) {
@@ -129,6 +130,7 @@
     keywords = [];
     autoPlayTriggered = false; // Reset autoplay flag for new media
     selectedTorrentName = ""; // Reset torrent name for new media
+    isPlayLoading = false;
   }
 
   $: if (details) {
@@ -157,16 +159,13 @@
     loadSeasonDetails();
   }
 
+  // Trigger autoPlay as soon as details are available, regardless of timing
+  $: if (details && media?.autoPlay && !autoPlayTriggered) {
+    autoPlayTriggered = true;
+    handleAutoPlay();
+  }
+
   onMount(() => {
-    if (media && media.autoPlay && !autoPlayTriggered) {
-      autoPlayTriggered = true;
-      setTimeout(() => {
-        if (details) {
-          handleAutoPlay();
-        }
-      }, 500);
-    }
-    
     const handleKeyDown = (e) => {
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")
         return;
@@ -553,6 +552,7 @@
       "Force reselect:",
       forceReselect,
     );
+    isPlayLoading = true;
     isOperationCancelled = false;
     pendingPlayRequest = { season: seasonNum, episode: episodeNum };
 
@@ -582,6 +582,7 @@
     }
 
     // 2. Start Search
+    isPlayLoading = false;
     isSearching = true;
     showTorrentSelector = true;
     searchResults = [];
@@ -1000,6 +1001,7 @@
       }
 
       // Dispatch event to open video player
+      isPlayLoading = false;
       window.dispatchEvent(
         new CustomEvent("openVideoPlayer", {
           detail: {
@@ -1037,6 +1039,7 @@
         }
       }
       
+      isPlayLoading = false;
       showError("Failed to prepare stream. The saved torrent might be unavailable. Please try again to select a new source.");
       return false;
     }
@@ -1044,6 +1047,7 @@
 
   function closeTorrentSelector() {
     isOperationCancelled = true;
+    isPlayLoading = false;
     isSelectingTorrent = false;
     showTorrentSelector = false;
     pendingPlayRequest = null;
@@ -1414,6 +1418,7 @@
               <div class="detail-actions">
                 <button
                   class="btn-standard primary btn-large play-btn-with-resume"
+                  disabled={isPlayLoading}
                   on:click={() => {
                     if (details.seasons && details.seasons.length > 0) {
                       // Use resume info if available, otherwise default to S1E1
@@ -1428,10 +1433,14 @@
                     }
                   }}
                 >
-                  <i class="ri-play-fill"></i>
+                  {#if isPlayLoading}
+                    <i class="ri-loader-2-line play-loading-icon"></i>
+                  {:else}
+                    <i class="ri-play-fill"></i>
+                  {/if}
                   <div class="play-btn-content">
                     <span class="play-btn-main">{resumeInfo ? 'Resume' : 'Play'}</span>
-                    {#if resumeInfo}
+                    {#if resumeInfo && !isPlayLoading}
                       <span class="play-btn-resume-info">{resumeInfo.label}</span>
                     {/if}
                   </div>
@@ -1903,10 +1912,16 @@
           </button>
           <button
             class="btn-standard primary"
+            disabled={isPlayLoading}
             on:click={() =>
               handlePlay(selectedSeason, selectedEpisode.episode_number)}
           >
-            <i class="ri-play-fill"></i> Play
+            {#if isPlayLoading}
+              <i class="ri-loader-2-line play-loading-icon"></i>
+            {:else}
+              <i class="ri-play-fill"></i>
+            {/if}
+            Play
           </button>
           <button
             class="btn-standard close-modal-btn"
