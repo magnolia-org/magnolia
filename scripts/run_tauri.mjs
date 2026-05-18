@@ -115,7 +115,7 @@ if (isDevOrBuild && process.platform === "darwin" && !hasUserConfigArg(tauriArgs
 if (tauriSubcommand === "build" && process.platform === "win32" && !hasUserConfigArg(tauriArgs)) {
   if (!existsSync(tauriRuntimeWindowsConfigPath)) {
     console.error(`[ERROR] Missing Windows runtime config: ${tauriRuntimeWindowsConfigPath}`);
-    console.error("[ERROR] Run: node scripts/setup_runtime_libs_windows.mjs");
+    console.error("[ERROR] Ensure src-tauri/tauri.runtime.windows.json is present in the repository.");
     process.exit(1);
   }
   tauriArgs.push("--config", tauriRuntimeWindowsConfigPath);
