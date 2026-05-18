@@ -244,6 +244,8 @@ jobs:
 
       - name: Build (AppImage)
         run: node scripts/run_tauri.mjs build --bundles appimage
+        env:
+          NO_STRIP: "true"
 
       - name: Bundle runtime libraries (Linux)
         run: node scripts/bundle_runtime_libs_linux.mjs --profile release

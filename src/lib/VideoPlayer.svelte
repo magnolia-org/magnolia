@@ -636,7 +636,7 @@
       // Check if current chapter indicates ending
       if (currentChapter && currentChapter.title) {
         const title = currentChapter.title.toLowerCase();
-        if (title.includes('ending') || title.includes('credits') || title === 'end') {
+        if (title.includes('ending') || (title.includes('credits') && !title.includes('opening')) || title === 'end') {
            shouldShowNext = true;
         }
       }

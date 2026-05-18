@@ -7,6 +7,7 @@ const filename = fileURLToPath(import.meta.url);
 const scriptDir = dirname(filename);
 const projectRoot = dirname(scriptDir);
 const tauriRuntimeMacConfigPath = resolve(projectRoot, "src-tauri", "tauri.runtime.macos.json");
+const tauriRuntimeWindowsConfigPath = resolve(projectRoot, "src-tauri", "tauri.runtime.windows.json");
 const runtimeManifestDir = resolve(projectRoot, "src-tauri", "libs");
 const mpvRuntimeLibsDir = resolve(runtimeManifestDir, "mpv");
 
@@ -185,10 +186,57 @@ function syncRuntimeManifest(platform, entries) {
   console.log(`[INFO] Synced runtime manifest: ${manifestPath}`);
 }
 
+function syncWindowsResources(entries) {
+  let currentKeys = [];
+  if (existsSync(tauriRuntimeWindowsConfigPath)) {
+    const raw = readFileSync(tauriRuntimeWindowsConfigPath, "utf8");
+    const config = JSON.parse(raw);
+    const resources =
+      config && config.bundle && config.bundle.resources
+        ? config.bundle.resources
+        : {};
+    currentKeys = Object.keys(resources).sort((a, b) => a.localeCompare(b));
+  }
+
+  const changed = !sameStringArray(currentKeys, entries);
+
+  if (checkOnly) {
+    if (changed) {
+      console.error("[ERROR] tauri Windows runtime config is out of sync.");
+      console.error("[ERROR] Run: node scripts/setup_runtime_libs_windows.mjs");
+      process.exit(1);
+    }
+    console.log(`[INFO] Windows runtime config in sync (${entries.length})`);
+    return;
+  }
+
+  if (!changed) {
+    console.log(`[INFO] Windows runtime config already in sync (${entries.length})`);
+    return;
+  }
+
+  const resources = {};
+  for (const entry of entries) {
+    resources[entry] = "./";
+  }
+  const runtimeConfig = { bundle: { resources } };
+  writeFileSync(
+    tauriRuntimeWindowsConfigPath,
+    `${JSON.stringify(runtimeConfig, null, 2)}\n`,
+    "utf8"
+  );
+  console.log(
+    `[INFO] Synced Windows runtime config (${entries.length}): ${tauriRuntimeWindowsConfigPath}`
+  );
+}
+
 function main() {
   const entries = listRuntimeEntries(targetPlatform);
   if (targetPlatform === "darwin") {
     syncDarwinFrameworks(entries);
+  } else if (targetPlatform === "win32") {
+    syncRuntimeManifest(targetPlatform, entries);
+    syncWindowsResources(entries);
   } else {
     syncRuntimeManifest(targetPlatform, entries);
   }

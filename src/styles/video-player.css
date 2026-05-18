@@ -25,6 +25,7 @@
     border-radius: 0;
     width: 100vw;
     height: 100vh;
+    z-index: 10002;
 }
 
 .video-player.fullscreen .mpv-container {
@@ -69,7 +70,7 @@
 }
 
 .video-player.fullscreen .player-header {
-    top: var(--spacing-lg);
+    top: calc(env(safe-area-inset-top, 0px) + var(--spacing-lg));
 }
 
 .player-header.visible {

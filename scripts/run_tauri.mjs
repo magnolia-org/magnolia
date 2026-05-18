@@ -10,6 +10,7 @@ const projectRoot = dirname(scriptDir);
 const syncScript = resolve(scriptDir, "sync_runtime_libs.mjs");
 const applyScript = resolve(scriptDir, "apply_runtime_libs.mjs");
 const tauriRuntimeMacConfigPath = resolve(projectRoot, "src-tauri", "tauri.runtime.macos.json");
+const tauriRuntimeWindowsConfigPath = resolve(projectRoot, "src-tauri", "tauri.runtime.windows.json");
 const runtimeLibsDir = resolve(projectRoot, "src-tauri", "libs");
 const mpvRuntimeLibsDir = resolve(runtimeLibsDir, "mpv");
 const devFrameworksDir = resolve(projectRoot, "src-tauri", "target", "Frameworks");
@@ -109,6 +110,15 @@ if (isDevOrBuild && process.platform === "darwin" && !hasUserConfigArg(tauriArgs
     process.exit(1);
   }
   tauriArgs.push("--config", tauriRuntimeMacConfigPath);
+}
+
+if (tauriSubcommand === "build" && process.platform === "win32" && !hasUserConfigArg(tauriArgs)) {
+  if (!existsSync(tauriRuntimeWindowsConfigPath)) {
+    console.error(`[ERROR] Missing Windows runtime config: ${tauriRuntimeWindowsConfigPath}`);
+    console.error("[ERROR] Run: node scripts/setup_runtime_libs_windows.mjs");
+    process.exit(1);
+  }
+  tauriArgs.push("--config", tauriRuntimeWindowsConfigPath);
 }
 
 const tauriCmd = "tauri";
