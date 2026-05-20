@@ -185,6 +185,7 @@
     cursor: pointer;
     transition: all 0.2s ease;
     backdrop-filter: blur(10px);
+    will-change: transform;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
   }
 

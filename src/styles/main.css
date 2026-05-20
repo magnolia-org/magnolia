@@ -164,6 +164,7 @@ pre {
   box-shadow: var(--shadow-highlight), var(--shadow-depth);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
+  will-change: transform;
   display: inline-flex;
   align-items: center;
   justify-content: center;

@@ -270,6 +270,8 @@
     opacity: 0.9;
     transition: all 0.2s ease;
     backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    will-change: transform;
 }
 
 .genre-tag:hover {
@@ -324,6 +326,8 @@
     right: 0;
     background: rgba(15, 15, 15, 0.98);
     backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    will-change: transform;
     border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: var(--border-radius-md);
     padding: var(--spacing-sm);
@@ -469,6 +473,7 @@
     border: 1px solid rgba(255, 255, 255, 0.12);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
+    will-change: transform;
 }
 
 .tab-btn {
@@ -495,6 +500,7 @@
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
+    will-change: transform;
 }
 
 .tab-content {
@@ -534,6 +540,8 @@
     overflow: hidden;
     transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
     backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    will-change: transform;
 }
 
 .cast-card:hover {
@@ -601,6 +609,8 @@
     overflow: hidden;
     transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
     backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    will-change: transform;
 }
 
 .crew-card:hover {
@@ -685,6 +695,7 @@
     border: 1px solid rgba(255, 255, 255, 0.08);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
+    will-change: transform;
 }
 
 .detail-item.full-width {
@@ -858,6 +869,7 @@
     font-weight: 500;
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
+    will-change: transform;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
@@ -880,6 +892,7 @@
         0 0 30px color-mix(in srgb, var(--prominent-color, var(--accent-color)) 15%, transparent);
     backdrop-filter: blur(15px);
     -webkit-backdrop-filter: blur(15px);
+    will-change: transform;
 }
 
 .episodes-grid {
@@ -900,6 +913,7 @@
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
+    will-change: transform;
     box-shadow:
         0 4px 12px rgba(0, 0, 0, 0.3),
         inset 0 1px 0 rgba(255, 255, 255, 0.1);

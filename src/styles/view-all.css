@@ -11,6 +11,7 @@
     animation: fadeIn 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     backdrop-filter: blur(30px);
     -webkit-backdrop-filter: blur(30px);
+    will-change: transform;
     overflow-y: auto;
 }
 
@@ -131,6 +132,7 @@
     background: rgba(255, 255, 255, 0.08);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
+    will-change: transform;
 }
 
 .view-all-header .close-btn:hover {
@@ -161,6 +163,7 @@
         inset 0 1px 0 rgba(255, 255, 255, 0.1);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
+    will-change: transform;
 }
 
 .grid-card:hover {
@@ -278,6 +281,7 @@
     border: 1px solid rgba(255, 255, 255, 0.25);
     backdrop-filter: blur(15px);
     -webkit-backdrop-filter: blur(15px);
+    will-change: transform;
 }
 
 .grid-card-actions .action-btn:hover {
@@ -312,6 +316,7 @@
     border: 1px solid rgba(255, 255, 255, 0.25);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
+    will-change: transform;
 }
 
 .load-more-container .load-more-btn:hover:not(:disabled) {

@@ -160,6 +160,11 @@ img.src = imageUrl;
 await new Promise((resolve, reject) => {
 img.onload = resolve;
 img.onerror = reject;
+// WebKit may not re-fire onload for cached images; resolve immediately if already complete
+if (img.complete) {
+  if (img.naturalWidth > 0) resolve();
+  else reject(new Error('Image failed to load'));
+}
 });
 
 const canvas = document.createElement('canvas');

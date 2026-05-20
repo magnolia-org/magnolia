@@ -21,6 +21,20 @@ let playingItem = false;
 let backdropImages = []; // Array of {url, id, visible}
 let backdropIdCounter = 0;
 
+function handleBackdropLoaded(imgId) {
+  backdropImages = backdropImages.map(i =>
+    i.id === imgId ? { ...i, loaded: true, visible: true } : i
+  );
+}
+
+// Svelte action: resolves the cached-image case where onload never re-fires in WebKit
+function imageLoadAction(node, imgId) {
+  if (node.complete && node.naturalWidth > 0) {
+    handleBackdropLoaded(imgId);
+  }
+  return { destroy() {} };
+}
+
 $: myList = $myListStore;
 $: myListItems = new Set(myList.map(item => `${item.id}-${item.media_type}`));
 $: {
@@ -125,6 +139,11 @@ async function extractColors(backdropPath) {
     await new Promise((resolve, reject) => {
       img.onload = resolve;
       img.onerror = reject;
+      // WebKit may not re-fire onload for cached images; resolve immediately if already complete
+      if (img.complete) {
+        if (img.naturalWidth > 0) resolve();
+        else reject(new Error('Image failed to load'));
+      }
     });
 
     const canvas = document.createElement('canvas');
@@ -363,12 +382,8 @@ function getGenres(item) {
           alt=""
           class="backdrop-img" 
           class:visible={img.visible}
-          on:load={() => {
-            // Mark this image as loaded and visible
-            backdropImages = backdropImages.map(i => 
-              i.id === img.id ? { ...i, loaded: true, visible: true } : i
-            );
-          }} 
+          use:imageLoadAction={img.id}
+          on:load={() => handleBackdropLoaded(img.id)}
         />
       {/each}
     </div>
