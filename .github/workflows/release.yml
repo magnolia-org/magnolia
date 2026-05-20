@@ -184,13 +184,13 @@ jobs:
       - name: Zip .app
         run: |
           cd src-tauri/target/aarch64-apple-darwin/release/bundle/macos
-          zip -r --symlinks Magnolia.zip Magnolia.app
+          zip -r --symlinks "Magnolia_${{ inputs.version }}_arm64-macos.zip" Magnolia.app
 
       - name: Upload .app zip
         uses: actions/upload-artifact@v4
         with:
           name: magnolia-macos-zip
-          path: src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Magnolia.zip
+          path: src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Magnolia_${{ inputs.version }}_arm64-macos.zip
           if-no-files-found: error
 
   # ─────────────────────────────────────────────────────────────────────────────
