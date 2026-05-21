@@ -1434,7 +1434,7 @@
                   }}
                 >
                   {#if isPlayLoading}
-                    <i class="ri-loader-2-line play-loading-icon"></i>
+                    <i class="ri-loader-4-line spin"></i>
                   {:else}
                     <i class="ri-play-fill"></i>
                   {/if}
@@ -1917,7 +1917,7 @@
               handlePlay(selectedSeason, selectedEpisode.episode_number)}
           >
             {#if isPlayLoading}
-              <i class="ri-loader-2-line play-loading-icon"></i>
+              <i class="ri-loader-4-line spin"></i>
             {:else}
               <i class="ri-play-fill"></i>
             {/if}
