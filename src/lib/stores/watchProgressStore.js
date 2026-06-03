@@ -1,96 +1,118 @@
 import { writable } from 'svelte/store';
+import { invoke } from '@tauri-apps/api/core';
 
-function loadFromLocalStorage() {
-  if (typeof window !== 'undefined') {
-    try {
-      const savedProgress = localStorage.getItem('watchProgress');
-      return savedProgress ? JSON.parse(savedProgress) : {};
-    } catch (error) {
-      console.error('Error loading watch progress from localStorage:', error);
-      return {};
-    }
+// Mirror of current store value for synchronous getProgress/getEpisodeProgress reads
+let _currentProgress = {};
+
+async function loadFromDisk() {
+  try {
+    return await invoke('get_watch_progress') || {};
+  } catch (error) {
+    console.error('Error loading watch progress from disk:', error);
+    return {};
   }
-  return {};
+}
+
+async function migrateFromLocalStorage() {
+  if (typeof window === 'undefined') return;
+  try {
+    const stored = localStorage.getItem('watchProgress');
+    if (stored) {
+      const progress = JSON.parse(stored);
+      if (progress && typeof progress === 'object' && Object.keys(progress).length > 0) {
+        await invoke('set_watch_progress', { progress });
+        console.log('✅ Migrated watch progress from localStorage to disk');
+      }
+      localStorage.removeItem('watchProgress');
+    }
+  } catch (error) {
+    console.error('Error migrating watch progress from localStorage:', error);
+  }
 }
 
 function createWatchProgressStore() {
-  const { subscribe, set, update } = writable(loadFromLocalStorage());
+  const { subscribe, set, update } = writable({});
+
+  // Keep module-level mirror in sync for synchronous reads
+  subscribe(val => { _currentProgress = val; });
+
+  async function init() {
+    await migrateFromLocalStorage();
+    const progress = await loadFromDisk();
+    set(progress);
+  }
+
+  init();
 
   return {
     subscribe,
 
-    updateProgress: (mediaId, mediaType, data) => {
-      update(progress => {
-        const key = `${mediaId}-${mediaType}`;
-        progress[key] = {
-          ...data,
-          updatedAt: Date.now()
-        };
+    updateProgress: async (mediaId, mediaType, data) => {
+      const key = `${mediaId}-${mediaType}`;
+      const entry = { ...data, updatedAt: Date.now() };
 
-        // Also store episode-specific progress if available
+      // Update in-memory immediately so UI stays responsive
+      update(progress => {
+        const next = { ...progress, [key]: entry };
         if (data.currentSeason && data.currentEpisode) {
-          const episodeKey = `${mediaId}-${mediaType}-S${data.currentSeason}-E${data.currentEpisode}`;
-          progress[episodeKey] = {
-            ...data,
-            updatedAt: Date.now()
-          };
+          const epKey = `${mediaId}-${mediaType}-S${data.currentSeason}-E${data.currentEpisode}`;
+          next[epKey] = entry;
         }
-        
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('watchProgress', JSON.stringify(progress));
-        }
-        
-        console.log('📊 Updated watch progress:', key, data);
-        return progress;
+        return next;
       });
+
+      try {
+        await invoke('update_watch_progress_entry', { key, value: entry });
+        if (data.currentSeason && data.currentEpisode) {
+          const epKey = `${mediaId}-${mediaType}-S${data.currentSeason}-E${data.currentEpisode}`;
+          await invoke('update_watch_progress_entry', { key: epKey, value: entry });
+        }
+        console.log('📊 Updated watch progress:', key, data);
+      } catch (error) {
+        console.error('Failed to update watch progress:', error);
+      }
     },
 
     getEpisodeProgress: (mediaId, mediaType, season, episode) => {
-      const progress = loadFromLocalStorage();
       const key = `${mediaId}-${mediaType}-S${season}-E${episode}`;
-      return progress[key] || null;
+      return _currentProgress[key] || null;
     },
 
     getProgress: (mediaId, mediaType) => {
-      const progress = loadFromLocalStorage();
       const key = `${mediaId}-${mediaType}`;
-      return progress[key] || null;
+      return _currentProgress[key] || null;
     },
 
-    removeProgress: (mediaId, mediaType) => {
+    removeProgress: async (mediaId, mediaType) => {
+      const key = `${mediaId}-${mediaType}`;
       update(progress => {
-        const key = `${mediaId}-${mediaType}`;
-        delete progress[key];
-        
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('watchProgress', JSON.stringify(progress));
-        }
-        
-        console.log('🗑️ Removed watch progress:', key);
-        return progress;
+        const next = { ...progress };
+        delete next[key];
+        return next;
       });
+      try {
+        await invoke('remove_watch_progress_entry', { key });
+        console.log('🗑️ Removed watch progress:', key);
+      } catch (error) {
+        console.error('Failed to remove watch progress:', error);
+      }
     },
 
-    clear: () => {
+    clear: async () => {
       set({});
-      if (typeof window !== 'undefined') {
-        localStorage.removeItem('watchProgress');
+      try {
+        await invoke('clear_watch_progress');
+        console.log('🗑️ All watch progress cleared');
+      } catch (error) {
+        console.error('Failed to clear watch progress:', error);
       }
-      console.log('🗑️ All watch progress cleared');
     },
-    
-    reload: () => {
-      set(loadFromLocalStorage());
-    }
+
+    reload: async () => {
+      const progress = await loadFromDisk();
+      set(progress);
+    },
   };
 }
 
 export const watchProgressStore = createWatchProgressStore();
-
-if (typeof window !== 'undefined') {
-  window.addEventListener('storage', (e) => {
-    if (e.key === 'watchProgress') {
-      watchProgressStore.reload();
-    }
-  });
-}

@@ -217,6 +217,8 @@
     opacity: 0.85;
     margin: 0;
     line-height: 1.5;
+    padding-inline-end: 0.25em;
+    overflow: visible;
 }
 
 .detail-meta {
@@ -1605,7 +1607,6 @@
     align-items: center;
     justify-content: center;
     padding: var(--spacing-xl);
-    animation: fadeIn 0.2s ease;
 }
 
 .episode-modal {
@@ -1623,7 +1624,6 @@
     box-shadow:
         0 40px 100px rgba(0, 0, 0, 0.9),
         inset 0 1px 0 rgba(255, 255, 255, 0.05);
-    animation: slideUp 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .episode-modal::-webkit-scrollbar {
@@ -2119,7 +2119,6 @@
     align-items: center;
     justify-content: center;
     padding: var(--spacing-xl);
-    animation: fadeIn 0.2s ease;
 }
 
 /* Manual File Selector Styles */

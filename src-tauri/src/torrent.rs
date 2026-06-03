@@ -101,6 +101,7 @@ pub struct AppState {
 struct TorrentEntry {
     magnet_url: String,
     session_id: Option<usize>, // None if not yet added to session
+    buffer_start: Option<std::time::Instant>, // Set when buffering begins (prepare_stream done)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -184,26 +185,54 @@ async fn stream_file(
         (0, file_size - 1, StatusCode::OK)
     };
 
-    let mut stream = match handle.stream(file_id) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("Failed to create stream for file_id {}: {}", file_id, e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to stream: {}", e)).into_response();
+    let content_length = end - start + 1;
+
+    // Pre-fetch relative filename for the disk fallback (before stream() consumes the Arc).
+    let rel_path_for_fallback = handle.with_metadata(|meta| {
+        meta.file_infos.get(file_id).map(|fi| fi.relative_filename.clone())
+    }).ok().flatten();
+
+    // Try the librqbit streaming path first (works for in-progress and most finished torrents).
+    // If that fails (can happen on fully-finished torrents), fall back to serving the file
+    // directly from disk, which always works for completed downloads.
+    let body = match handle.stream(file_id) {
+        Ok(mut stream) => {
+            if start > 0 {
+                if let Err(e) = stream.seek(SeekFrom::Start(start)).await {
+                    tracing::error!("Failed to seek stream to {}: {}", start, e);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to seek: {}", e)).into_response();
+                }
+            }
+            Body::from_stream(ReaderStream::new(stream.take(content_length)))
+        }
+        Err(stream_err) => {
+            // Fall back to direct disk I/O for fully-downloaded torrents.
+            let rel_path = match rel_path_for_fallback {
+                Some(p) => p,
+                None => {
+                    tracing::error!("stream() failed and metadata unavailable: {}", stream_err);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "stream unavailable".to_string()).into_response();
+                }
+            };
+            let file_path = state.download_dir.join(&rel_path);
+            match tokio::fs::File::open(&file_path).await {
+                Ok(mut f) => {
+                    if start > 0 {
+                        use tokio::io::AsyncSeekExt;
+                        if let Err(e) = f.seek(SeekFrom::Start(start)).await {
+                            tracing::error!("Failed to seek file {:?}: {}", file_path, e);
+                            return (StatusCode::INTERNAL_SERVER_ERROR, format!("seek failed: {}", e)).into_response();
+                        }
+                    }
+                    Body::from_stream(ReaderStream::new(f.take(content_length)))
+                }
+                Err(e) => {
+                    tracing::error!("stream() failed ({}), disk fallback also failed for {:?}: {}", stream_err, file_path, e);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, format!("file unavailable: {}", e)).into_response();
+                }
+            }
         }
     };
-
-    if start > 0 {
-        if let Err(e) = stream.seek(SeekFrom::Start(start)).await {
-            tracing::error!("Failed to seek stream to {}: {}", start, e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to seek: {}", e)).into_response();
-        }
-    }
-
-    let content_length = end - start + 1;
-    let limited_stream = stream.take(content_length);
-    
-    let reader_stream = ReaderStream::new(limited_stream);
-    let body = Body::from_stream(reader_stream);
 
     let mut response = Response::builder()
         .status(status_code)
@@ -304,7 +333,8 @@ impl TorrentManager {
     }
 
     pub async fn add_torrent(&self, magnet_or_url: String) -> Result<usize> {
-        tracing::info!("Adding torrent with list_only to fetch metadata: {}", magnet_or_url);
+        let t0 = std::time::Instant::now();
+        tracing::info!("[player-init] add_torrent: starting (list_only metadata fetch)");
         
         let add_torrent = if magnet_or_url.starts_with("magnet:") {
             AddTorrent::from_url(&magnet_or_url)
@@ -342,9 +372,10 @@ impl TorrentManager {
         torrents.insert(our_id, TorrentEntry {
             magnet_url: magnet_or_url,
             session_id,
+            buffer_start: None,
         });
         
-        tracing::info!("Stored torrent with our_id: {}", our_id);
+        tracing::info!("[player-init] add_torrent: done, our_id={} in {:.3}s", our_id, t0.elapsed().as_secs_f64());
         Ok(our_id)
     }
 
@@ -518,6 +549,8 @@ impl TorrentManager {
     }
 
     pub async fn prepare_stream(&self, handle_id: usize, file_index: usize) -> Result<()> {
+        let t0 = std::time::Instant::now();
+        tracing::info!("[player-init] prepare_stream: start handle_id={} file_index={}", handle_id, file_index);
         let torrents = self.torrents.read().await;
         let entry = torrents
             .get(&handle_id)
@@ -547,13 +580,15 @@ impl TorrentManager {
                     self.session.unpause(&handle).await?;
                 }
 
-                tracing::info!("Resumed cached torrent session_id {} for handle_id {}, file_index {}", session_id, handle_id, file_index);
+                tracing::info!("[player-init] prepare_stream: resumed from cache session_id={} in {:.3}s", session_id, t0.elapsed().as_secs_f64());
 
                 drop(torrents);
                 let mut torrents = self.torrents.write().await;
                 if let Some(entry) = torrents.get_mut(&handle_id) {
                     entry.session_id = Some(session_id);
+                    entry.buffer_start = Some(std::time::Instant::now());
                 }
+                tracing::info!("[player-init] buffer: start (cache path)");
 
                 return Ok(());
             } else {
@@ -573,7 +608,7 @@ impl TorrentManager {
             AddTorrent::from_local_filename(&entry.magnet_url)?
         };
         
-        tracing::info!("Preparing stream for file index {}", file_index);
+        tracing::info!("[player-init] prepare_stream: no cache hit, calling session.add_torrent (t={:.3}s)", t0.elapsed().as_secs_f64());
         
         let opts = AddTorrentOptions {
             overwrite: true,
@@ -583,11 +618,13 @@ impl TorrentManager {
             ..Default::default()
         };
         
+        let add_t = std::time::Instant::now();
         let response = self.session.add_torrent(add_torrent, Some(opts)).await?;
+        tracing::info!("[player-init] prepare_stream: session.add_torrent returned in {:.3}s", add_t.elapsed().as_secs_f64());
         let (session_id, _handle) = match response {
             AddTorrentResponse::Added(id, h) => (id, h),
             AddTorrentResponse::AlreadyManaged(id, h) => {
-                tracing::info!("Torrent already managed, reusing existing download");
+                tracing::info!("[player-init] prepare_stream: torrent already managed, reusing");
                 if h.is_paused() {
                     self.session.unpause(&h).await?;
                 }
@@ -598,14 +635,16 @@ impl TorrentManager {
             }
         };
         
-        tracing::info!("Setting session_id {} for handle_id {}", session_id, handle_id);
+        tracing::info!("[player-init] prepare_stream: setting session_id={} for handle_id={}", session_id, handle_id);
         
         drop(torrents);
         let mut torrents = self.torrents.write().await;
         if let Some(entry) = torrents.get_mut(&handle_id) {
             entry.session_id = Some(session_id);
-            tracing::info!("Successfully updated entry.session_id to {}", session_id);
+            entry.buffer_start = Some(std::time::Instant::now());
         }
+        tracing::info!("[player-init] buffer: start (fresh path)");
+        tracing::info!("[player-init] prepare_stream: complete in {:.3}s", t0.elapsed().as_secs_f64());
         
         Ok(())
     }
@@ -617,6 +656,7 @@ impl TorrentManager {
             .context("Torrent handle not found")?;
 
         let session_id = entry.session_id.context("Torrent not yet added to session")?;
+        let buffer_start = entry.buffer_start;
 
         let handle = self.session.get(TorrentIdOrHash::Id(session_id)).context("Session torrent not found")?;
         let stats = handle.stats();
@@ -637,7 +677,8 @@ impl TorrentManager {
 
         let is_streamable = handle.clone().stream(file_index).is_ok();
         let has_buffer = stats.progress_bytes > 2 * 1024 * 1024 || stats.finished;
-        let is_ready = is_streamable && has_buffer;
+        // A finished torrent can always be served via HTTP even if stream() fails.
+        let is_ready = has_buffer && (is_streamable || stats.finished);
 
         let stream_info = if is_ready {
             Some(StreamInfo {
@@ -665,12 +706,22 @@ impl TorrentManager {
 
         let status = if is_ready { "ready".to_string() } else { "initializing".to_string() };
 
+        let peers = stats.live.as_ref().map(|l| l.snapshot.peer_stats.live).unwrap_or(0);
+        let download_mbps = stats.live.as_ref().map(|l| l.download_speed.mbps).unwrap_or_default();
+        let elapsed_str = buffer_start
+            .map(|t| format!("{:.1}s", t.elapsed().as_secs_f64()))
+            .unwrap_or_else(|| "?".to_string());
+        tracing::info!(
+            "[player-init] buffer poll t={}: state={} {}/{} bytes  {} peers  {:.2}Mbps  ready={}",
+            elapsed_str, state, stats.progress_bytes, stats.total_bytes, peers, download_mbps, is_ready
+        );
+
         Ok(StreamStatus {
             status,
             progress_bytes: stats.progress_bytes,
             total_bytes: stats.total_bytes,
-            peers: stats.live.as_ref().map(|l| l.snapshot.peer_stats.live).unwrap_or(0),
-            download_speed: stats.live.as_ref().map(|l| l.download_speed.mbps as u64).unwrap_or(0),
+            peers,
+            download_speed: download_mbps as u64,
             stream_info,
             state,
         })
@@ -932,7 +983,8 @@ impl TorrentManager {
     }
 
     pub async fn wipe_all_files(&self) -> Result<()> {
-        tracing::info!("Wiping all torrent files from download directory");
+        let t0 = std::time::Instant::now();
+        tracing::info!("[player-init] wipe_all_files: starting");
         
         let download_dir = self.download_dir.clone();
         
@@ -975,7 +1027,9 @@ impl TorrentManager {
                 }
             }
             
-            tracing::info!("Wiped {} items from download directory", deleted_count);
+            tracing::info!("[player-init] wipe_all_files: wiped {} items in {:.3}s", deleted_count, t0.elapsed().as_secs_f64());
+        } else {
+            tracing::info!("[player-init] wipe_all_files: directory empty, took {:.3}s", t0.elapsed().as_secs_f64());
         }
         
         Ok(())

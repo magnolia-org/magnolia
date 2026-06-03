@@ -76,6 +76,9 @@ impl MpvHandle {
 
         // soia_utils handles vo, wid, and GPU backend selection — only set
         // options that are independent of the render path.
+        // Force Metal API on macOS to avoid MoltenVK/Vulkan shader compilation delays.
+        #[cfg(target_os = "macos")]
+        set_str("gpu-api", "metal");
         set_str("hwdec", "auto");
         set_str("osc", "no");
         set_str("osd-level", "0");

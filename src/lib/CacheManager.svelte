@@ -2,7 +2,7 @@
   import { onMount, createEventDispatcher } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { fade, scale } from 'svelte/transition';
-  import { sineOut } from 'svelte/easing';
+  import { cubicOut } from 'svelte/easing';
   import { watchHistoryStore } from './stores/watchHistoryStore.js';
   import { myListStore } from './stores/listStore.js';
   
@@ -222,8 +222,8 @@
   onMount(loadCache);
 </script>
 
-<div class="modal-overlay" on:click={() => dispatch('close')} transition:fade>
-  <div class="modal-content" on:click|stopPropagation in:scale={{ duration: 180, start: 0.94 }} out:scale={{ duration: 220, start: 0.8, easing: sineOut }}>
+<div class="modal-overlay" on:click={() => dispatch('close')} transition:fade|global={{ duration: 400, easing: cubicOut }}>
+  <div class="modal-content" on:click|stopPropagation in:scale|global={{ start: 1.08, opacity: 1, duration: 400, easing: cubicOut }} out:scale|global={{ start: 1.08, opacity: 1, duration: 400, easing: cubicOut }}>
     <div class="modal-header">
       <h3>Storage Manager</h3>
     </div>

@@ -1,5 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::mem::ManuallyDrop;
+use std::os::unix::io::FromRawFd;
 use std::path::PathBuf;
 use std::sync::{Mutex, Arc};
 use std::thread;
@@ -75,13 +77,26 @@ impl Logger {
     
     fn start_capturing_output(&self) {
         let backend_log = Arc::clone(&self.backend_log_file);
-        
+
+        // Duplicate the real stdout/stderr fds *before* gag redirects them so
+        // we can tee output back to the terminal in addition to the log file.
+        let real_stdout_fd = unsafe { libc::dup(1) };
+        let real_stderr_fd = unsafe { libc::dup(2) };
+
         // Capture stdout in a separate thread
         let stdout_log = Arc::clone(&backend_log);
         thread::spawn(move || {
             use gag::BufferRedirect;
             use std::io::Read;
-            
+
+            // Wrap the saved fd so we can write to the real terminal.
+            // ManuallyDrop prevents File::drop from closing the fd prematurely.
+            let mut real_out: Option<ManuallyDrop<File>> = if real_stdout_fd >= 0 {
+                Some(ManuallyDrop::new(unsafe { File::from_raw_fd(real_stdout_fd) }))
+            } else {
+                None
+            };
+
             let mut stdout_buffer = match BufferRedirect::stdout() {
                 Ok(buf) => buf,
                 Err(e) => {
@@ -95,6 +110,12 @@ impl Logger {
                 thread::sleep(std::time::Duration::from_millis(100));
                 output.clear();
                 if stdout_buffer.read_to_string(&mut output).is_ok() && !output.is_empty() {
+                    // Tee: write raw bytes back to the real terminal fd
+                    if let Some(ref mut out) = real_out {
+                        let _ = out.write_all(output.as_bytes());
+                        let _ = out.flush();
+                    }
+
                     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
                     let lines: Vec<&str> = output.lines().collect();
                     
@@ -120,7 +141,13 @@ impl Logger {
         thread::spawn(move || {
             use gag::BufferRedirect;
             use std::io::Read;
-            
+
+            let mut real_err: Option<ManuallyDrop<File>> = if real_stderr_fd >= 0 {
+                Some(ManuallyDrop::new(unsafe { File::from_raw_fd(real_stderr_fd) }))
+            } else {
+                None
+            };
+
             let mut stderr_buffer = match BufferRedirect::stderr() {
                 Ok(buf) => buf,
                 Err(e) => {
@@ -134,6 +161,12 @@ impl Logger {
                 thread::sleep(std::time::Duration::from_millis(100));
                 output.clear();
                 if stderr_buffer.read_to_string(&mut output).is_ok() && !output.is_empty() {
+                    // Tee: write raw bytes back to the real terminal fd
+                    if let Some(ref mut err) = real_err {
+                        let _ = err.write_all(output.as_bytes());
+                        let _ = err.flush();
+                    }
+
                     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
                     let lines: Vec<&str> = output.lines().collect();
                     

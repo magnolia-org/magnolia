@@ -1,111 +1,178 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::io::Read;
 
-const WYZIE_BASE_URL: &str = "https://wyzie.wyziemagnolia.workers.dev/search";
+const SUBDL_API_URL: &str = "https://api.subdl.com/api/v1/subtitles";
+const SUBDL_DL_BASE: &str = "https://dl.subdl.com";
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ApiSubtitle {
-    id: String,
-    url: String,
+struct SubDLResult {
     #[allow(dead_code)]
-    format: Option<serde_json::Value>,
-    encoding: Option<String>,
-    display: String,
-    language: String,
-    is_hearing_impaired: bool,
+    sd_id: Option<serde_json::Value>,
+    name: Option<String>,
+    language: Option<String>,
+    lang: Option<String>,
+    url: Option<String>,
+    subtitles_url: Option<String>,
+    hi: Option<bool>,
+    #[allow(dead_code)]
+    full_season: Option<bool>,
+    #[allow(dead_code)]
+    author: Option<String>,
+    release_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum ApiResponse {
-    Subtitles(Vec<ApiSubtitle>),
-    Error { message: String },
+struct SubDLResponse {
+    #[allow(dead_code)]
+    status: bool,
+    results: Option<Vec<SubDLResult>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct WyzieSubtitle {
+pub struct Subtitle {
     pub id: String,
     pub language: String,
+    pub lang: String,
     pub display: String,
     pub url: String,
-    pub format: String,
     pub is_hearing_impaired: bool,
-    pub encoding: String,
     pub source: String,
     pub name: String,
+    pub release_name: Option<String>,
 }
 
 #[tauri::command]
-pub async fn fetch_wyzie_subtitles(
+pub async fn fetch_subtitles(
     tmdb_id: String,
     media_type: String,
     season: Option<u32>,
     episode: Option<u32>,
-) -> Result<Vec<WyzieSubtitle>, String> {
+) -> Result<Vec<Subtitle>, String> {
     let client = reqwest::Client::new();
 
-    // Wyzie API expects IMDb-style IDs: tt{id}
-    let formatted_id = if tmdb_id.starts_with("tt") {
-        tmdb_id
-    } else {
-        format!("tt{}", tmdb_id)
-    };
+    let media_type_param = if media_type == "tv" { "tv" } else { "movie" };
 
     let mut query: Vec<(&str, String)> = vec![
-        ("id", formatted_id),
+        ("tmdb_id", tmdb_id.clone()),
+        ("type", media_type_param.to_string()),
     ];
 
     if media_type == "tv" {
         if let (Some(s), Some(e)) = (season, episode) {
-            query.push(("season", s.to_string()));
-            query.push(("episode", e.to_string()));
+            query.push(("season_number", s.to_string()));
+            query.push(("episode_number", e.to_string()));
         }
     }
 
     let response = client
-        .get(WYZIE_BASE_URL)
+        .get(SUBDL_API_URL)
         .query(&query)
         .send()
         .await
         .map_err(|e| e.to_string())?;
 
-    let api_response: ApiResponse = response
-        .json()
+    let status = response.status();
+    let body = response
+        .text()
         .await
         .map_err(|e| e.to_string())?;
 
-    let subtitles = match api_response {
-        ApiResponse::Subtitles(list) => list,
-        ApiResponse::Error { message } => return Err(message),
-    };
+    if !status.is_success() {
+        return Err(format!("SubDL API error {}: {}", status, body.chars().take(200).collect::<String>()));
+    }
+
+    let parsed: SubDLResponse = serde_json::from_str(&body)
+        .map_err(|e| format!("SubDL parse error: {} — body: {}", e, body.chars().take(200).collect::<String>()))?;
+
+    let results = parsed.results.unwrap_or_default();
 
     let mut seen: HashSet<String> = HashSet::new();
-    let unique: Vec<WyzieSubtitle> = subtitles
+    let unique: Vec<Subtitle> = results
         .into_iter()
-        .filter(|sub| {
-            let key = format!("{}-{}", sub.language, sub.is_hearing_impaired);
-            seen.insert(key)
-        })
-        .map(|sub| {
-            let name = if sub.is_hearing_impaired {
-                format!("{} (HI)", sub.display)
-            } else {
-                sub.display.clone()
-            };
-            WyzieSubtitle {
-                id: sub.id,
-                language: sub.language,
-                display: sub.display,
-                url: sub.url,
-                format: "srt".to_string(),
-                is_hearing_impaired: sub.is_hearing_impaired,
-                encoding: sub.encoding.unwrap_or_default(),
-                source: "wyzie".to_string(),
-                name,
+        .filter_map(|r| {
+            let lang = r.lang.as_deref().unwrap_or("").to_string();
+            let language = r.language.as_deref().unwrap_or("").to_string();
+            let hi = r.hi.unwrap_or(false);
+            let download_url = r
+                .subtitles_url
+                .or_else(|| r.url.as_deref().map(|u| format!("{}{}", SUBDL_DL_BASE, u)))?;
+
+            let key = format!("{}-{}", lang, hi);
+            if !seen.insert(key) {
+                return None;
             }
+
+            let display = if language.is_empty() { lang.clone() } else { language.clone() };
+            let name = if hi {
+                format!("{} (HI)", display)
+            } else {
+                display.clone()
+            };
+
+            Some(Subtitle {
+                id: format!("subdl-{}", lang),
+                language: language.clone(),
+                lang,
+                display,
+                url: download_url,
+                is_hearing_impaired: hi,
+                source: "subdl".to_string(),
+                name,
+                release_name: r.release_name,
+            })
         })
         .collect();
 
     Ok(unique)
+}
+
+#[tauri::command]
+pub async fn download_subtitle(url: String) -> Result<String, String> {
+    let bytes = reqwest::get(&url)
+        .await
+        .map_err(|e| format!("Download failed: {}", e))?
+        .bytes()
+        .await
+        .map_err(|e| format!("Read failed: {}", e))?;
+
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| format!("ZIP open failed: {}", e))?;
+
+    let mut subtitle_content: Option<Vec<u8>> = None;
+    let mut subtitle_ext = "srt".to_string();
+
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| format!("ZIP read failed: {}", e))?;
+        let name = file.name().to_lowercase();
+        if name.ends_with(".srt") || name.ends_with(".ass") || name.ends_with(".vtt") {
+            subtitle_ext = if name.ends_with(".ass") {
+                "ass".to_string()
+            } else if name.ends_with(".vtt") {
+                "vtt".to_string()
+            } else {
+                "srt".to_string()
+            };
+            let mut content = Vec::new();
+            file.read_to_end(&mut content)
+                .map_err(|e| format!("Read sub file failed: {}", e))?;
+            subtitle_content = Some(content);
+            break;
+        }
+    }
+
+    let content = subtitle_content
+        .ok_or_else(|| "No subtitle file found in ZIP archive".to_string())?;
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let path = std::env::temp_dir().join(format!("magnolia_sub_{}.{}", ts, subtitle_ext));
+    std::fs::write(&path, &content).map_err(|e| format!("Write temp failed: {}", e))?;
+
+    Ok(path.to_string_lossy().to_string())
 }

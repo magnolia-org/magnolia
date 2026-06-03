@@ -3,12 +3,14 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
+  import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
   import { formatTime } from "./utils/timeUtils.js";
   import { watchProgressStore } from "./stores/watchProgressStore.js";
   import { watchHistoryStore } from "./stores/watchHistoryStore.js";
-  import { getSeasonDetails, getImageUrl } from "./tmdb.js";
+  import { getSeasonDetails, getTVDetails, getImageUrl } from "./tmdb.js";
 
   import { createEventDispatcher } from "svelte";
+  import { fade } from "svelte/transition";
 
   export let src = "";
   export let metadata = null;
@@ -167,8 +169,12 @@
     }
   }
 
-  async function applyWyzieLangPreference(lang) {
-    const match = externalSubtitles.find(s => s.language === lang);
+  async function applySubtitleLangPreference(lang) {
+    const match = externalSubtitles.find(s =>
+      s.lang === lang ||
+      s.language === lang ||
+      (s.language || '').toLowerCase() === (lang || '').toLowerCase()
+    );
     if (!match) return;
     const embeddedCount = videoMetadata?.subtitle_tracks?.length || 0;
     const idx = externalSubtitles.indexOf(match);
@@ -180,9 +186,17 @@
     try {
       const prefs = await invoke('get_track_preference', { magnetLink });
 
-      // Determine language to restore: prefer per-torrent, fall back to last-used
-      const langToRestore = prefs?.subtitle_language ||
-        (!prefs?.subtitle_track_id ? localStorage.getItem('lastSubtitleLanguage') : null);
+      // Determine language to restore: prefer per-torrent, fall back to last-used or global setting
+      let langToRestore = prefs?.subtitle_language || null;
+      if (!langToRestore && !prefs?.subtitle_track_id) {
+        langToRestore = localStorage.getItem('lastSubtitleLanguage');
+        if (!langToRestore) {
+          try {
+            const settings = await invoke('get_settings');
+            langToRestore = settings.subtitle_language || null;
+          } catch (e) { /* ignore */ }
+        }
+      }
 
       if (prefs) {
         if (prefs.audio_track_id != null) {
@@ -198,7 +212,7 @@
       }
 
       if (langToRestore && externalSubtitles.length > 0) {
-        await applyWyzieLangPreference(langToRestore);
+        await applySubtitleLangPreference(langToRestore);
       }
     } catch (error) {
       console.error('[track prefs] error loading preferences:', error);
@@ -218,7 +232,7 @@
           // embedded — save the mpv track id for sid restoration
           subtitleTrackId = videoMetadata?.subtitle_tracks?.[selectedSubtitleTrack]?.id ?? null;
         } else {
-          // wyzie — save language for cross-episode restoration
+          // external — save language for cross-episode restoration
           subtitleLanguage = selectedSubtitleLanguage;
           if (subtitleLanguage) localStorage.setItem('lastSubtitleLanguage', subtitleLanguage);
         }
@@ -275,6 +289,7 @@
   let episodesPanelSeason = null;
   let episodesData = {};
   let loadingEpisodesPanel = false;
+  let episodeTorrentStatus = {}; // key: `${season}-${episode}` -> boolean
 
   // Episode name for player header
   let episodeName = null;
@@ -297,6 +312,15 @@
     const nextSeason = metadata.seasons.find(s => s.season_number === seasonNum + 1);
     return !!nextSeason;
   })();
+
+  // Fetch full TV metadata (including seasons) if playing from a source that
+  // only provides a basic TMDB item (e.g. home page carousel)
+  $: if (mediaType === 'tv' && mediaId && !metadata?.seasons) {
+    const _id = String(mediaId);
+    getTVDetails(_id).then(details => {
+      if (details?.seasons) metadata = { ...metadata, ...details };
+    }).catch(() => {});
+  }
 
   $: seekChapter = chapters
     .filter((ch) => ch.start_time <= seekPreviewTime)
@@ -333,7 +357,7 @@
     lastSubtitleFetchKey = fetchKey;
     
     try {
-      const subs = await invoke('fetch_wyzie_subtitles', {
+      const subs = await invoke('fetch_subtitles', {
         tmdbId: String(mediaId),
         mediaType,
         season: seasonNum != null ? Number(seasonNum) : null,
@@ -1142,10 +1166,11 @@
     selectedSubtitleTrack = trackIndex;
     loadingSubtitle = true;
     try {
-      if (track.source === "wyzie") {
-        // Load external subtitle via mpv sub-add
-        await invoke("mpv_run_command", { args: ["sub-add", track.url, "select"] });
-        selectedSubtitleLanguage = track.language;
+      if (track.source === "subdl") {
+        // Download ZIP from SubDL, extract to temp file, load via sub-add
+        const filePath = await invoke("download_subtitle", { url: track.url });
+        await invoke("mpv_run_command", { args: ["sub-add", filePath, "select"] });
+        selectedSubtitleLanguage = track.lang || track.language;
       } else {
         // Embedded subtitle — use mpv track id
         const subTrack = videoMetadata?.subtitle_tracks?.[trackIndex];
@@ -1160,6 +1185,25 @@
     } finally {
       loadingSubtitle = false;
       showSubtitleMenu = false;
+    }
+  }
+
+  async function loadSubtitleFromFile() {
+    showSubtitleSubmenu = false;
+    const selected = await openFileDialog({
+      multiple: false,
+      filters: [{ name: "Subtitles", extensions: ["srt", "ass", "ssa", "vtt", "sub"] }],
+    });
+    if (!selected) return;
+    const path = typeof selected === "string" ? selected : selected.path;
+    if (!path) return;
+    loadingSubtitle = true;
+    try {
+      await invoke("mpv_run_command", { args: ["sub-add", path, "select"] });
+    } catch (e) {
+      console.error("Failed to load subtitle file:", e);
+    } finally {
+      loadingSubtitle = false;
     }
   }
 
@@ -1708,6 +1752,26 @@
       } else {
         episodesPanelSeason = targetSeason;
       }
+      // Load torrent assignment status
+      loadEpisodeTorrentStatus();
+    }
+  }
+
+  async function loadEpisodeTorrentStatus() {
+    if (!mediaId) return;
+    try {
+      const allSelections = await invoke('get_all_torrent_selections', { showId: Number(mediaId) });
+      if (allSelections) {
+        const status = {};
+        for (const [sNum, seasonData] of Object.entries(allSelections.seasons || {})) {
+          for (const epNum of Object.keys(seasonData.episodes || {})) {
+            status[`${sNum}-${epNum}`] = true;
+          }
+        }
+        episodeTorrentStatus = status;
+      }
+    } catch (e) {
+      console.error('[episode panel] failed to load torrent status:', e);
     }
   }
 
@@ -2215,7 +2279,6 @@
             {/if}
 
             <!-- Subtitle Submenu -->
-            {#if (videoMetadata?.subtitle_tracks && videoMetadata.subtitle_tracks.length > 0) || externalSubtitles.length > 0}
               <div class="submenu-container">
                 <button
                   class="player-track-option menu-item submenu-trigger"
@@ -2227,7 +2290,6 @@
                   <i class="ri-arrow-right-s-line"></i>
                 </button>
               </div>
-            {/if}
 
             <!-- Speed -->
             <div class="player-track-option menu-item speed-item">
@@ -2311,7 +2373,7 @@
         {/if}
 
         <!-- Subtitle Submenu (floating) -->
-        {#if showSubtitleSubmenu && ((videoMetadata?.subtitle_tracks && videoMetadata.subtitle_tracks.length > 0) || externalSubtitles.length > 0)}
+        {#if showSubtitleSubmenu}
           <div class="submenu" style="left: {subtitleSubmenuX}px; top: {subtitleSubmenuY}px;" bind:this={subtitleSubmenuElement}>
             <button
               class="player-track-option menu-item submenu-trigger"
@@ -2321,6 +2383,14 @@
                 <i class="ri-settings-4-line"></i> Customize
               </span>
               <i class="ri-arrow-right-s-line"></i>
+            </button>
+            <button
+              class="player-track-option menu-item"
+              on:click={loadSubtitleFromFile}
+            >
+              <span class="player-track-info">
+                <i class="ri-folder-open-line"></i> Load from file...
+              </span>
             </button>
             <div class="menu-divider"></div>
 
@@ -2377,8 +2447,8 @@
                   disabled={loadingSubtitle && selectedSubtitleTrack !== trackIndex}
                 >
                   <span class="player-track-info">
-                    {#if track.language}
-                      {@const countryCode = getCountryCode(track.language)}
+                    {#if track.lang || track.language}
+                      {@const countryCode = getCountryCode(track.lang || track.language)}
                       {#if countryCode}
                         <img 
                           src="https://flagsapi.com/{countryCode}/flat/64.png" 
@@ -2386,13 +2456,13 @@
                           class="track-flag"
                         />
                       {/if}
-                      <span class="player-track-lang">{track.language.toUpperCase()}</span>
+                      <span class="player-track-lang">{(track.lang || track.language).toUpperCase()}</span>
                     {:else}
                       <span class="player-track-lang">External {i + 1}</span>
                     {/if}
                   </span>
-                  {#if track.source === 'wyzie'}
-                    <span class="player-track-badge wyzie-badge">WYZIE</span>
+                  {#if track.source === 'subdl'}
+                    <span class="player-track-badge subdl-badge">SUBDL</span>
                   {:else}
                     <span class="player-track-badge">SRT</span>
                   {/if}
@@ -2538,10 +2608,10 @@
   {#if showEpisodesPanel && metadata && metadata.seasons}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <div class="episodes-island-backdrop" on:click={() => showEpisodesPanel = false}></div>
+    <div class="episodes-island-backdrop" transition:fade={{ duration: 300 }} on:click={() => showEpisodesPanel = false}></div>
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <div class="episodes-island" on:click|stopPropagation>
+    <div class="episodes-island" on:click|stopPropagation out:fade={{ duration: 300 }}>
       <div class="episodes-panel-header">
         <span class="episodes-panel-title">{metadata.name || metadata.title}</span>
         <button class="episodes-panel-close" on:click={() => showEpisodesPanel = false} title="Close">
@@ -2574,6 +2644,7 @@
             {@const epProgress = $watchProgressStore[epKey]}
             {@const epPct = epProgress?.duration ? (epProgress.currentTimestamp / epProgress.duration) * 100 : 0}
             {@const isCurrent = episodesPanelSeason === seasonNum && ep.episode_number === episodeNum}
+            {@const hasTorrent = !!episodeTorrentStatus[`${episodesPanelSeason}-${ep.episode_number}`]}
             <!-- svelte-ignore a11y-click-events-have-key-events -->
             <!-- svelte-ignore a11y-no-static-element-interactions -->
             <div
@@ -2598,6 +2669,9 @@
               <div class="episodes-panel-info">
                 <span class="episodes-panel-num">E{ep.episode_number}</span>
                 <span class="episodes-panel-name">{ep.name}</span>
+                {#if hasTorrent}
+                  <span class="ep-torrent-dot" title="Torrent assigned"><i class="ri-magnet-fill"></i></span>
+                {/if}
               </div>
             </div>
           {/each}

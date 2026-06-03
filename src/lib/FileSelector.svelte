@@ -1,6 +1,6 @@
 <script>
     import { createEventDispatcher } from "svelte";
-    import { fade, fly, slide } from "svelte/transition";
+    import { fade, scale, slide } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
     import { 
         findDifferingPatterns, 
@@ -256,8 +256,8 @@
 
 <!-- svelte-ignore a11y-click-events-have-key-events -->
 <!-- svelte-ignore a11y-no-static-element-interactions -->
-<div class="modal-overlay" transition:fade={{ duration: 150 }} on:click={close}>
-    <div class="modal-content" transition:fly={{ y: 30, duration: 250, easing: cubicOut }} on:click|stopPropagation>
+<div class="modal-overlay" transition:fade|global={{ duration: 400, easing: cubicOut }} on:click={close}>
+    <div class="modal-content" on:click|stopPropagation in:scale|global={{ start: 1.08, opacity: 1, duration: 400, easing: cubicOut }} out:scale|global={{ start: 1.08, opacity: 1, duration: 400, easing: cubicOut }}>
         <div class="modal-header">
             <div class="header-title">
                 <h3>Map Episode Files</h3>
@@ -457,8 +457,8 @@
 {#if showPreviewModal}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <div class="preview-overlay" transition:fade={{ duration: 100 }} on:click={() => showPreviewModal = false}>
-        <div class="preview-modal" transition:fly={{ y: 20, duration: 200, easing: cubicOut }} on:click|stopPropagation>
+    <div class="preview-overlay" transition:fade|global={{ duration: 400, easing: cubicOut }} on:click={() => showPreviewModal = false}>
+        <div class="preview-modal" on:click|stopPropagation in:scale|global={{ start: 1.08, opacity: 1, duration: 400, easing: cubicOut }} out:scale|global={{ start: 1.08, opacity: 1, duration: 400, easing: cubicOut }}>
             <div class="preview-header">
                 <h4>Mapped Files Preview</h4>
                 <button class="preview-close" on:click={() => showPreviewModal = false}>

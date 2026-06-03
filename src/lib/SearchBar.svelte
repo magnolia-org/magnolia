@@ -5,6 +5,7 @@
   
   export let searchActive = false;
   let searchQuery = '';
+  const isMac = typeof navigator !== 'undefined' && navigator.platform.startsWith('Mac');
   let searchResults = [];
   let searching = false;
   let searchTimeout;
@@ -129,8 +130,11 @@
   function handleFocus() {
     if (searchQuery.length === 0 && recentSearches.length > 0) {
       showRecent = true;
-    } else if (searchQuery.length >= 2) {
-      performSearch();
+    } else if (searchQuery.length > 0) {
+      searchActive = true;
+      if (searchQuery.length >= 2) {
+        performSearch();
+      }
     }
   }
 
@@ -221,7 +225,11 @@
     />
     {#if !searchActive && searchQuery.length === 0}
       <div class="search-shortcut">
-        <kbd>Ctrl</kbd>+<kbd>K</kbd>
+        {#if isMac}
+          <kbd style="font-size-adjust: 0.8; " >⌘</kbd><kbd>K</kbd>
+        {:else}
+          <kbd>Ctrl</kbd>+<kbd>K</kbd>
+        {/if}
       </div>
     {/if}
   </div>

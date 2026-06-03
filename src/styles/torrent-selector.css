@@ -511,6 +511,18 @@ body {
   color: #10b981;
 }
 
+.col-seeds.seeds-high {
+  color: #10b981;
+}
+
+.col-seeds.seeds-med {
+  color: #f59e0b;
+}
+
+.col-seeds.seeds-low {
+  color: #ef4444;
+}
+
 .col-peers {
   width: 70px;
   text-align: left;

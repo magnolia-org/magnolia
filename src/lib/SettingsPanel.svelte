@@ -12,13 +12,34 @@
   let showSkipPrompts = true;
   let hideRecommendations = false;
   let checkForUpdates = true;
+  let subtitleLanguage = '';
   let settingsPanel;
   let playerDropdownOpen = false;
+  let langDropdownOpen = false;
   let settingsLoaded = false;
   
   const playerOptions = [
     { value: 'mpv', label: 'MPV' },
     { value: 'vlc', label: 'VLC' }
+  ];
+
+  const langOptions = [
+    { value: '', label: 'Disabled', flag: null },
+    { value: 'en', label: 'English', flag: 'GB' },
+    { value: 'es', label: 'Spanish', flag: 'ES' },
+    { value: 'fr', label: 'French', flag: 'FR' },
+    { value: 'de', label: 'German', flag: 'DE' },
+    { value: 'it', label: 'Italian', flag: 'IT' },
+    { value: 'pt', label: 'Portuguese', flag: 'PT' },
+    { value: 'ru', label: 'Russian', flag: 'RU' },
+    { value: 'nl', label: 'Dutch', flag: 'NL' },
+    { value: 'pl', label: 'Polish', flag: 'PL' },
+    { value: 'sv', label: 'Swedish', flag: 'SE' },
+    { value: 'tr', label: 'Turkish', flag: 'TR' },
+    { value: 'ar', label: 'Arabic', flag: 'SA' },
+    { value: 'ja', label: 'Japanese', flag: 'JP' },
+    { value: 'ko', label: 'Korean', flag: 'KR' },
+    { value: 'zh', label: 'Chinese', flag: 'CN' },
   ];
   
   onMount(async () => {
@@ -29,6 +50,7 @@
       showSkipPrompts = settings.show_skip_prompts;
       hideRecommendations = settings.hide_recommendations;
       checkForUpdates = settings.check_for_updates !== undefined ? settings.check_for_updates : true;
+      subtitleLanguage = settings.subtitle_language || '';
       console.log('loaded settings from backend:', settings);
       // Set loaded flag after a tick to ensure reactive statements see the loaded values
       await new Promise(resolve => setTimeout(resolve, 0));
@@ -48,7 +70,8 @@
         remember_preferences: rememberPreferences,
         show_skip_prompts: showSkipPrompts,
         hide_recommendations: hideRecommendations,
-        check_for_updates: checkForUpdates
+        check_for_updates: checkForUpdates,
+        subtitle_language: subtitleLanguage
       };
       await invoke('save_settings', { settings });
       console.log('settings saved to backend');
@@ -63,24 +86,31 @@
   // Auto-save when any setting changes (tracks the actual variables)
   $: if (settingsLoaded) {
     // This will re-run whenever externalPlayer, rememberPreferences, or showSkipPrompts change
-    externalPlayer, rememberPreferences, showSkipPrompts, hideRecommendations, checkForUpdates;
+    externalPlayer, rememberPreferences, showSkipPrompts, hideRecommendations, checkForUpdates, subtitleLanguage;
     saveSettings();
   }
+
+  $: selectedLangOption = langOptions.find(o => o.value === subtitleLanguage) ?? langOptions[0];
   
   function handleClickOutside(event) {
     if (settingsPanel && !settingsPanel.contains(event.target) && settingsActive) {
       closeSettings();
+      return;
     }
-    // Close dropdown if clicking outside of it but inside settings panel
-    const dropdown = settingsPanel?.querySelector('.custom-dropdown');
-    if (dropdown && !dropdown.contains(event.target) && playerDropdownOpen) {
-      playerDropdownOpen = false;
+    // Close dropdowns if clicking outside them
+    const dropdowns = settingsPanel?.querySelectorAll('.custom-dropdown') ?? [];
+    for (const dropdown of dropdowns) {
+      if (!dropdown.contains(event.target)) {
+        playerDropdownOpen = false;
+        langDropdownOpen = false;
+      }
     }
   }
   
   function closeSettings() {
     settingsActive = false;
     playerDropdownOpen = false;
+    langDropdownOpen = false;
     dispatch('close');
   }
   
@@ -91,11 +121,23 @@
   function togglePlayerDropdown(event) {
     event.stopPropagation();
     playerDropdownOpen = !playerDropdownOpen;
+    langDropdownOpen = false;
   }
   
   function selectPlayer(value) {
     externalPlayer = value;
     playerDropdownOpen = false;
+  }
+
+  function toggleLangDropdown(event) {
+    event.stopPropagation();
+    langDropdownOpen = !langDropdownOpen;
+    playerDropdownOpen = false;
+  }
+
+  function selectLang(value) {
+    subtitleLanguage = value;
+    langDropdownOpen = false;
   }
 </script>
 
@@ -195,6 +237,59 @@
             </label>
           </div>
         </div>
+
+        <div class="setting-item">
+          <div class="setting-label">
+            <span>Auto-select subtitle language</span>
+          </div>
+          <div class="setting-control">
+            <div class="custom-dropdown">
+              <button
+                class="dropdown-button"
+                on:click={toggleLangDropdown}
+                type="button"
+              >
+                {#if selectedLangOption?.flag}
+                  <img
+                    src="https://flagsapi.com/{selectedLangOption.flag}/flat/64.png"
+                    alt={selectedLangOption.label}
+                    class="dropdown-flag"
+                  />
+                {/if}
+                <span>{selectedLangOption?.label ?? 'Disabled'}</span>
+                <i class="ri-arrow-down-s-line dropdown-icon" class:open={langDropdownOpen}></i>
+              </button>
+              {#if langDropdownOpen}
+                <div class="dropdown-menu lang-dropdown-menu">
+                  {#each langOptions as option}
+                    <button
+                      class="dropdown-option"
+                      class:selected={option.value === subtitleLanguage}
+                      on:click|stopPropagation={() => selectLang(option.value)}
+                      type="button"
+                    >
+                      <span class="lang-option-left">
+                        {#if option.flag}
+                          <img
+                            src="https://flagsapi.com/{option.flag}/flat/64.png"
+                            alt={option.label}
+                            class="dropdown-flag"
+                          />
+                        {:else}
+                          <i class="ri-subtract-line dropdown-flag-placeholder"></i>
+                        {/if}
+                        {option.label}
+                      </span>
+                      {#if option.value === subtitleLanguage}
+                        <i class="ri-check-line"></i>
+                      {/if}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="about-link">
@@ -229,5 +324,31 @@
 
   .btn-link:hover {
     color: rgba(255, 255, 255, 0.6);
+  }
+
+  .dropdown-flag {
+    width: 16px;
+    height: 12px;
+    object-fit: cover;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+
+  .dropdown-flag-placeholder {
+    width: 16px;
+    text-align: center;
+    color: rgba(255, 255, 255, 0.25);
+    flex-shrink: 0;
+  }
+
+  .lang-dropdown-menu {
+    max-height: 220px;
+    overflow-y: auto;
+  }
+
+  .lang-option-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 </style>

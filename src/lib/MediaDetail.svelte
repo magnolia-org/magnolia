@@ -1,5 +1,7 @@
 <script>
   import { onMount, onDestroy } from "svelte";
+  import { fade, scale } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
   import {
     getMovieDetails,
     getTVDetails,
@@ -72,6 +74,7 @@
   let torrentManagerRefresh = 0;
   let torrentFileCache = {};
   let isPlayLoading = false;
+  let detectedIsAnime = false;
 
   $: {
     if (media && !media.media_type) {
@@ -86,9 +89,24 @@
     );
 
   const isAnime = () => {
-    if (!details || !details.genres) return false;
-    return details.genres.some(genre => genre.id === 16);
+    if (!details) return false;
+    // Authoritative check: TV series in the anime list
+    if (detectedIsAnime) return true;
+    // Fallback: Animation genre (genre ID 16)
+    return details.genres?.some(genre => genre.id === 16) ?? false;
   };
+
+  async function checkIsAnime() {
+    if (!media || media.media_type !== 'tv') {
+      detectedIsAnime = false;
+      return;
+    }
+    try {
+      detectedIsAnime = await invoke('check_is_anime', { tmdbId: media.id });
+    } catch (e) {
+      detectedIsAnime = false;
+    }
+  }
 
   function extractTorrentNameFromMagnet(magnetLink) {
     if (!magnetLink) return "";
@@ -131,6 +149,8 @@
     autoPlayTriggered = false; // Reset autoplay flag for new media
     selectedTorrentName = ""; // Reset torrent name for new media
     isPlayLoading = false;
+    detectedIsAnime = false;
+    checkIsAnime();
   }
 
   $: if (details) {
@@ -1891,27 +1911,17 @@
 {#if selectedEpisode}
   <!-- svelte-ignore a11y-click-events-have-key-events -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="episode-modal-overlay" on:click={() => (selectedEpisode = null)}>
+  <div class="episode-modal-overlay" on:click={() => (selectedEpisode = null)} transition:fade={{ duration: 400, easing: cubicOut }}>
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <div class="episode-modal" on:click={(e) => e.stopPropagation()}>
+    <div class="episode-modal" on:click={(e) => e.stopPropagation()} in:scale|global={{ start: 1.08, opacity: 0, duration: 400, easing: cubicOut }} out:scale|global={{ start: 1.08, opacity: 1, duration: 400, easing: cubicOut }}>
       <div class="episode-modal-header">
         <h3>
           Episode {selectedEpisode.episode_number}: {selectedEpisode.name}
         </h3>
         <div class="episode-modal-actions">
           <button
-            class="btn-standard secondary"
-            on:click={() => {
-              handlePlay(selectedSeason, selectedEpisode.episode_number, true);
-              selectedEpisode = null;
-            }}
-            title="Select a different torrent for this episode"
-          >
-            <i class="ri-refresh-line"></i> Change Torrent
-          </button>
-          <button
-            class="btn-standard primary"
+            class="btn-standard"
             disabled={isPlayLoading}
             on:click={() =>
               handlePlay(selectedSeason, selectedEpisode.episode_number)}

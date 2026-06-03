@@ -17,6 +17,8 @@ pub struct Settings {
     pub check_for_updates: bool,
     #[serde(default)]
     pub hide_chapter_markers: bool,
+    #[serde(default)]
+    pub subtitle_language: String,
 }
 
 fn default_true() -> bool {
@@ -33,6 +35,7 @@ impl Default for Settings {
             clear_cache_after_watch: false,
             check_for_updates: true,
             hide_chapter_markers: false,
+            subtitle_language: String::new(),
         }
     }
 }
@@ -56,7 +59,7 @@ impl SettingsManager {
                 Ok(content) => {
                     match serde_json::from_str(&content) {
                         Ok(settings) => {
-                            println!("loaded settings from {:?}", file_path);
+                            log::debug!("loaded settings from {:?}", file_path);
                             settings
                         }
                         Err(e) => {
@@ -71,7 +74,7 @@ impl SettingsManager {
                 }
             }
         } else {
-            println!("no settings file found, using defaults");
+            log::debug!("no settings file found, using defaults");
             Settings::default()
         };
 
@@ -88,7 +91,7 @@ impl SettingsManager {
         match serde_json::to_string_pretty(&settings) {
             Ok(content) => {
                 match fs::write(&self.file_path, content) {
-                    Ok(_) => println!("settings saved to {:?}", self.file_path),
+                    Ok(_) => log::debug!("settings saved to {:?}", self.file_path),
                     Err(e) => eprintln!("failed to write settings file: {}", e),
                 }
             }

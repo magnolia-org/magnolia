@@ -52,6 +52,7 @@
 
 body {
   font-family: 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  letter-spacing: -0.02em;
   background: var(--bg-primary);
   color: var(--text-primary);
   overflow: hidden;
@@ -727,7 +728,6 @@ pre {
     0 20px 60px rgba(0, 0, 0, 0.8);
   z-index: 11000;
   animation: slideDown 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  overflow: hidden;
 }
 
 .settings-header {
@@ -822,7 +822,7 @@ pre {
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--border-radius-lg);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
-  z-index: 10;
+  z-index: 12000;
   overflow: hidden;
   animation: slideDown 0.15s cubic-bezier(0.4, 0, 0.2, 1);
 }

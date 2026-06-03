@@ -120,4 +120,19 @@ impl TrackingManager {
             let _ = fs::write(&self.file_path, content);
         }
     }
+
+    pub async fn remove_all_by_magnet(&self, show_id: u32, magnet_link: String) {
+        let mut data = self.data.write().await;
+
+        if let Some(show) = data.shows.get_mut(&show_id) {
+            for season_data in show.seasons.values_mut() {
+                season_data.episodes.retain(|_, ep| ep.magnet_link != magnet_link);
+            }
+        }
+
+        // Persist to disk
+        if let Ok(content) = serde_json::to_string_pretty(&*data) {
+            let _ = fs::write(&self.file_path, content);
+        }
+    }
 }

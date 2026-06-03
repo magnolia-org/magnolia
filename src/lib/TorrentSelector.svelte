@@ -1,7 +1,7 @@
 <script>
     import { createEventDispatcher, onDestroy } from "svelte";
     import { fade, scale } from "svelte/transition";
-    import { sineOut } from 'svelte/easing';
+    import { cubicOut } from 'svelte/easing';
     import { getTrackerPreference, setTrackerPreference } from "./stores/watchHistoryStore.js";
     import { open } from "@tauri-apps/plugin-dialog";
     import { readFile } from "@tauri-apps/plugin-fs";
@@ -395,8 +395,8 @@
 
 <!-- svelte-ignore a11y-click-events-have-key-events -->
 <!-- svelte-ignore a11y-no-static-element-interactions -->
-<div class="modal-overlay" transition:fade on:click={close}>
-    <div class="modal-content" in:scale={{ duration: 180, start: 0.94 }} out:scale={{ duration: 220, start: 0.8, easing: sineOut }} on:click|stopPropagation class:is-loading={loading}>
+<div class="modal-overlay" transition:fade|global={{ duration: 400, easing: cubicOut }} on:click={close}>
+    <div class="modal-content" on:click|stopPropagation class:is-loading={loading} in:scale|global={{ start: 1.08, opacity: 1, duration: 400, easing: cubicOut }} out:scale|global={{ start: 1.08, opacity: 1, duration: 400, easing: cubicOut }}>
         <div class="modal-header">
             <div class="header-title">
                 <h3>Select a Torrent</h3>
@@ -577,7 +577,7 @@
                                 {/if}
                             </div>
                             <div class="col-size">{torrent.size}</div>
-                            <div class="col-seeds {torrent.seeds > 0 ? 'has-seeds' : ''}">{torrent.seeds}</div>
+                            <div class="col-seeds {torrent.seeds >= 10 ? 'seeds-high' : torrent.seeds >= 3 ? 'seeds-med' : torrent.seeds > 0 ? 'seeds-low' : ''}">{torrent.seeds}</div>
                             <div class="col-peers">{torrent.peers}</div>
                         </div>
                     {/each}

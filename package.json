@@ -24,12 +24,11 @@
     "vite": "^8.0.13"
   },
   "dependencies": {
-    "@fontsource-variable/geist-mono": "^5.2.7",
-    "@fontsource/geist-sans": "^5.2.5",
     "@tauri-apps/api": "^2.9.0",
     "@tauri-apps/plugin-dialog": "^2.4.2",
     "@tauri-apps/plugin-fs": "^2.4.4",
     "@tauri-apps/plugin-shell": "^2.0.0",
+    "geist": "^1.7.1",
     "remixicon": "^4.7.0"
   }
 }

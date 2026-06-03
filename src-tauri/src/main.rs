@@ -7,11 +7,14 @@ mod search;
 mod torrent;
 mod tracking;
 mod watch_history;
+mod watch_progress;
+mod my_list;
 mod track_preferences;
 mod settings;
 mod logger;
 mod cache_metadata;
 mod subtitles;
+mod anime_list;
 
 use search::{nyaa::NyaaProvider, limetorrents::LimeTorrentsProvider, piratebay::PirateBayProvider,
              SearchProvider};
@@ -22,8 +25,11 @@ use tauri::{Manager, State};
 use torrent::TorrentManager;
 use tracking::TrackingManager;
 use watch_history::{WatchHistoryManager, WatchHistoryItem};
+use watch_progress::WatchProgressManager;
+use my_list::MyListManager;
 use track_preferences::TrackPreferencesManager;
 use settings::{SettingsManager, Settings};
+use anime_list::AnimeListManager;
 use logger::Logger;
 use cache_metadata::CacheMetadataManager;
 
@@ -42,9 +48,13 @@ async fn load_file(
     #[allow(non_snake_case)] resumePosition: Option<f64>,
     #[allow(non_snake_case)] autoPlay: Option<bool>,
 ) -> Result<(), String> {
+    log::info!("[player-init] load_file: issuing loadfile to mpv, url={}", &path);
+    let t0 = std::time::Instant::now();
     let mpv = state.mpv_player.clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let lock_t = std::time::Instant::now();
         let guard = mpv.lock().map_err(|e| e.to_string())?;
+        log::info!("[player-init] load_file: mpv lock acquired in {:.3}s", lock_t.elapsed().as_secs_f64());
         let start_opt;
         let mut args: Vec<&str> = vec!["loadfile", &path, "replace"];
         if let Some(pos) = resumePosition {
@@ -54,6 +64,7 @@ async fn load_file(
             }
         }
         guard.command(&args);
+        log::info!("[player-init] load_file: loadfile command sent in {:.3}s total", t0.elapsed().as_secs_f64());
         let pause_val = if autoPlay.unwrap_or(true) { "no" } else { "yes" };
         guard.set_option_string("pause", pause_val);
         Ok(())
@@ -360,6 +371,31 @@ async fn remove_saved_selection(
 }
 
 #[tauri::command]
+async fn remove_torrent_all_assignments(
+    tracking: State<'_, TrackingManager>,
+    show_id: u32,
+    magnet_link: String,
+) -> Result<(), String> {
+    tracking.remove_all_by_magnet(show_id, magnet_link).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn check_is_anime(
+    anime_list: State<'_, Arc<AnimeListManager>>,
+    tmdb_id: u32,
+) -> Result<bool, String> {
+    Ok(anime_list.is_anime(tmdb_id).await)
+}
+
+#[tauri::command]
+async fn refresh_anime_list(
+    anime_list: State<'_, Arc<AnimeListManager>>,
+) -> Result<(), String> {
+    anime_list.refresh().await
+}
+
+#[tauri::command]
 async fn get_http_port(manager: State<'_, Arc<TorrentManager>>) -> Result<u16, String> {
     manager.get_http_port().await
 }
@@ -395,6 +431,73 @@ async fn clear_watch_history(
     watch_history: State<'_, WatchHistoryManager>,
 ) -> Result<(), String> {
     watch_history.clear().await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_my_list(
+    my_list: State<'_, MyListManager>,
+) -> Result<Vec<serde_json::Value>, String> {
+    Ok(my_list.get_list().await)
+}
+
+#[tauri::command]
+async fn set_my_list(
+    my_list: State<'_, MyListManager>,
+    items: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    my_list.set_list(items).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn toggle_my_list_item(
+    my_list: State<'_, MyListManager>,
+    item: serde_json::Value,
+) -> Result<Vec<serde_json::Value>, String> {
+    Ok(my_list.toggle_item(item).await)
+}
+
+#[tauri::command]
+async fn get_watch_progress(
+    watch_progress: State<'_, WatchProgressManager>,
+) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
+    Ok(watch_progress.get_all().await)
+}
+
+#[tauri::command]
+async fn set_watch_progress(
+    watch_progress: State<'_, WatchProgressManager>,
+    progress: std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), String> {
+    watch_progress.set_all(progress).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_watch_progress_entry(
+    watch_progress: State<'_, WatchProgressManager>,
+    key: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    watch_progress.update_entry(key, value).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn remove_watch_progress_entry(
+    watch_progress: State<'_, WatchProgressManager>,
+    key: String,
+) -> Result<(), String> {
+    watch_progress.remove_entry(key).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn clear_watch_progress(
+    watch_progress: State<'_, WatchProgressManager>,
+) -> Result<(), String> {
+    watch_progress.clear().await;
     Ok(())
 }
 
@@ -626,6 +729,16 @@ fn open_external_url(url: String) -> Result<(), String> {
 }
 
 fn main() {
+    // Default: info for our code, warn for librqbit peer churn noise.
+    // Override with RUST_LOG env var, e.g. RUST_LOG=debug or RUST_LOG=info,librqbit=error
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,librqbit=warn"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .try_init()
+        .ok();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -647,6 +760,19 @@ fn main() {
 
             let watch_history_manager = WatchHistoryManager::new(app_data_dir.clone());
             app.manage(watch_history_manager);
+
+            let my_list_manager = MyListManager::new(app_data_dir.clone());
+            app.manage(my_list_manager);
+
+            let watch_progress_manager = WatchProgressManager::new(app_data_dir.clone());
+            app.manage(watch_progress_manager);
+
+            let anime_list_manager = Arc::new(AnimeListManager::new(app_data_dir.clone()));
+            app.manage(anime_list_manager.clone());
+            let anime_refresh = anime_list_manager.clone();
+            tauri::async_runtime::spawn(async move {
+                anime_refresh.ensure_fresh().await;
+            });
 
             let track_preferences_manager = TrackPreferencesManager::new(app_data_dir.clone());
             app.manage(track_preferences_manager);
@@ -834,11 +960,22 @@ fn main() {
             get_saved_selection,
             get_all_torrent_selections,
             remove_saved_selection,
+            remove_torrent_all_assignments,
+            check_is_anime,
+            refresh_anime_list,
             get_http_port,
             add_watch_history_item,
             get_watch_history,
             remove_watch_history_item,
             clear_watch_history,
+            get_my_list,
+            set_my_list,
+            toggle_my_list_item,
+            get_watch_progress,
+            set_watch_progress,
+            update_watch_progress_entry,
+            remove_watch_progress_entry,
+            clear_watch_progress,
             save_track_preference,
             get_track_preference,
             save_settings,
@@ -852,7 +989,8 @@ fn main() {
             download_update,
             install_update,
             open_external_url,
-            subtitles::fetch_wyzie_subtitles,
+            subtitles::fetch_subtitles,
+            subtitles::download_subtitle,
             load_file,
             cycle_pause,
             seek_video,
