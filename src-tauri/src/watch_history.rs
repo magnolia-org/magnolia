@@ -17,6 +17,10 @@ pub struct WatchHistoryItem {
     pub current_season: Option<u32>,
     pub current_episode: Option<u32>,
     pub current_timestamp: Option<f64>,
+    #[serde(default)]
+    pub number_of_seasons: Option<u32>,
+    #[serde(default)]
+    pub last_season_episode_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

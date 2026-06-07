@@ -14,6 +14,7 @@ mod settings;
 mod logger;
 mod cache_metadata;
 mod subtitles;
+mod subtitle_packs;
 mod anime_list;
 
 use search::{nyaa::NyaaProvider, limetorrents::LimeTorrentsProvider, piratebay::PirateBayProvider,
@@ -991,6 +992,11 @@ fn main() {
             open_external_url,
             subtitles::fetch_subtitles,
             subtitles::download_subtitle,
+            subtitle_packs::import_subtitle_pack,
+            subtitle_packs::get_subtitle_pack_for_episode,
+            subtitle_packs::get_subtitle_pack_coverage,
+            subtitle_packs::remove_subtitle_pack_episode,
+            subtitle_packs::clear_subtitle_pack,
             load_file,
             cycle_pause,
             seek_video,

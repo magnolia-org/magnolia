@@ -43,13 +43,6 @@ $: if (scrollHost && infiniteScrollSentinel && !customItems && page < totalPages
 onMount(async () => {
   await loadItems();
 
-  const handleMouseButton = (e) => {
-    if (e.button === 3) { // Back button
-      e.preventDefault();
-      dispatch('close');
-    }
-  };
-
   const handleOverlayScroll = () => {
     if (!mainHeaderEl) return;
     const titlebarHeight = parseInt(
@@ -66,11 +59,8 @@ onMount(async () => {
   }
   handleOverlayScroll();
   setupInfiniteScroll();
-  
-  window.addEventListener('mouseup', handleMouseButton);
-  
+
   return () => {
-    window.removeEventListener('mouseup', handleMouseButton);
     if (scrollHost) {
       scrollHost.removeEventListener('scroll', handleOverlayScroll);
     }

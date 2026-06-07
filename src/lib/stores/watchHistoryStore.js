@@ -22,6 +22,8 @@ async function loadFromDisk() {
       current_season: item.current_season,
       current_episode: item.current_episode,
       current_timestamp: item.current_timestamp,
+      number_of_seasons: item.number_of_seasons ?? null,
+      last_season_episode_count: item.last_season_episode_count ?? null,
     }));
   } catch (error) {
     console.error('Error loading watch history from disk:', error);
@@ -48,9 +50,11 @@ function createWatchHistoryStore() {
         release_date: item.release_date || item.first_air_date || null,
         vote_average: item.vote_average || null,
         watched_at: Date.now(),
-        current_season: episodeData?.season || null,
-        current_episode: episodeData?.episode || null,
-        current_timestamp: episodeData?.timestamp || null,
+        current_season: episodeData?.season || item.currentSeason || null,
+        current_episode: episodeData?.episode || item.currentEpisode || null,
+        current_timestamp: episodeData?.timestamp || item.currentTimestamp || null,
+        number_of_seasons: item.number_of_seasons ?? null,
+        last_season_episode_count: item.last_season_episode_count ?? null,
       };
 
       try {

@@ -107,6 +107,7 @@
   let subtitleOffset = 0;
   let chapters = [];
   let externalSubtitles = [];
+  let localSubtitlePath = null;
   let loadingExternalSubs = false;
   let loadingSubtitle = false;
   let loadingAudio = false;
@@ -340,6 +341,21 @@
     }
   }
 
+  // Check for a local subtitle pack for this episode
+  $: {
+    if (mediaId && mediaType === "tv" && seasonNum != null && episodeNum != null) {
+      invoke("get_subtitle_pack_for_episode", {
+        showId: Number(mediaId),
+        season: Number(seasonNum),
+        episode: Number(episodeNum),
+      })
+        .then(path => { localSubtitlePath = path || null; })
+        .catch(() => { localSubtitlePath = null; });
+    } else {
+      localSubtitlePath = null;
+    }
+  }
+
   async function fetchEpisodeName() {
     if (!mediaId || seasonNum == null || episodeNum == null) return;
     try {
@@ -564,6 +580,8 @@
             }
             watchProgressStore.updateProgress(mediaId, mediaType, progressData);
             if (!watchHistoryAdded && metadata) {
+              const tvSeasons = metadata.seasons?.filter(s => s.season_number > 0) ?? [];
+              const lastSeason = tvSeasons.at(-1);
               const historyItem = {
                 id: mediaId,
                 media_type: mediaType,
@@ -572,6 +590,8 @@
                 backdrop_path: metadata.backdrop_path,
                 release_date: metadata.release_date || metadata.first_air_date,
                 vote_average: metadata.vote_average,
+                number_of_seasons: metadata.number_of_seasons ?? (tvSeasons.length || null),
+                last_season_episode_count: lastSeason?.episode_count ?? null,
                 ...progressData
               };
               watchHistoryStore.addItem(historyItem);
@@ -1171,6 +1191,10 @@
         const filePath = await invoke("download_subtitle", { url: track.url });
         await invoke("mpv_run_command", { args: ["sub-add", filePath, "select"] });
         selectedSubtitleLanguage = track.lang || track.language;
+      } else if (track.source === "local") {
+        // Local subtitle pack file — load directly from disk
+        await invoke("mpv_run_command", { args: ["sub-add", track.url, "select"] });
+        selectedSubtitleLanguage = null;
       } else {
         // Embedded subtitle — use mpv track id
         const subTrack = videoMetadata?.subtitle_tracks?.[trackIndex];
@@ -2436,10 +2460,30 @@
                 {/if}
               {/each}
             {/if}
+            {#if localSubtitlePath}
+              {@const embeddedCount = videoMetadata?.subtitle_tracks?.length || 0}
+              {@const localTrackIndex = embeddedCount + externalSubtitles.length}
+              {@const localTrack = { source: "local", url: localSubtitlePath, lang: null, language: null }}
+              <button
+                class="player-track-option menu-item"
+                class:active={selectedSubtitleTrack === localTrackIndex}
+                on:click={() => selectSubtitle(localTrack, localTrackIndex)}
+                disabled={loadingSubtitle && selectedSubtitleTrack !== localTrackIndex}
+              >
+                <span class="player-track-info">
+                  <i class="ri-closed-captioning-fill" style="color: var(--accent-color); font-size: 14px;"></i>
+                  <span class="player-track-lang">Local Pack</span>
+                </span>
+                <span class="player-track-badge local-badge">LOCAL</span>
+                {#if loadingSubtitle && selectedSubtitleTrack === localTrackIndex}
+                  <span class="loading-spinner-small"></span>
+                {/if}
+              </button>
+            {/if}
             {#if externalSubtitles.length > 0}
               {@const embeddedCount = videoMetadata?.subtitle_tracks?.length || 0}
               {#each externalSubtitles as track, i}
-                {@const trackIndex = embeddedCount + i}
+                {@const trackIndex = embeddedCount + (localSubtitlePath ? 1 : 0) + i}
                 <button
                   class="player-track-option menu-item"
                   class:active={selectedSubtitleTrack === trackIndex}

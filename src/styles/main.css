@@ -255,6 +255,20 @@ pre {
   pointer-events: none;
 }
 
+/* Series fully-watched badge — same pill as progress-badge with green tint */
+.progress-badge.watched-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #2ed573;
+  border-color: rgba(46, 213, 115, 0.25);
+}
+
+.progress-badge.watched-badge i {
+  font-size: 12px;
+  line-height: 1;
+}
+
 /* Progress Bar for media cards */
 .media-card .progress-bar {
   position: absolute;

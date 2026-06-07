@@ -159,7 +159,7 @@
 
 <div class="torrent-manager-overlay" transition:fade|global={{ duration: 400, easing: cubicOut }} on:click={close}>
   <div class="torrent-manager-modal" in:scale|global={{ start: 1.08, opacity: 0, duration: 400, easing: cubicOut }} out:scale|global={{ start: 1.08, opacity: 1, duration: 400, easing: cubicOut }} on:click|stopPropagation>
-    <div class="torrent-manager-header">
+    <div class="torrent-manager-header" class:with-border={isMovie}>
       <div class="header-left">
         <h2>Torrent Manager</h2>
         <span class="header-subtitle">{details?.title || details?.name || ""}</span>
@@ -168,25 +168,27 @@
 
     {#if !isMovie}
       <div class="tab-bar">
-        <button
-          class="tab-btn"
-          class:active={activeTab === "coverage"}
-          on:click={() => (activeTab = "coverage")}
-        >
-          <i class="ri-layout-grid-line"></i>
-          Coverage
-        </button>
-        <button
-          class="tab-btn"
-          class:active={activeTab === "torrents"}
-          on:click={() => (activeTab = "torrents")}
-        >
-          <i class="ri-magnet-line"></i>
-          Assigned Torrents
-          {#if uniqueTorrents.length > 0}
-            <span class="tab-badge">{uniqueTorrents.length}</span>
-          {/if}
-        </button>
+        <div class="tab-track">
+          <button
+            class="tab-btn"
+            class:active={activeTab === "coverage"}
+            on:click={() => (activeTab = "coverage")}
+          >
+            <i class="ri-layout-grid-line"></i>
+            Coverage
+          </button>
+          <button
+            class="tab-btn"
+            class:active={activeTab === "torrents"}
+            on:click={() => (activeTab = "torrents")}
+          >
+            <i class="ri-magnet-line"></i>
+            Assigned Torrents
+            {#if uniqueTorrents.length > 0}
+              <span class="tab-badge">{uniqueTorrents.length}</span>
+            {/if}
+          </button>
+        </div>
       </div>
     {/if}
 
@@ -367,8 +369,11 @@
     justify-content: space-between;
     align-items: center;
     padding: 20px 24px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
     flex-shrink: 0;
+  }
+
+  .torrent-manager-header.with-border {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
   }
 
   .header-left {
@@ -392,27 +397,36 @@
 
   .tab-bar {
     display: flex;
-    gap: 4px;
-    padding: 12px 24px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    background: rgba(255, 255, 255, 0.02);
+    padding: 10px 24px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    background: rgba(0, 0, 0, 0.15);
     flex-shrink: 0;
+  }
+
+  .tab-track {
+    display: inline-flex;
+    gap: 2px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: var(--border-radius-md);
+    padding: 3px;
   }
 
   .tab-btn {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 7px 14px;
+    gap: 7px;
+    padding: 7px 16px;
     background: transparent;
     border: 1px solid transparent;
-    color: var(--text-secondary);
+    border-radius: calc(var(--border-radius-md) - 3px);
+    color: var(--text-tertiary);
     font-size: 13px;
     font-weight: 500;
-    border-radius: var(--border-radius-sm);
     cursor: pointer;
     transition: all 0.15s ease;
     font-family: inherit;
+    white-space: nowrap;
   }
 
   .tab-btn i {
@@ -420,25 +434,27 @@
   }
 
   .tab-btn:hover {
-    background: rgba(255, 255, 255, 0.05);
-    color: var(--text-primary);
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.04);
   }
 
   .tab-btn.active {
-    background: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.1);
     border-color: rgba(255, 255, 255, 0.12);
     color: var(--text-primary);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
   }
 
   .tab-badge {
-    background: var(--accent-color);
-    color: #000;
+    background: rgba(211, 118, 195, 0.2);
+    color: var(--accent-color);
     font-size: 10px;
     font-weight: 700;
     padding: 1px 6px;
     border-radius: 10px;
     min-width: 18px;
     text-align: center;
+    border: 1px solid rgba(211, 118, 195, 0.3);
   }
 
   .torrent-manager-content {

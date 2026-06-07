@@ -376,10 +376,33 @@ function getProgressPercentage(item) {
   const key = `${item.id}-${item.media_type}`;
   const timestamp = item.current_timestamp || item.currentTimestamp;
   const progress = watchProgress?.[key] || (timestamp ? item : null);
-  
+
   if (!progress || !progress.currentTimestamp || !progress.duration) return 0;
-  
+
   return Math.min(100, Math.max(0, (progress.currentTimestamp / progress.duration) * 100));
+}
+
+function isSeriesFullyWatched(item) {
+  if (item.media_type !== 'tv') return false;
+
+  // Season/episode always lives in the progress store, not the history item
+  const key = `${item.id}-${item.media_type}`;
+  const progress = watchProgress?.[key];
+  if (!progress?.currentSeason || !progress?.currentEpisode) return false;
+
+  const { currentSeason, currentEpisode } = progress;
+
+  // If we have stored series-length metadata, require it to be the actual finale
+  const nos = item.number_of_seasons;
+  const lastEpCount = item.last_season_episode_count;
+  if (nos && lastEpCount && (currentSeason !== nos || currentEpisode !== lastEpCount)) return false;
+
+  // Use the episode-specific progress key for a more accurate percentage
+  const epKey = `${key}-S${currentSeason}-E${currentEpisode}`;
+  const ep = watchProgress?.[epKey] || progress;
+  if (!ep?.duration) return false;
+
+  return (ep.currentTimestamp / ep.duration) * 100 > 85;
 }
 
 function handleViewAll() {
@@ -426,9 +449,13 @@ function handleViewAll() {
 {#if item.poster_path}
 <img class="media-poster" src={getImageUrl(item.poster_path, 'w500')} alt={item.title || item.name} loading="lazy" />
 {#if isRecentlyWatched}
-  {@const progressInfo = getProgressInfo(item)}
-  {#if progressInfo}
-    <div class="progress-badge">{progressInfo}</div>
+  {#if isSeriesFullyWatched(item)}
+    <div class="progress-badge watched-badge"><i class="ri-checkbox-circle-fill"></i> Watched</div>
+  {:else}
+    {@const progressInfo = getProgressInfo(item)}
+    {#if progressInfo}
+      <div class="progress-badge">{progressInfo}</div>
+    {/if}
   {/if}
 {/if}
 {/if}

@@ -24,6 +24,7 @@
   import FileSelector from "./FileSelector.svelte";
   import ErrorModal from "./ErrorModal.svelte";
   import TorrentManager from "./TorrentManager.svelte";
+  import SubtitlePackManager from "./SubtitlePackManager.svelte";
 
   import { createEventDispatcher } from "svelte";
 
@@ -70,6 +71,7 @@
   let errorTitle = "Error";
 
   let showTorrentManager = false;
+  let showSubtitlePackManager = false;
   let showMoreMenu = false;
   let torrentManagerRefresh = 0;
   let torrentFileCache = {};
@@ -252,8 +254,8 @@
         },
       }),
     );
-
-    dispatch("close");
+    // The "viewAll" handler in App.svelte clears selectedMedia, so no
+    // dispatch("close") needed — it would race with the new viewAllData state.
   }
 
   async function loadSeasonDetails() {
@@ -531,6 +533,29 @@
 
   // Reactive variable for resume info
   $: resumeInfo = details ? getResumeInfo() : null;
+
+  // True when the last episode of the last season has been watched >85%
+  $: seriesWatched = (() => {
+    if (!details?.seasons || media?.media_type !== 'tv') return false;
+    const seasons = details.seasons.filter(s => s.season_number > 0);
+    if (!seasons.length) return false;
+    const lastSeason = seasons[seasons.length - 1];
+    const lastSeasonData = allSeasonsData[lastSeason.season_number];
+    if (!lastSeasonData?.episodes?.length) return false;
+    const lastEp = lastSeasonData.episodes[lastSeasonData.episodes.length - 1];
+    const key = `${details.id}-${media.media_type}-S${lastSeason.season_number}-E${lastEp.episode_number}`;
+    const prog = $watchProgressStore[key];
+    return !!(prog?.duration && prog.currentTimestamp / prog.duration > 0.85);
+  })();
+
+  function isSeasonWatched(seasonNum) {
+    const seasonData = allSeasonsData[seasonNum];
+    if (!seasonData?.episodes?.length) return false;
+    const lastEp = seasonData.episodes[seasonData.episodes.length - 1];
+    const key = `${details.id}-${media.media_type}-S${seasonNum}-E${lastEp.episode_number}`;
+    const prog = $watchProgressStore[key];
+    return !!(prog?.duration && prog.currentTimestamp / prog.duration > 0.85);
+  }
 
   function toggleSeason(seasonNumber) {
     if (selectedSeason === seasonNumber) {
@@ -1345,7 +1370,42 @@
     </button>
 
     {#if loading}
-      <div class="loading">Loading...</div>
+      <div class="detail-skeleton">
+        <div class="skeleton-backdrop"></div>
+        <div class="detail-content">
+          <div class="detail-header">
+            <div class="skeleton-poster skeleton-pulse"></div>
+            <div class="skeleton-info-wrapper">
+              <div class="skeleton-title skeleton-pulse"></div>
+              <div class="skeleton-tagline skeleton-pulse"></div>
+              <div class="skeleton-meta-row">
+                <div class="skeleton-meta-chip skeleton-pulse"></div>
+                <div class="skeleton-meta-chip skeleton-pulse"></div>
+                <div class="skeleton-meta-chip skeleton-pulse"></div>
+                <div class="skeleton-meta-chip skeleton-pulse"></div>
+              </div>
+              <div class="skeleton-genres-row">
+                <div class="skeleton-genre skeleton-pulse"></div>
+                <div class="skeleton-genre skeleton-pulse"></div>
+                <div class="skeleton-genre skeleton-pulse"></div>
+              </div>
+              <div class="skeleton-overview">
+                <div class="skeleton-line skeleton-pulse" style="width: 100%"></div>
+                <div class="skeleton-line skeleton-pulse" style="width: 92%"></div>
+                <div class="skeleton-line skeleton-pulse" style="width: 96%"></div>
+                <div class="skeleton-line skeleton-pulse" style="width: 85%"></div>
+                <div class="skeleton-line skeleton-pulse" style="width: 78%"></div>
+                <div class="skeleton-line skeleton-pulse" style="width: 60%"></div>
+              </div>
+              <div class="skeleton-actions-row">
+                <div class="skeleton-play-btn skeleton-pulse"></div>
+                <div class="skeleton-btn skeleton-pulse"></div>
+                <div class="skeleton-btn-icon skeleton-pulse"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     {:else if details}
       <div class="detail-backdrop">
         {#if details.backdrop_path}
@@ -1441,26 +1501,30 @@
                   disabled={isPlayLoading}
                   on:click={() => {
                     if (details.seasons && details.seasons.length > 0) {
-                      // Use resume info if available, otherwise default to S1E1
-                      if (resumeInfo && resumeInfo.season && resumeInfo.episode) {
+                      if (seriesWatched) {
+                        handlePlay(1, 1);
+                      } else if (resumeInfo && resumeInfo.season && resumeInfo.episode) {
                         handlePlay(resumeInfo.season, resumeInfo.episode);
                       } else {
                         handlePlay(1, 1);
                       }
                     } else {
-                      // Movie
                       handlePlay(0, 0);
                     }
                   }}
                 >
                   {#if isPlayLoading}
                     <i class="ri-loader-4-line spin"></i>
+                  {:else if seriesWatched}
+                    <i class="ri-repeat-line"></i>
                   {:else}
                     <i class="ri-play-fill"></i>
                   {/if}
                   <div class="play-btn-content">
-                    <span class="play-btn-main">{resumeInfo ? 'Resume' : 'Play'}</span>
-                    {#if resumeInfo && !isPlayLoading}
+                    <span class="play-btn-main">{seriesWatched ? 'Rewatch' : (resumeInfo ? 'Resume' : 'Play')}</span>
+                    {#if seriesWatched && !isPlayLoading}
+                      <span class="play-btn-resume-info">From S1E1</span>
+                    {:else if resumeInfo && !isPlayLoading}
                       <span class="play-btn-resume-info">{resumeInfo.label}</span>
                     {/if}
                   </div>
@@ -1487,6 +1551,12 @@
                         <i class="ri-refresh-line"></i>
                         <span>Reselect Torrent</span>
                       </button>
+                      {#if details?.seasons && details.seasons.length > 0}
+                        <button class="menu-item" on:click={() => { showSubtitlePackManager = true; showMoreMenu = false; }}>
+                          <i class="ri-closed-captioning-line"></i>
+                          <span>Subtitle Packs</span>
+                        </button>
+                      {/if}
                       <button class="menu-item" on:click={() => { openTmdbPage(); showMoreMenu = false; }}>
                         <i class="ri-external-link-line"></i>
                         <span>View on TMDB</span>
@@ -1573,12 +1643,15 @@
                       on:click={() => toggleSeason(season.season_number)}
                     >
                       <div class="accordion-title">
-                        <span class="season-name"
-                          >Season {season.season_number}</span
-                        >
-                        <span class="episode-count"
-                          >{season.episode_count} Episodes</span
-                        >
+                        <span class="season-name">Season {season.season_number}</span>
+                        {#if isSeasonWatched(season.season_number)}
+                          <span class="season-watched-badge">
+                            <i class="ri-checkbox-circle-fill"></i>
+                            Watched
+                          </span>
+                        {:else}
+                          <span class="episode-count">{season.episode_count} Episodes</span>
+                        {/if}
                       </div>
                       <i class="ri-arrow-down-s-line accordion-icon"></i>
                     </button>
@@ -1593,9 +1666,8 @@
                               {@const percentage = episodeProgress && episodeProgress.duration ? (episodeProgress.currentTimestamp / episodeProgress.duration) * 100 : 0}
                               {@const isWatched = percentage > 85}
                               
-                              <!-- svelte-ignore a11y-click-events-have-key-events -->
-                              <!-- svelte-ignore a11y-no-static-element-interactions -->
-                              <div
+                              <button
+                                type="button"
                                 class="episode-list-item"
                                 class:selected={selectedEpisode?.episode_number === episode.episode_number}
                                 class:watched={isWatched}
@@ -1615,7 +1687,7 @@
                                   
                                   {#if isWatched}
                                     <div class="watched-overlay">
-                                      <i class="ri-check-line"></i>
+                                      <i class="ri-checkbox-circle-fill"></i>
                                     </div>
                                   {:else if percentage > 0}
                                     <div class="progress-bar-container">
@@ -1626,7 +1698,7 @@
                                 <div class="episode-details">
                                   <div class="episode-top">
                                     <span class="episode-num">E{episode.episode_number}</span>
-                                    <span class="episode-name">{episode.name}</span>
+                                    <span class="episode-name" class:ep-watched-name={isWatched}>{episode.name}</span>
                                   </div>
                                   <div class="episode-meta">
                                     {#if episode.vote_average}
@@ -1639,9 +1711,9 @@
                                       <span>{episode.runtime}m</span>
                                     {/if}
                                   </div>
-                                  <p class="episode-overview">{episode.overview}</p>
+                                  <p class="episode-overview" class:ep-watched-overview={isWatched}>{episode.overview}</p>
                                 </div>
-                              </div>
+                              </button>
                             {/each}
                           </div>
                         {:else}
@@ -1661,9 +1733,8 @@
                       <div class="episodes-row">
                         {#if allSeasonsData[season.season_number]?.episodes}
                           {#each allSeasonsData[season.season_number].episodes as episode}
-                            <!-- svelte-ignore a11y-click-events-have-key-events -->
-                            <!-- svelte-ignore a11y-no-static-element-interactions -->
-                            <div
+                            <button
+                              type="button"
                               class="heatmap-cell loaded"
                               style="background: {episode.vote_average ? getRatingColor(episode.vote_average) : 'rgba(255,255,255,0.12)'}"
                               on:click={() => {
@@ -1677,7 +1748,7 @@
                               {episode.vote_average
                                 ? episode.vote_average.toFixed(1)
                                 : "—"}
-                            </div>
+                            </button>
                           {/each}
                         {:else if season.episode_count}
                           {#each Array(season.episode_count) as _, episodeIndex}
@@ -1854,44 +1925,46 @@
 
         {#if recommendations.length > 0}
           <div class="recommendations-section">
-            <h2 class="section-title">You May Also Like</h2>
+            <h2 class="section-title">More Like This</h2>
             <div class="recommendations-grid">
               {#each recommendations as rec}
-                <!-- svelte-ignore a11y-click-events-have-key-events -->
-                <!-- svelte-ignore a11y-no-static-element-interactions -->
-                <div
-                  class="recommendation-card"
+                <button
+                  type="button"
+                  class="media-card"
+                  style="--card-accent: var(--prominent-color)"
                   on:click={() =>
                     window.dispatchEvent(
                       new CustomEvent("openMediaDetail", { detail: rec }),
                     )}
                 >
-                  <div class="rec-poster">
-                    {#if rec.poster_path}
-                      <img
-                        src={getImageUrl(rec.poster_path, "w342")}
-                        alt={rec.title || rec.name}
-                      />
-                    {:else}
-                      <div class="poster-placeholder">
-                        <i class="ri-film-line"></i>
+                  {#if rec.poster_path}
+                    <img
+                      class="media-poster"
+                      src={getImageUrl(rec.poster_path, "w342")}
+                      alt={rec.title || rec.name}
+                      loading="lazy"
+                    />
+                  {:else}
+                    <div class="media-poster rec-placeholder">
+                      <i class="ri-film-line"></i>
+                    </div>
+                  {/if}
+                  <div class="media-content">
+                    <div class="media-info">
+                      <h4 class="media-title">{rec.title || rec.name}</h4>
+                      <div class="media-meta">
+                        {#if rec.release_date || rec.first_air_date}
+                          <span>{(rec.release_date || rec.first_air_date).split('-')[0]}</span>
+                        {/if}
+                        {#if rec.vote_average}
+                          <span class="rating-badge" style="background: {getRatingColor(rec.vote_average)}">
+                            {rec.vote_average.toFixed(1)}
+                          </span>
+                        {/if}
                       </div>
-                    {/if}
-                    {#if rec.vote_average}
-                      <div class="rec-rating-badge" style="background: {getRatingColor(rec.vote_average)}">
-                        {rec.vote_average.toFixed(1)}
-                      </div>
-                    {/if}
+                    </div>
                   </div>
-                  <div class="recommendation-info">
-                    <h4 class="rec-title">{rec.title || rec.name}</h4>
-                    {#if rec.release_date || rec.first_air_date}
-                      <span class="rec-year">
-                        {(rec.release_date || rec.first_air_date).split('-')[0]}
-                      </span>
-                    {/if}
-                  </div>
-                </div>
+                </button>
               {/each}
             </div>
           </div>
@@ -2049,5 +2122,14 @@
     on:selectTorrent={handleTorrentManagerSelect}
     on:close={handleTorrentManagerClose}
     on:openManualAssignment={handleTorrentManagerManualAssignment}
+  />
+{/if}
+
+{#if showSubtitlePackManager}
+  <SubtitlePackManager
+    {media}
+    {details}
+    {allSeasonsData}
+    on:close={() => (showSubtitlePackManager = false)}
   />
 {/if}

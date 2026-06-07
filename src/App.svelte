@@ -82,6 +82,12 @@
           savedScrollPosition = scrollContainer.scrollTop;
         }
       }
+      // Clear media history so pressing Back from the genre/keyword page
+      // always returns to home, not a previous detail view.
+      selectedMedia = null;
+      mediaHistory = [];
+      historyIndex = -1;
+      titleBarAccentColor = null;
       viewAllData = e.detail;
     });
 
@@ -141,7 +147,7 @@
             navigateBack();
           } else if (viewAllData) {
             e.preventDefault();
-            viewAllData = null;
+            navigateBack();
           } else if (showTorrentDebug) {
             e.preventDefault();
             showTorrentDebug = false;
@@ -224,6 +230,14 @@
           scrollContainer.scrollTop = savedScrollPosition;
         }
       });
+    } else if (viewAllData) {
+      viewAllData = null;
+      requestAnimationFrame(() => {
+        const scrollContainer = document.getElementById('main-content');
+        if (scrollContainer) {
+          scrollContainer.scrollTop = savedScrollPosition;
+        }
+      });
     }
   }
 
@@ -291,19 +305,22 @@
   {:else}
 
     <div class="content-scroll" id="main-content" class:blur={searchActive || settingsActive}>
+      {#if viewAllData}
+        <div style:display={selectedMedia ? 'none' : 'block'} style:pointer-events={selectedMedia ? 'none' : 'auto'}>
+          <ViewAll {...viewAllData} on:close={() => {
+            viewAllData = null;
+            requestAnimationFrame(() => {
+              const scrollContainer = document.getElementById('main-content');
+              if (scrollContainer) {
+                scrollContainer.scrollTop = savedScrollPosition;
+              }
+            });
+          }} />
+        </div>
+      {/if}
       {#if selectedMedia}
         <MediaDetail media={selectedMedia} on:close={navigateBack} />
-      {:else if viewAllData}
-        <ViewAll {...viewAllData} on:close={() => { 
-          viewAllData = null; 
-          requestAnimationFrame(() => {
-            const scrollContainer = document.getElementById('main-content');
-            if (scrollContainer) {
-              scrollContainer.scrollTop = savedScrollPosition;
-            }
-          });
-        }} />
-      {:else}
+      {:else if !viewAllData}
         <div class="dashboard">
           {#if !hideRecommendations}
             <RecommendationsCarousel />
