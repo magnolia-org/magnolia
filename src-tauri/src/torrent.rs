@@ -257,6 +257,26 @@ impl TorrentManager {
             return Err(e.into());
         }
 
+        // Boot-time cleanup: wipe any files left over from a previous session (including
+        // crash survivors where cleanup_all() never ran). Magnolia is a streaming app —
+        // no torrent data should persist across restarts.
+        match std::fs::read_dir(&download_dir) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        if let Err(e) = std::fs::remove_dir_all(&path) {
+                            tracing::warn!("Boot cleanup: failed to remove dir {:?}: {}", path, e);
+                        }
+                    } else if let Err(e) = std::fs::remove_file(&path) {
+                        tracing::warn!("Boot cleanup: failed to remove file {:?}: {}", path, e);
+                    }
+                }
+                tracing::info!("Boot cleanup: cleared stale files from {:?}", download_dir);
+            }
+            Err(e) => tracing::warn!("Boot cleanup: could not read download dir: {}", e),
+        }
+
         // Create session with fastresume enabled so the "all zeros" bitfield is persisted
         // after the first initial_check. On Windows, pread_exact via seek_read returns Ok()
         // on EOF rather than an error, so the initial_check has to SHA1-hash every piece

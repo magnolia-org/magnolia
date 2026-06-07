@@ -1991,6 +1991,10 @@
     mpvUnlisteners = [];
     // Stop mpv playback so the native layer goes dark
     await invoke("mpv_run_command", { args: ["stop"] }).catch(() => {});
+    // Release and delete torrent files for this session
+    if (handleId !== null && fileIndex !== null) {
+      await invoke("stop_stream", { handleId: Number(handleId), deleteFiles: true }).catch(() => {});
+    }
   });
 </script>
 
