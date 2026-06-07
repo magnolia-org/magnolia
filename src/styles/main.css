@@ -163,8 +163,8 @@ pre {
     transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
     box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   box-shadow: var(--shadow-highlight), var(--shadow-depth);
-  backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
   will-change: transform;
   display: inline-flex;
   align-items: center;
@@ -310,8 +310,8 @@ pre {
   gap: var(--spacing-md);
   box-shadow: var(--shadow-inset-highlight), var(--shadow-inset-depth);
   z-index: 10000;
-  backdrop-filter: blur(100px);
   -webkit-backdrop-filter: blur(100px);
+  backdrop-filter: blur(100px);
 }
 
 /* macOS specific titlebar padding for inset traffic lights */
@@ -329,8 +329,8 @@ pre {
   background: rgba(10, 10, 10, 0.7);
   border-bottom: none;
   box-shadow: none;
-  backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
 }
 
 .titlebar-left,
@@ -459,8 +459,8 @@ pre {
   cursor: pointer;
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   box-shadow: var(--shadow-highlight), var(--shadow-depth);
-  backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
   display: flex;
   align-items: center;
 }
@@ -481,8 +481,8 @@ pre {
     var(--shadow-depth),
     0 0 20px color-mix(in srgb, var(--accent-color) 20%, transparent);
   font-weight: 600;
-  backdrop-filter: blur(15px);
   -webkit-backdrop-filter: blur(15px);
+  backdrop-filter: blur(15px);
 }
 
 /* Layout Containers */

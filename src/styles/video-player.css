@@ -90,8 +90,8 @@
     justify-content: center;
     cursor: pointer;
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-    backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
     flex-shrink: 0;
     padding: 0;
 }
@@ -244,8 +244,8 @@
     white-space: nowrap;
     pointer-events: none;
     z-index: 30;
-    backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
 }
 
@@ -286,8 +286,8 @@
     justify-content: center;
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     border-radius: var(--border-radius-md);
-    backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
     flex-shrink: 0;
 }
 
@@ -367,8 +367,8 @@
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.15s cubic-bezier(0.4, 0, 0.2, 1);
-    backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
 }
 
@@ -441,8 +441,8 @@
     overflow-y: auto;
     overflow-x: visible;
     box-shadow: var(--shadow-highlight), var(--shadow-depth);
-    backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
     z-index: 100;
     animation: menuSlideIn 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     transform-origin: bottom right;
@@ -765,8 +765,8 @@
     align-items: center;
     justify-content: center;
     padding: var(--spacing-3xl);
-    backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
 }
 
 /* Loading Overlay */
@@ -830,8 +830,8 @@
     gap: 20px;
     padding: 24px;
     background: rgba(10, 10, 10, 0.88);
-    backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(20px);
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 16px;
     box-shadow: 0 24px 80px rgba(0, 0, 0, 0.7);
@@ -984,8 +984,8 @@
     font-weight: 500;
     cursor: pointer;
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-    backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
     z-index: 15;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
 }
@@ -1145,8 +1145,8 @@
     background: rgba(10, 10, 10, 0.98);
     border: 1px solid rgba(255, 255, 255, 0.15);
     border-radius: var(--border-radius-lg);
-    backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(20px);
     min-width: 280px;
     max-width: 450px;
     width: max-content;
@@ -1351,8 +1351,8 @@
     padding: 20px;
     background: var(--bg-primary);
     border: 1px solid rgba(255, 255, 255, 0.2);
-    backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
     box-shadow: var(--shadow-highlight), var(--shadow-depth);
     border-radius: var(--border-radius-md);
     z-index: 100;
@@ -1638,8 +1638,8 @@
     inset: 0;
     background: rgba(0, 0, 0, 0.45);
     z-index: 115;
-    backdrop-filter: blur(2px);
     -webkit-backdrop-filter: blur(2px);
+    backdrop-filter: blur(2px);
 }
 
 .episodes-island {
@@ -1650,8 +1650,8 @@
     width: min(520px, 90vw);
     max-height: 72vh;
     background: color-mix(in srgb, var(--bg-primary) 94%, transparent);
-    backdrop-filter: blur(28px);
     -webkit-backdrop-filter: blur(28px);
+    backdrop-filter: blur(28px);
     border: 1px solid rgba(255, 255, 255, 0.09);
     border-radius: 18px;
     box-shadow: 0 32px 100px rgba(0, 0, 0, 0.7);

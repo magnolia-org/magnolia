@@ -809,7 +809,7 @@ fn main() {
 
             // ── initialise libmpv and embed it under the WebView ──────────
             {
-                use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
+                use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
 
                 let wh = main_window
                     .window_handle()
