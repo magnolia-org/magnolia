@@ -4,29 +4,27 @@
   <p>
   <h1>Magnolia</h1>
   <p><strong>A beautiful, feature-rich torrent streaming client</strong></p>
-  <p><img height=800 alt="Magnolia's home page" src="https://github.com/user-attachments/assets/681eca13-b488-4f2a-aec5-e7f0dfb5426e"/></p>
+  <p><img height=800 alt="Magnolia's home page" src="https://github.com/user-attachments/assets/430bcd15-f9a0-4e8b-9827-cf91514afaca"/></p>
 </div>
 
 ## Features
 
-- Direct streaming of torrents without full download
+- Direct streaming of torrents
 - Search for media from multiple torrent providers directly in-app
     - Nyaa
     - LimeTorrents
     - ThePirateBay
     - EZTV
-- Advanced video player
-    - Full SRT and ASS subtitle support
-    - Audio track support
-    - Chapter support with automatic skip prompts
-    - Keyboard shortcuts
+- Video playback through mpv
+- Manage multiple torrents per season/episode for episodic media
+- Import subtitles individually or from a folder for a full series
 - Modern user interface
 - Watch progress tracking
 - Recommendations based on your "my list"
 
 ## Download
 ### Get the latest build [here](https://github.com/chwair/magnolia/releases/latest)
-(Windows only for now, MacOS and Linux support is planned)
+(Windows and MacOS (Apple Silicon) support, Linux support is planned)
 
 ## Building
 
@@ -46,25 +44,27 @@ cd magnolia
 # Install dependencies
 npm install
 
+# Install utils for soia
+npx run scripts/setup_runtime_libs.mjs
+
 # Run dev server
 npm run tauri:dev
 
 # Build for production
 npm run tauri:build
 ```
+
 ## Acknowledgments
 
 - [TMDB](https://www.themoviedb.org/)
+- [Soia](https://github.com/FengZeng/soia)
 - [rqbit](https://github.com/ikatson/rqbit)
-- [web-demuxer](https://github.com/bilibili/web-demuxer)
-- [SubtitlesOctopus](https://github.com/jellyfin/JavascriptSubtitlesOctopus)
-- [FFmpeg](https://ffmpeg.org/)
+- [mpv](https://github.com/mpv-player/mpv)
 - [Tauri](https://tauri.app/)
-- [Wyzie Subs](https://github.com/itzCozi/wyzie-subs)
 
 ## License
 
-MIT
+Magnolia is dual-licensed under MIT and GPL-3.0. If using components containing Soia, please include the GPL-3.0 license in your fork.
 
 ## Disclaimer
 
