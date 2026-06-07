@@ -45,7 +45,7 @@ cd magnolia
 npm install
 
 # Install utils for soia
-npx run scripts/setup_runtime_libs.mjs
+npm run setup:libs
 
 # Run dev server
 npm run tauri:dev
