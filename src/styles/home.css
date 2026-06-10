@@ -405,6 +405,84 @@
     box-shadow: 0 20px 100px -30px rgba(0, 0, 0, 0.55), 0 40px 120px -60px color-mix(in srgb, var(--prominent-color) 45%, rgba(0, 0, 0, 0.3));
 }
 
+/* Recommendations loading skeleton — same footprint as the featured card so
+   the page doesn't jump when real content arrives. */
+.recommendations-skeleton {
+    background: rgba(255, 255, 255, 0.015);
+}
+
+@keyframes rec-skeleton-shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+
+.rec-skeleton-pulse {
+    background: linear-gradient(90deg,
+        rgba(255, 255, 255, 0.04) 25%,
+        rgba(255, 255, 255, 0.09) 50%,
+        rgba(255, 255, 255, 0.04) 75%
+    );
+    background-size: 200% 100%;
+    animation: rec-skeleton-shimmer 1.8s infinite;
+    border-radius: var(--border-radius-md);
+}
+
+.rec-skeleton-poster {
+    width: 280px;
+    aspect-ratio: 2 / 3;
+    flex-shrink: 0;
+    border-radius: var(--border-radius-lg);
+}
+
+.rec-skeleton-info {
+    flex: 1;
+    max-width: 640px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-md);
+}
+
+.rec-skeleton-title {
+    height: 44px;
+    width: 65%;
+}
+
+.rec-skeleton-meta {
+    height: 22px;
+    width: 35%;
+}
+
+.rec-skeleton-tags {
+    display: flex;
+    gap: var(--spacing-sm);
+}
+
+.rec-skeleton-tag {
+    height: 24px;
+    width: 76px;
+    border-radius: 999px;
+}
+
+.rec-skeleton-overview {
+    height: 16px;
+    width: 90%;
+}
+
+.rec-skeleton-overview.short {
+    width: 60%;
+}
+
+.rec-skeleton-actions {
+    display: flex;
+    gap: var(--spacing-md);
+    margin-top: var(--spacing-md);
+}
+
+.rec-skeleton-btn {
+    height: 42px;
+    width: 110px;
+}
+
 .shuffle-btn-top {
     position: absolute;
     top: var(--spacing-lg);

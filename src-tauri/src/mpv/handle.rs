@@ -83,6 +83,18 @@ impl MpvHandle {
         set_str("osc", "no");
         set_str("osd-level", "0");
         set_str("demuxer-lavf-o", "reconnect=1,reconnect_streamed=1");
+        // Aggressive demuxer cache for torrent streaming: mpv reading ahead on
+        // the local HTTP stream is what pulls librqbit's piece-priority window
+        // forward, so a deep readahead keeps the swarm busy ahead of playback.
+        // The back-buffer lets short rewinds replay from RAM instead of
+        // re-requesting ranges (which would reopen the torrent stream).
+        set_str("cache", "yes");
+        set_str("demuxer-max-bytes", "256MiB");
+        set_str("demuxer-max-back-bytes", "64MiB");
+        set_str("demuxer-readahead-secs", "600");
+        // Start playback as soon as the first frames are decodable instead of
+        // waiting for the cache to pre-fill.
+        set_str("cache-pause-initial", "no");
         // Disable automatic subtitle selection so the UI and mpv stay in sync.
         // loadTrackPreferences() will apply any saved preference after file load.
         set_str("sub-auto", "no");

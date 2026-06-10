@@ -55,9 +55,11 @@
   let playbackRate = 1.0;
   let currentTime = 0;
   let duration = 0;
-  let bufferedRanges = [];
+  let rawSeekableRanges = []; // [{start, end}] in seconds, from mpv's demuxer cache
+  $: bufferedRanges = deriveBufferedRanges(rawSeekableRanges, duration);
   let torrentProgress = 0;
-  let torrentBufferRanges = [];
+  let torrentPieceRanges = []; // [{start, width}] in %, from the torrent's have-pieces bitfield
+  let pieceRangeInterval = null;
   let volume = 1;
   let muted = false;
   let fullscreen = false;
@@ -494,11 +496,30 @@
     // Volume will be synced via reactive statements
   }
 
+  let wasMaximizedBeforeFullscreen = false;
+
   async function toggleFullscreen() {
     const appWindow = getCurrentWindow();
+    const isWindows = navigator.userAgent.includes("Windows");
     try {
-      await appWindow.setFullscreen(!fullscreen);
-      fullscreen = !fullscreen;
+      if (!fullscreen) {
+        // Windows WebView2 glitches when fullscreening a maximized window —
+        // restore it first, then fullscreen (and re-maximize on exit).
+        wasMaximizedBeforeFullscreen = false;
+        if (isWindows && (await appWindow.isMaximized())) {
+          wasMaximizedBeforeFullscreen = true;
+          await appWindow.unmaximize();
+        }
+        await appWindow.setFullscreen(true);
+        fullscreen = true;
+      } else {
+        await appWindow.setFullscreen(false);
+        fullscreen = false;
+        if (isWindows && wasMaximizedBeforeFullscreen) {
+          wasMaximizedBeforeFullscreen = false;
+          await appWindow.maximize();
+        }
+      }
     } catch (err) {
       console.error("Fullscreen error:", err);
     }
@@ -545,6 +566,35 @@
     setTimeout(() => {
       justSeeked = false;
     }, 500);
+  }
+
+  // Convert mpv's seekable ranges (seconds) into clamped, merged percent
+  // segments for the seek bar. Merging close ranges and dropping sub-pixel
+  // slivers keeps the bar from flickering as the cache state updates.
+  function deriveBufferedRanges(ranges, dur) {
+    if (!dur || !isFinite(dur) || dur <= 0 || !ranges || ranges.length === 0) return [];
+    const sorted = ranges
+      .map((r) => ({
+        start: Math.max(0, Math.min(r.start, dur)),
+        end: Math.max(0, Math.min(r.end, dur)),
+      }))
+      .filter((r) => r.end > r.start)
+      .sort((a, b) => a.start - b.start);
+    const merged = [];
+    for (const r of sorted) {
+      const last = merged[merged.length - 1];
+      if (last && r.start <= last.end + 0.5) {
+        last.end = Math.max(last.end, r.end);
+      } else {
+        merged.push({ ...r });
+      }
+    }
+    return merged
+      .map((r) => ({
+        start: (r.start / dur) * 100,
+        width: ((r.end - r.start) / dur) * 100,
+      }))
+      .filter((r) => r.width >= 0.15);
   }
 
   function handleMpvProgress(payload) {
@@ -1909,6 +1959,10 @@
       handleMpvProgress(event.payload);
     }));
 
+    mpvUnlisteners.push(await listen("mpv-seekable-ranges", (event) => {
+      rawSeekableRanges = event.payload?.ranges || [];
+    }));
+
     mpvUnlisteners.push(await listen("mpv-tracks-update", (event) => {
       const tracks = event.payload.tracks || [];
       const subtitleTracks = tracks.filter(t => t.track_type === "sub");
@@ -1934,6 +1988,7 @@
       loading = false;
       playing = true;
       loadingPhase = "ready";
+      rawSeekableRanges = []; // stale ranges from the previous file
       if (initialTimestamp > 0 && !hasSeekedToInitial) {
         hasSeekedToInitial = true;
         await invoke("seek_video", { seconds: initialTimestamp }).catch(() => {});
@@ -1965,6 +2020,28 @@
 
     fetchEpisodeName();
 
+    // Poll the torrent's piece bitfield so the seek bar can show what's
+    // already on disk (the faint layer under mpv's demuxer-cache segments).
+    pieceRangeInterval = setInterval(async () => {
+      if (handleId === null || fileIndex === null) return;
+      try {
+        const ranges = await invoke("get_torrent_piece_ranges", {
+          handleId: Number(handleId),
+          fileIndex: Number(fileIndex),
+        });
+        torrentPieceRanges = ranges
+          .map(([s, e]) => ({ start: s * 100, width: (e - s) * 100 }))
+          .filter((r) => r.width >= 0.1);
+        // File fully downloaded — no point polling further.
+        if (torrentPieceRanges.length === 1 && torrentPieceRanges[0].width >= 99.9) {
+          clearInterval(pieceRangeInterval);
+          pieceRangeInterval = null;
+        }
+      } catch {
+        // Torrent not in session yet (still preparing) — keep polling.
+      }
+    }, 2000);
+
     if (handleId !== null && fileIndex !== null) {
       startStreamProcess();
     } else {
@@ -1974,6 +2051,7 @@
 
   onDestroy(async () => {
     clearInterval(pollInterval);
+    if (pieceRangeInterval) clearInterval(pieceRangeInterval);
     if (progressTrackingInterval) clearInterval(progressTrackingInterval);
     if (skipButtonTimeout) clearTimeout(skipButtonTimeout);
     if (skipTimerInterval) clearInterval(skipTimerInterval);
@@ -1991,10 +2069,6 @@
     mpvUnlisteners = [];
     // Stop mpv playback so the native layer goes dark
     await invoke("mpv_run_command", { args: ["stop"] }).catch(() => {});
-    // Release and delete torrent files for this session
-    if (handleId !== null && fileIndex !== null) {
-      await invoke("stop_stream", { handleId: Number(handleId), deleteFiles: true }).catch(() => {});
-    }
   });
 </script>
 
@@ -2017,6 +2091,7 @@
     <div class="loading-overlay">
       {#if metadata?.backdrop_path}
         <img src={getImageUrl(metadata.backdrop_path, 'w1280')} alt="" class="loading-backdrop-img" aria-hidden="true" />
+        <img src={getImageUrl(metadata.backdrop_path, 'w1280')} alt="" class="loading-backdrop-img clone" aria-hidden="true" />
       {/if}
       <div class="loading-card">
         {#if metadata?.poster_path}
@@ -2121,18 +2196,18 @@
       on:mousemove={handleProgressHover}
       on:mouseleave={handleProgressLeave}
     >
-      <div
-        class="progress-torrent"
-        style="width: {torrentProgress}%"
-      ></div>
-      <!-- Segmented buffer hidden due to visual bugs
+      {#each torrentPieceRanges as range}
+        <div
+          class="progress-torrent"
+          style="left: {range.start}%; width: {range.width}%"
+        ></div>
+      {/each}
       {#each bufferedRanges as range}
         <div
           class="progress-buffered"
           style="left: {range.start}%; width: {range.width}%"
         ></div>
       {/each}
-      -->
       <div
         class="progress-filled"
         style="width: {((isSeeking ? seekPreviewTime : currentTime) /
@@ -2431,37 +2506,35 @@
             </button>
             {#if videoMetadata?.subtitle_tracks && videoMetadata.subtitle_tracks.length > 0}
               {#each videoMetadata.subtitle_tracks as track, i}
-                {#if (track.codec || '').toLowerCase() !== 'hdmv_pgs_subtitle'}
-                  <button
-                    class="player-track-option menu-item"
-                    class:active={selectedSubtitleTrack === i}
-                    on:click={() => selectSubtitle(track, i)}
-                    disabled={loadingSubtitle && selectedSubtitleTrack !== i}
-                  >
-                    <span class="player-track-info">
-                      {#if track.lang}
-                        {@const countryCode = getCountryCode(track.lang)}
-                        {#if countryCode}
-                          <img 
-                            src="https://flagcdn.com/w40/{countryCode.toLowerCase()}.png" 
-                            alt={track.lang}
-                            class="track-flag"
-                          />
-                        {/if}
-                        <span class="player-track-lang">{track.lang.toUpperCase()}</span>
-                      {:else}
-                        <span class="player-track-lang">Subtitle {i + 1}</span>
+                <button
+                  class="player-track-option menu-item"
+                  class:active={selectedSubtitleTrack === i}
+                  on:click={() => selectSubtitle(track, i)}
+                  disabled={loadingSubtitle && selectedSubtitleTrack !== i}
+                >
+                  <span class="player-track-info">
+                    {#if track.lang}
+                      {@const countryCode = getCountryCode(track.lang)}
+                      {#if countryCode}
+                        <img
+                          src="https://flagcdn.com/w40/{countryCode.toLowerCase()}.png"
+                          alt={track.lang}
+                          class="track-flag"
+                        />
                       {/if}
-                      {#if track.title}
-                        <span class="player-track-detail">{track.title}</span>
-                      {/if}
-                    </span>
-                    <span class="player-track-badge">{track.codec || 'MKV'}</span>
-                    {#if loadingSubtitle && selectedSubtitleTrack === i}
-                      <span class="loading-spinner-small"></span>
+                      <span class="player-track-lang">{track.lang.toUpperCase()}</span>
+                    {:else}
+                      <span class="player-track-lang">Subtitle {i + 1}</span>
                     {/if}
-                  </button>
-                {/if}
+                    {#if track.title}
+                      <span class="player-track-detail">{track.title}</span>
+                    {/if}
+                  </span>
+                  <span class="player-track-badge">{(track.codec || '').toLowerCase() === 'hdmv_pgs_subtitle' ? 'PGS' : (track.codec || 'MKV')}</span>
+                  {#if loadingSubtitle && selectedSubtitleTrack === i}
+                    <span class="loading-spinner-small"></span>
+                  {/if}
+                </button>
               {/each}
             {/if}
             {#if localSubtitlePath}

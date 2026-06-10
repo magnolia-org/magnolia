@@ -40,7 +40,7 @@ macro_rules! aframe {
 
 pub mod api;
 mod api_error;
-mod bitv;
+pub mod bitv; // Magnolia patch: public so the app can read the have-pieces bitfield
 mod bitv_factory;
 mod blocklist;
 mod chunk_tracker;

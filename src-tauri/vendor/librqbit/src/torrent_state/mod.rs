@@ -265,6 +265,15 @@ impl ManagedTorrent {
         }
     }
 
+    /// Run a closure over the downloaded-pieces bitfield (Magnolia patch:
+    /// public access so the app can render per-piece progress in its UI).
+    pub fn with_have_pieces<R>(
+        &self,
+        f: impl FnOnce(&dyn crate::bitv::BitV) -> R,
+    ) -> anyhow::Result<R> {
+        self.with_chunk_tracker(|ct| f(ct.get_have_pieces()))
+    }
+
     /// Get the live state if the torrent is live.
     pub fn live(&self) -> Option<Arc<TorrentStateLive>> {
         let g = self.locked.read();

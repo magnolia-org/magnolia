@@ -947,6 +947,7 @@ fn main() {
             torrent::list_torrents,
             torrent::prepare_stream,
             torrent::get_stream_status,
+            torrent::get_torrent_piece_ranges,
             torrent::stop_stream,
             torrent::wipe_all_torrent_files,
             torrent::pause_torrent,

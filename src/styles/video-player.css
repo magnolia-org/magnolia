@@ -781,6 +781,7 @@
     align-items: center;
     justify-content: center;
     z-index: 50;
+    overflow: hidden;
 }
 
 .loading-overlay::before {
@@ -809,17 +810,37 @@
     pointer-events: none;
 }
 
+/* Oversized square centered on the viewport so the image keeps covering the
+   screen at any rotation angle. Blur + slow rotation reads as an ambient
+   swirl of the backdrop's colors behind the grid. */
 .loading-backdrop-img {
     position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
+    top: 50%;
+    left: 50%;
+    width: 150vmax;
+    height: 150vmax;
+    margin: -75vmax 0 0 -75vmax;
     object-fit: cover;
     opacity: 1;
     filter: blur(48px) brightness(20%) saturate(70%);
-    transform: scale(1.1);
     pointer-events: none;
     z-index: 0;
+    animation: loading-backdrop-spin 90s linear infinite;
+    will-change: transform;
+}
+
+/* Counter-rotating clone blended on top for subtle depth. */
+.loading-backdrop-img.clone {
+    opacity: 0.5;
+    mix-blend-mode: screen;
+    filter: blur(72px) brightness(16%) saturate(85%);
+    animation-duration: 140s;
+    animation-direction: reverse;
+}
+
+@keyframes loading-backdrop-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
 }
 
 .loading-card {

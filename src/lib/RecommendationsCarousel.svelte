@@ -373,6 +373,29 @@ function getGenres(item) {
       <p>Add movies and shows to My List to get personalized recommendations</p>
     </div>
   </div>
+{:else if loading}
+  <div class="recommendations-featured recommendations-skeleton" aria-hidden="true">
+    <div class="featured-content">
+      <div class="featured-header">
+        <div class="rec-skeleton-poster rec-skeleton-pulse"></div>
+        <div class="rec-skeleton-info">
+          <div class="rec-skeleton-title rec-skeleton-pulse"></div>
+          <div class="rec-skeleton-meta rec-skeleton-pulse"></div>
+          <div class="rec-skeleton-tags">
+            <span class="rec-skeleton-tag rec-skeleton-pulse"></span>
+            <span class="rec-skeleton-tag rec-skeleton-pulse"></span>
+            <span class="rec-skeleton-tag rec-skeleton-pulse"></span>
+          </div>
+          <div class="rec-skeleton-overview rec-skeleton-pulse"></div>
+          <div class="rec-skeleton-overview short rec-skeleton-pulse"></div>
+          <div class="rec-skeleton-actions">
+            <span class="rec-skeleton-btn rec-skeleton-pulse"></span>
+            <span class="rec-skeleton-btn rec-skeleton-pulse"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 {:else if !loading && displayedRecommendations.length > 0 && currentItem}
   <div class="recommendations-featured" style="--backdrop-color: {backdropColor}; --prominent-color: {prominentColor}; --text-color: {textColor}">
     <div class="featured-backdrop">

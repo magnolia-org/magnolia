@@ -82,6 +82,26 @@ struct EndFilePayload {
 }
 
 #[derive(Serialize, Clone)]
+struct SeekableRange {
+    start: f64,
+    end: f64,
+}
+
+#[derive(Serialize, Clone)]
+struct SeekableRangesPayload {
+    ranges: Vec<SeekableRange>,
+}
+
+/// Quantized comparison so we only emit when a range boundary moved by a
+/// visible amount (>0.5s) rather than on every cache-state tick.
+fn ranges_roughly_equal(a: &[(f64, f64)], b: &[(f64, f64)]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|((s1, e1), (s2, e2))| (s1 - s2).abs() < 0.5 && (e1 - e2).abs() < 0.5)
+}
+
+#[derive(Serialize, Clone)]
 struct MediaTrack {
     id: i64,
     track_type: String,
@@ -420,6 +440,7 @@ pub(super) fn mpv_event_loop(
     let mut seek_from_time_pos: f64 = 0.0;
     let mut seek_from_buffered_pos: f64 = 0.0;
     let mut last_seekable_ranges: Vec<(f64, f64)> = Vec::new();
+    let mut last_emitted_seekable_ranges: Vec<(f64, f64)> = Vec::new();
     let media_title_name = CString::new("media-title").expect("Property name contains null byte");
     let hwdec_current_name =
         CString::new("hwdec-current").expect("Property name contains null byte");
@@ -777,6 +798,26 @@ pub(super) fn mpv_event_loop(
                                     last_seekable_ranges = parse_seekable_ranges(&json_cache_state);
                                     last_download_speed_bps =
                                         extract_download_speed_bps(&json_cache_state);
+                                    if !ranges_roughly_equal(
+                                        &last_seekable_ranges,
+                                        &last_emitted_seekable_ranges,
+                                    ) {
+                                        last_emitted_seekable_ranges =
+                                            last_seekable_ranges.clone();
+                                        emit_event(
+                                            &app_handle,
+                                            "mpv-seekable-ranges",
+                                            SeekableRangesPayload {
+                                                ranges: last_seekable_ranges
+                                                    .iter()
+                                                    .map(|(start, end)| SeekableRange {
+                                                        start: *start,
+                                                        end: *end,
+                                                    })
+                                                    .collect(),
+                                            },
+                                        );
+                                    }
                                 }
                             }
                             PAUSED_FOR_CACHE_ID => {

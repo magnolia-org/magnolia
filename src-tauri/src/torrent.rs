@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, Session, SessionOptions, SessionPersistenceConfig, api::TorrentIdOrHash};
+use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, PeerConnectionOptions, Session, SessionOptions, api::TorrentIdOrHash};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -98,43 +98,120 @@ pub struct AppState {
     pub download_dir: PathBuf,
 }
 
+// Trackers added to every torrent on top of whatever the magnet/torrent carries.
+// Magnet links from search providers often have few or zero trackers, leaving
+// peer discovery to DHT alone, which is the slowest path to first peers.
+const DEFAULT_TRACKERS: &[&str] = &[
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.demonii.com:1337/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://exodus.desync.com:6969/announce",
+    "udp://explodie.org:6969/announce",
+    "udp://opentracker.io:6969/announce",
+    "udp://tracker.theoks.net:6969/announce",
+];
+
 struct TorrentEntry {
     magnet_url: String,
     session_id: Option<usize>, // None if not yet added to session
     buffer_start: Option<std::time::Instant>, // Set when buffering begins (prepare_stream done)
+    // Cached from the initial list_only resolution. Resolving a magnet over DHT
+    // costs seconds; with these we only ever pay that cost once per magnet.
+    torrent_bytes: Option<bytes::Bytes>,
+    seen_peers: Vec<SocketAddr>,
+    cached_files: Option<(String, Vec<TorrentFile>)>, // (torrent name, video files)
+    prefetch: Option<Arc<PrefetchState>>, // Set by prepare_stream
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Default)]
+struct PrefetchState {
+    head_done: std::sync::atomic::AtomicBool,
+    tail_done: std::sync::atomic::AtomicBool,
+}
+
+impl PrefetchState {
+    fn is_complete(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.head_done.load(Ordering::Relaxed) && self.tail_done.load(Ordering::Relaxed)
+    }
+}
+
+const HEAD_PREFETCH_BYTES: u64 = 3 * 1024 * 1024;
+const TAIL_PREFETCH_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Pre-download the byte ranges mpv's demuxer touches when opening a file: the
+/// container header at the start and the seek index (mkv Cues / mp4 moov) at the
+/// end. Each range is read through a librqbit FileStream, which registers in the
+/// torrent's piece-priority system, so these pieces download first while the UI
+/// is still in the buffering phase. Without this, opening the file blocks on
+/// cold tail pieces during "Starting player".
+fn spawn_prefetch(
+    handle: Arc<librqbit::ManagedTorrent>,
+    file_index: usize,
+    state: Arc<PrefetchState>,
+) {
+    use std::sync::atomic::Ordering;
+
+    for tail in [false, true] {
+        let handle = handle.clone();
+        let state = state.clone();
+        tokio::spawn(async move {
+            let t0 = std::time::Instant::now();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+                // stream() fails while the torrent is still initializing.
+                let mut stream = loop {
+                    match handle.clone().stream(file_index) {
+                        Ok(s) => break s,
+                        Err(_) => tokio::time::sleep(std::time::Duration::from_millis(150)).await,
+                    }
+                };
+                let len = stream.len();
+                let target = if tail {
+                    let start = len.saturating_sub(TAIL_PREFETCH_BYTES);
+                    stream.seek(std::io::SeekFrom::Start(start)).await?;
+                    len - start
+                } else {
+                    HEAD_PREFETCH_BYTES.min(len)
+                };
+                let mut buf = vec![0u8; 256 * 1024];
+                let mut remaining = target;
+                while remaining > 0 {
+                    let n = stream.read(&mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    remaining = remaining.saturating_sub(n as u64);
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await;
+
+            let which = if tail { "tail" } else { "head" };
+            match &result {
+                Ok(Ok(())) => tracing::info!("[player-init] prefetch {} done in {:.3}s", which, t0.elapsed().as_secs_f64()),
+                Ok(Err(e)) => tracing::warn!("[player-init] prefetch {} failed after {:.3}s: {}", which, t0.elapsed().as_secs_f64(), e),
+                Err(_) => tracing::warn!("[player-init] prefetch {} timed out", which),
+            }
+            // Mark done on every exit path so the readiness gate degrades to the
+            // plain buffer heuristic instead of holding the loading screen forever.
+            if tail {
+                state.tail_done.store(true, Ordering::Relaxed);
+            } else {
+                state.head_done.store(true, Ordering::Relaxed);
+            }
+        });
+    }
+}
+
+// In-memory only: cached torrents live for the duration of the app run so a
+// recently watched torrent resumes instantly, but nothing is restored at startup.
+#[derive(Clone)]
 struct CachedTorrent {
     handle_id: usize,
     session_id: usize,
     magnet_url: String,
-    #[serde(with = "systemtime_serde")]
-    cached_at: std::time::SystemTime,
 }
-
-// Serde helper for SystemTime
-mod systemtime_serde {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    pub fn serialize<S>(time: &SystemTime, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let duration = time.duration_since(UNIX_EPOCH).unwrap();
-        duration.as_secs().serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<SystemTime, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let secs = u64::deserialize(deserializer)?;
-        Ok(UNIX_EPOCH + std::time::Duration::from_secs(secs))
-    }
-}
-
 
 pub struct TorrentManager {
     session: Arc<Session>,
@@ -144,6 +221,34 @@ pub struct TorrentManager {
     http_addr: SocketAddr,
     // Torrent cache: keep up to 10 torrents paused with data cleared
     torrent_cache: Arc<RwLock<Vec<CachedTorrent>>>,
+}
+
+fn video_files_from_info(info: &librqbit::TorrentMetaV1Info<librqbit::ByteBufOwned>) -> Result<Vec<TorrentFile>> {
+    Ok(info
+        .iter_file_details()?
+        .enumerate()
+        .filter_map(|(index, detail)| {
+            let filename_str = detail.filename.to_string().ok()?;
+            let lower = filename_str.to_lowercase();
+            if lower.ends_with(".mkv") || lower.ends_with(".mp4") || lower.ends_with(".avi") || lower.ends_with(".mov") {
+                let pathbuf = detail.filename.to_pathbuf().ok()?;
+                let name = pathbuf
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                Some(TorrentFile {
+                    index,
+                    name,
+                    size: detail.len,
+                    path: filename_str,
+                })
+            } else {
+                None
+            }
+        })
+        .collect())
 }
 
 async fn stream_file(
@@ -203,7 +308,9 @@ async fn stream_file(
                     return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to seek: {}", e)).into_response();
                 }
             }
-            Body::from_stream(ReaderStream::new(stream.take(content_length)))
+            // 256 KiB chunks: each poll_read goes through piece-lookup + storage
+            // locks, so the default 4 KiB buffer throttles throughput to mpv.
+            Body::from_stream(ReaderStream::with_capacity(stream.take(content_length), 256 * 1024))
         }
         Err(stream_err) => {
             // Fall back to direct disk I/O for fully-downloaded torrents.
@@ -224,7 +331,7 @@ async fn stream_file(
                             return (StatusCode::INTERNAL_SERVER_ERROR, format!("seek failed: {}", e)).into_response();
                         }
                     }
-                    Body::from_stream(ReaderStream::new(f.take(content_length)))
+                    Body::from_stream(ReaderStream::with_capacity(f.take(content_length), 256 * 1024))
                 }
                 Err(e) => {
                     tracing::error!("stream() failed ({}), disk fallback also failed for {:?}: {}", stream_err, file_path, e);
@@ -257,36 +364,27 @@ impl TorrentManager {
             return Err(e.into());
         }
 
-        // Boot-time cleanup: wipe any files left over from a previous session (including
-        // crash survivors where cleanup_all() never ran). Magnolia is a streaming app —
-        // no torrent data should persist across restarts.
-        match std::fs::read_dir(&download_dir) {
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        if let Err(e) = std::fs::remove_dir_all(&path) {
-                            tracing::warn!("Boot cleanup: failed to remove dir {:?}: {}", path, e);
-                        }
-                    } else if let Err(e) = std::fs::remove_file(&path) {
-                        tracing::warn!("Boot cleanup: failed to remove file {:?}: {}", path, e);
-                    }
-                }
-                tracing::info!("Boot cleanup: cleared stale files from {:?}", download_dir);
-            }
-            Err(e) => tracing::warn!("Boot cleanup: could not read download dir: {}", e),
-        }
-
-        // Create session with fastresume enabled so the "all zeros" bitfield is persisted
-        // after the first initial_check. On Windows, pread_exact via seek_read returns Ok()
-        // on EOF rather than an error, so the initial_check has to SHA1-hash every piece
-        // individually instead of short-circuiting when a file is found empty. Fastresume
-        // means only the *first* play of any given torrent incurs that cost; every
-        // subsequent play (same info_hash) skips the check entirely.
+        // No session persistence: librqbit would otherwise re-add every torrent
+        // from previous runs *inside* Session::new (blocking app launch), and dev
+        // runs that never exit cleanly accumulate torrents there forever. Nothing
+        // torrent-related should initialize at startup — torrents are only added
+        // when the user actually streams one.
         println!("creating librqbit session...");
         let session = match Session::new_with_opts(download_dir.clone(), SessionOptions {
-            fastresume: true,
-            persistence: Some(SessionPersistenceConfig::Json { folder: None }),
+            // librqbit's default peer connect timeout is 10s; dead peers from DHT are
+            // common, so churn through them quickly to find live ones sooner.
+            peer_opts: Some(PeerConnectionOptions {
+                connect_timeout: Some(std::time::Duration::from_secs(2)),
+                read_write_timeout: Some(std::time::Duration::from_secs(10)),
+                keep_alive_interval: None,
+            }),
+            // Buffer writes in memory so pieces complete (and wake the stream)
+            // without waiting on disk; reads are served from the same cache.
+            defer_writes_up_to: Some(32),
+            trackers: DEFAULT_TRACKERS
+                .iter()
+                .filter_map(|t| url::Url::parse(t).ok())
+                .collect(),
             ..Default::default()
         }).await {
             Ok(s) => {
@@ -344,18 +442,43 @@ impl TorrentManager {
             torrent_cache: Arc::new(RwLock::new(Vec::new())),
         };
         
-        // Load cached torrents from disk
-        if let Err(e) = manager.load_cache_from_disk().await {
-            tracing::warn!("Failed to load torrent cache from disk: {}", e);
-        }
-        
         Ok(manager)
     }
 
     pub async fn add_torrent(&self, magnet_or_url: String) -> Result<usize> {
         let t0 = std::time::Instant::now();
         tracing::info!("[player-init] add_torrent: starting (list_only metadata fetch)");
-        
+
+        // If we already resolved this magnet/URL in this session (e.g. the detail
+        // view added it, now the player adds it again), reuse the cached metadata
+        // instead of resolving it over DHT/HTTP a second time.
+        {
+            let torrents = self.torrents.read().await;
+            let cached = torrents.values().find(|e| {
+                e.magnet_url == magnet_or_url
+                    && (e.torrent_bytes.is_some() || e.cached_files.is_some())
+            });
+            if let Some(existing) = cached {
+                let entry = TorrentEntry {
+                    magnet_url: magnet_or_url.clone(),
+                    session_id: None,
+                    buffer_start: None,
+                    torrent_bytes: existing.torrent_bytes.clone(),
+                    seen_peers: existing.seen_peers.clone(),
+                    cached_files: existing.cached_files.clone(),
+                    prefetch: None,
+                };
+                drop(torrents);
+                let mut id_lock = self.next_id.write().await;
+                let our_id = *id_lock;
+                *id_lock += 1;
+                drop(id_lock);
+                self.torrents.write().await.insert(our_id, entry);
+                tracing::info!("[player-init] add_torrent: reused cached metadata, our_id={} in {:.3}s", our_id, t0.elapsed().as_secs_f64());
+                return Ok(our_id);
+            }
+        }
+
         let add_torrent = if magnet_or_url.starts_with("magnet:") {
             AddTorrent::from_url(&magnet_or_url)
         } else if magnet_or_url.starts_with("http") {
@@ -363,38 +486,51 @@ impl TorrentManager {
         } else {
             AddTorrent::from_local_filename(&magnet_or_url)?
         };
-        
+
         let opts = AddTorrentOptions {
             list_only: true,
             ..Default::default()
         };
-        
+
         let response = self.session.add_torrent(add_torrent, Some(opts)).await?;
-        
+
         // Extract session_id if it was added (shouldn't happen with list_only, but handle it)
-        let session_id = match response {
+        let (session_id, torrent_bytes, seen_peers, cached_files) = match response {
             AddTorrentResponse::Added(id, _) | AddTorrentResponse::AlreadyManaged(id, _) => {
                 tracing::info!("Torrent was added to session with id: {}", id);
-                Some(id)
+                (Some(id), None, Vec::new(), None)
             }
-            AddTorrentResponse::ListOnly(_) => {
-                tracing::info!("Got list-only response (metadata fetched)");
-                None
+            AddTorrentResponse::ListOnly(list_info) => {
+                tracing::info!("Got list-only response (metadata fetched, {} peers seen)", list_info.seen_peers.len());
+                let files = video_files_from_info(&list_info.info).unwrap_or_default();
+                let name = list_info.info.name.as_ref()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                (
+                    None,
+                    Some(list_info.torrent_bytes),
+                    list_info.seen_peers,
+                    Some((name, files)),
+                )
             }
         };
-        
+
         let mut id_lock = self.next_id.write().await;
         let our_id = *id_lock;
         *id_lock += 1;
         drop(id_lock);
-        
+
         let mut torrents = self.torrents.write().await;
         torrents.insert(our_id, TorrentEntry {
             magnet_url: magnet_or_url,
             session_id,
             buffer_start: None,
+            torrent_bytes,
+            seen_peers,
+            cached_files,
+            prefetch: None,
         });
-        
+
         tracing::info!("[player-init] add_torrent: done, our_id={} in {:.3}s", our_id, t0.elapsed().as_secs_f64());
         Ok(our_id)
     }
@@ -405,11 +541,27 @@ impl TorrentManager {
             .get(&handle_id)
             .context("Torrent handle not found")?;
         
-        // If not yet added to session, fetch metadata via list_only
+        // If not yet added to session, serve from the metadata cached at add_torrent
+        // time; only fall back to a list_only resolution if that cache is missing.
         if entry.session_id.is_none() {
+            if let Some((name, files)) = &entry.cached_files {
+                return Ok(TorrentInfo {
+                    handle_id,
+                    name: name.clone(),
+                    size: files.iter().map(|f| f.size).sum(),
+                    files: files.clone(),
+                    progress: 0.0,
+                    download_speed: 0,
+                    upload_speed: 0,
+                    peers: 0,
+                    is_paused: true,
+                    state: "paused".to_string(),
+                });
+            }
+
             let magnet_url = entry.magnet_url.clone();
             drop(torrents);
-            
+
             let add_torrent = if magnet_url.starts_with("magnet:") {
                 AddTorrent::from_url(&magnet_url)
             } else if magnet_url.starts_with("http") {
@@ -417,47 +569,33 @@ impl TorrentManager {
             } else {
                 AddTorrent::from_local_filename(&magnet_url)?
             };
-            
+
             let opts = AddTorrentOptions {
                 list_only: true,
                 ..Default::default()
             };
-            
+
             let response = self.session.add_torrent(add_torrent, Some(opts)).await?;
-            
+
             match response {
                 AddTorrentResponse::ListOnly(list_info) => {
-                    let files: Vec<TorrentFile> = list_info.info
-                        .iter_file_details()?
-                        .enumerate()
-                        .filter_map(|(index, detail)| {
-                            let filename_str = detail.filename.to_string().ok()?;
-                            let lower = filename_str.to_lowercase();
-                            if lower.ends_with(".mkv") || lower.ends_with(".mp4") || lower.ends_with(".avi") || lower.ends_with(".mov") {
-                                let pathbuf = detail.filename.to_pathbuf().ok()?;
-                                let name = pathbuf
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("unknown")
-                                    .to_string();
-                                
-                                Some(TorrentFile {
-                                    index,
-                                    name,
-                                    size: detail.len,
-                                    path: filename_str,
-                                })
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    
+                    let files = video_files_from_info(&list_info.info)?;
+
                     let name = match &list_info.info.name {
                         Some(n) => n.to_string(),
                         None => "Unknown".to_string(),
                     };
-                    
+
+                    // Cache for prepare_stream so it can skip its own resolution.
+                    {
+                        let mut torrents = self.torrents.write().await;
+                        if let Some(entry) = torrents.get_mut(&handle_id) {
+                            entry.torrent_bytes = Some(list_info.torrent_bytes.clone());
+                            entry.seen_peers = list_info.seen_peers.clone();
+                            entry.cached_files = Some((name.clone(), files.clone()));
+                        }
+                    }
+
                     return Ok(TorrentInfo {
                         handle_id,
                         name,
@@ -576,19 +714,21 @@ impl TorrentManager {
             .get(&handle_id)
             .context("Torrent handle not found")?;
         
-        // Check if this torrent is in the cache
+        // Check if this torrent is in the cache. Match by magnet URL, not
+        // handle_id: handle ids restart from 0 every run, so an id from a cache
+        // restored off disk can collide with an unrelated torrent in this run.
         let mut cache = self.torrent_cache.write().await;
         let cached_session_id = cache.iter()
-            .find(|ct| ct.handle_id == handle_id)
+            .find(|ct| ct.magnet_url == entry.magnet_url)
             .map(|ct| ct.session_id);
-        
+
         if let Some(session_id) = cached_session_id {
             // Remove from cache
-            cache.retain(|ct| ct.handle_id != handle_id);
+            cache.retain(|ct| ct.magnet_url != entry.magnet_url);
             drop(cache);
 
             // The torrent is still paused in the rqbit session (files were cleared by
-            // stop_stream but the session entry is kept so the persisted bitfield survives).
+            // stop_stream but the session entry is kept, so its bitfield is still in memory).
             // Just update only_files to the requested file and unpause — no re-checking phase.
             if let Some(handle) = self.session.get(TorrentIdOrHash::Id(session_id)) {
                 let only_files_set = std::collections::HashSet::from([file_index]);
@@ -602,11 +742,15 @@ impl TorrentManager {
 
                 tracing::info!("[player-init] prepare_stream: resumed from cache session_id={} in {:.3}s", session_id, t0.elapsed().as_secs_f64());
 
+                let prefetch = Arc::new(PrefetchState::default());
+                spawn_prefetch(handle.clone(), file_index, prefetch.clone());
+
                 drop(torrents);
                 let mut torrents = self.torrents.write().await;
                 if let Some(entry) = torrents.get_mut(&handle_id) {
                     entry.session_id = Some(session_id);
                     entry.buffer_start = Some(std::time::Instant::now());
+                    entry.prefetch = Some(prefetch);
                 }
                 tracing::info!("[player-init] buffer: start (cache path)");
 
@@ -619,29 +763,44 @@ impl TorrentManager {
             drop(cache);
         }
         
-        // Add the torrent with ONLY the specific file selected
-        let add_torrent = if entry.magnet_url.starts_with("magnet:") {
+        // Add the torrent with ONLY the specific file selected.
+        // Prefer the torrent bytes cached during add_torrent's list_only resolution:
+        // adding from bytes skips re-resolving the magnet over DHT entirely.
+        let add_torrent = if let Some(bytes) = &entry.torrent_bytes {
+            tracing::info!("[player-init] prepare_stream: using cached torrent bytes (skipping magnet resolution)");
+            AddTorrent::TorrentFileBytes(bytes.clone())
+        } else if entry.magnet_url.starts_with("magnet:") {
             AddTorrent::from_url(&entry.magnet_url)
         } else if entry.magnet_url.starts_with("http") {
             AddTorrent::from_url(&entry.magnet_url)
         } else {
             AddTorrent::from_local_filename(&entry.magnet_url)?
         };
-        
+
+        // Peers discovered while resolving the magnet connect immediately,
+        // without waiting for a fresh DHT/tracker round-trip.
+        let initial_peers = if entry.seen_peers.is_empty() {
+            None
+        } else {
+            tracing::info!("[player-init] prepare_stream: seeding {} previously seen peers", entry.seen_peers.len());
+            Some(entry.seen_peers.clone())
+        };
+
         tracing::info!("[player-init] prepare_stream: no cache hit, calling session.add_torrent (t={:.3}s)", t0.elapsed().as_secs_f64());
-        
+
         let opts = AddTorrentOptions {
             overwrite: true,
             paused: false,
             only_files: Some(vec![file_index]),
             force_tracker_interval: Some(std::time::Duration::from_secs(5)), // Request peers faster
+            initial_peers,
             ..Default::default()
         };
         
         let add_t = std::time::Instant::now();
         let response = self.session.add_torrent(add_torrent, Some(opts)).await?;
         tracing::info!("[player-init] prepare_stream: session.add_torrent returned in {:.3}s", add_t.elapsed().as_secs_f64());
-        let (session_id, _handle) = match response {
+        let (session_id, handle) = match response {
             AddTorrentResponse::Added(id, h) => (id, h),
             AddTorrentResponse::AlreadyManaged(id, h) => {
                 tracing::info!("[player-init] prepare_stream: torrent already managed, reusing");
@@ -654,14 +813,18 @@ impl TorrentManager {
                 return Err(anyhow::anyhow!("Unexpected list_only response"));
             }
         };
-        
+
         tracing::info!("[player-init] prepare_stream: setting session_id={} for handle_id={}", session_id, handle_id);
-        
+
+        let prefetch = Arc::new(PrefetchState::default());
+        spawn_prefetch(handle, file_index, prefetch.clone());
+
         drop(torrents);
         let mut torrents = self.torrents.write().await;
         if let Some(entry) = torrents.get_mut(&handle_id) {
             entry.session_id = Some(session_id);
             entry.buffer_start = Some(std::time::Instant::now());
+            entry.prefetch = Some(prefetch);
         }
         tracing::info!("[player-init] buffer: start (fresh path)");
         tracing::info!("[player-init] prepare_stream: complete in {:.3}s", t0.elapsed().as_secs_f64());
@@ -697,8 +860,12 @@ impl TorrentManager {
 
         let is_streamable = handle.clone().stream(file_index).is_ok();
         let has_buffer = stats.progress_bytes > 2 * 1024 * 1024 || stats.finished;
+        // Wait for the head/tail prefetch: those are the exact ranges mpv's
+        // demuxer reads when opening the file, so handing off any earlier just
+        // moves the wait into an opaque "Starting player" stall.
+        let prefetch_complete = entry.prefetch.as_ref().map(|p| p.is_complete()).unwrap_or(true);
         // A finished torrent can always be served via HTTP even if stream() fails.
-        let is_ready = has_buffer && (is_streamable || stats.finished);
+        let is_ready = has_buffer && ((is_streamable && prefetch_complete) || stats.finished);
 
         let stream_info = if is_ready {
             Some(StreamInfo {
@@ -732,8 +899,8 @@ impl TorrentManager {
             .map(|t| format!("{:.1}s", t.elapsed().as_secs_f64()))
             .unwrap_or_else(|| "?".to_string());
         tracing::info!(
-            "[player-init] buffer poll t={}: state={} {}/{} bytes  {} peers  {:.2}Mbps  ready={}",
-            elapsed_str, state, stats.progress_bytes, stats.total_bytes, peers, download_mbps, is_ready
+            "[player-init] buffer poll t={}: state={} {}/{} bytes  {} peers  {:.2}Mbps  prefetch={} ready={}",
+            elapsed_str, state, stats.progress_bytes, stats.total_bytes, peers, download_mbps, prefetch_complete, is_ready
         );
 
         Ok(StreamStatus {
@@ -784,7 +951,6 @@ impl TorrentManager {
                         handle_id,
                         session_id,
                         magnet_url: entry.magnet_url.clone(),
-                        cached_at: std::time::SystemTime::now(),
                     };
                     
                     let mut cache = self.torrent_cache.write().await;
@@ -811,12 +977,6 @@ impl TorrentManager {
                     }
                     
                     tracing::info!("Torrent cached. Current cache size: {}", cache.len());
-                    drop(cache);
-                    
-                    // Save cache to disk
-                    if let Err(e) = self.save_cache_to_disk().await {
-                        tracing::error!("Failed to save cache to disk: {}", e);
-                    }
                 }
             }
         }
@@ -880,88 +1040,6 @@ impl TorrentManager {
         Ok(())
     }
     
-    /// Save torrent cache to disk
-    async fn save_cache_to_disk(&self) -> Result<()> {
-        let cache = self.torrent_cache.read().await;
-        let cache_file = self.download_dir.join("torrent_cache.json");
-        
-        let json = serde_json::to_string_pretty(&*cache)?;
-        tokio::fs::write(&cache_file, json).await?;
-        
-        tracing::debug!("Saved {} cached torrents to disk", cache.len());
-        Ok(())
-    }
-    
-    /// Load torrent cache from disk and restore sessions
-    async fn load_cache_from_disk(&self) -> Result<()> {
-        let cache_file = self.download_dir.join("torrent_cache.json");
-        
-        if !cache_file.exists() {
-            return Ok(());
-        }
-        
-        let json = tokio::fs::read_to_string(&cache_file).await?;
-        let cached_torrents: Vec<CachedTorrent> = serde_json::from_str(&json)?;
-        
-        tracing::info!("Loading {} cached torrents from disk", cached_torrents.len());
-        
-        let mut restored_cache = Vec::new();
-        
-        for cached in cached_torrents {
-            // Restore the torrent session in paused state
-            // Don't use list_only - we want the torrent in the session with 0-byte files
-            let add_torrent = AddTorrent::from_url(&cached.magnet_url);
-            
-            let opts = AddTorrentOptions {
-                overwrite: false,
-                paused: true, // Start paused to avoid downloading
-                only_files: None, // No specific files selected yet
-                ..Default::default()
-            };
-            
-            match self.session.add_torrent(add_torrent, Some(opts)).await {
-                Ok(response) => {
-                    let session_id = match response {
-                        AddTorrentResponse::Added(id, _) => {
-                            tracing::info!("Restored cached torrent (newly added): handle_id={}, session_id={}", cached.handle_id, id);
-                            id
-                        }
-                        AddTorrentResponse::AlreadyManaged(id, _) => {
-                            tracing::info!("Restored cached torrent (already managed): handle_id={}, session_id={}", cached.handle_id, id);
-                            id
-                        }
-                        AddTorrentResponse::ListOnly(_) => {
-                            tracing::warn!("Got ListOnly response when trying to restore cached torrent handle_id={}", cached.handle_id);
-                            continue;
-                        }
-                    };
-                    
-                    // Add to restored cache regardless of session_id match
-                    // (session_id might be different if librqbit reassigns IDs)
-                    let mut updated_cached = cached.clone();
-                    updated_cached.session_id = session_id;
-                    restored_cache.push(updated_cached);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to restore cached torrent handle_id={}: {}", cached.handle_id, e);
-                }
-            }
-        }
-        
-        let mut cache = self.torrent_cache.write().await;
-        *cache = restored_cache;
-        
-        tracing::info!("Successfully restored {} cached torrents", cache.len());
-        
-        // Re-save cache with updated session IDs
-        drop(cache);
-        if let Err(e) = self.save_cache_to_disk().await {
-            tracing::error!("Failed to save updated cache: {}", e);
-        }
-        
-        Ok(())
-    }
-
     pub async fn pause_torrent(&self, handle_id: usize) -> Result<()> {
         let torrents = self.torrents.read().await;
         let entry = torrents.get(&handle_id).context("Torrent not found")?;
@@ -1008,22 +1086,13 @@ impl TorrentManager {
         
         let download_dir = self.download_dir.clone();
         
-        // Delete everything in the download directory except cache files
+        // Delete everything in the download directory
         if download_dir.exists() {
             let mut entries = tokio::fs::read_dir(&download_dir).await?;
             let mut deleted_count = 0;
             
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
-                let file_name = path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
-                
-                // Skip cache files
-                if file_name == "torrent_cache.json" {
-                    continue;
-                }
-                
                 if path.is_dir() {
                     match tokio::fs::remove_dir_all(&path).await {
                         Ok(_) => {
@@ -1069,22 +1138,65 @@ impl TorrentManager {
                 tracing::error!("Error deleting torrent {}: {}", session_id, e);
             }
         }
-        
-        // Also delete the cache file
-        let cache_path = self.download_dir.join("torrent_cache.json");
-        if cache_path.exists() {
-            if let Err(e) = std::fs::remove_file(&cache_path) {
-                tracing::error!("Failed to remove cache file: {}", e);
-            } else {
-                tracing::info!("Removed torrent cache file");
-            }
-        }
-        
+
         Ok(())
     }
 
     pub async fn get_http_port(&self) -> Result<u16, String> {
         Ok(self.http_addr.port())
+    }
+
+    /// Downloaded ranges of a file as (start, end) fractions in [0, 1], derived
+    /// from the torrent's have-pieces bitfield. Used by the seek bar to show
+    /// what's already on disk.
+    pub async fn get_piece_ranges(&self, handle_id: usize, file_index: usize) -> Result<Vec<(f64, f64)>> {
+        let torrents = self.torrents.read().await;
+        let entry = torrents.get(&handle_id).context("Torrent handle not found")?;
+        let session_id = entry.session_id.context("Torrent not yet added to session")?;
+        drop(torrents);
+
+        let handle = self
+            .session
+            .get(TorrentIdOrHash::Id(session_id))
+            .context("Session torrent not found")?;
+
+        let (file_offset, file_len, piece_len) = handle
+            .with_metadata(|m| {
+                m.file_infos
+                    .get(file_index)
+                    .map(|fi| (fi.offset_in_torrent, fi.len, m.lengths.default_piece_length() as u64))
+            })?
+            .context("File index out of range")?;
+
+        if file_len == 0 {
+            return Ok(Vec::new());
+        }
+
+        let byte_ranges: Vec<(u64, u64)> = handle.with_have_pieces(|bf| {
+            let bits = bf.as_slice();
+            let first_piece = (file_offset / piece_len) as usize;
+            let last_piece = ((file_offset + file_len - 1) / piece_len) as usize;
+            let mut ranges: Vec<(u64, u64)> = Vec::new();
+            for piece in first_piece..=last_piece.min(bits.len().saturating_sub(1)) {
+                if !bits[piece] {
+                    continue;
+                }
+                let piece_start = piece as u64 * piece_len;
+                let piece_end = piece_start + piece_len;
+                let start = piece_start.max(file_offset) - file_offset;
+                let end = piece_end.min(file_offset + file_len) - file_offset;
+                match ranges.last_mut() {
+                    Some(last) if last.1 >= start => last.1 = last.1.max(end),
+                    _ => ranges.push((start, end)),
+                }
+            }
+            ranges
+        })?;
+
+        Ok(byte_ranges
+            .into_iter()
+            .map(|(s, e)| (s as f64 / file_len as f64, e as f64 / file_len as f64))
+            .collect())
     }
 }
 
@@ -1241,6 +1353,18 @@ pub async fn wipe_all_torrent_files(
 ) -> Result<(), String> {
     manager
         .wipe_all_files()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_torrent_piece_ranges(
+    manager: State<'_, Arc<TorrentManager>>,
+    handle_id: usize,
+    file_index: usize,
+) -> Result<Vec<(f64, f64)>, String> {
+    manager
+        .get_piece_ranges(handle_id, file_index)
         .await
         .map_err(|e| e.to_string())
 }
