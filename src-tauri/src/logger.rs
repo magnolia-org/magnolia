@@ -1,7 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::mem::ManuallyDrop;
-use std::os::unix::io::FromRawFd;
 use std::path::PathBuf;
 use std::sync::{Mutex, Arc};
 use std::thread;
@@ -80,7 +79,9 @@ impl Logger {
 
         // Duplicate the real stdout/stderr fds *before* gag redirects them so
         // we can tee output back to the terminal in addition to the log file.
+        #[cfg(unix)]
         let real_stdout_fd = unsafe { libc::dup(1) };
+        #[cfg(unix)]
         let real_stderr_fd = unsafe { libc::dup(2) };
 
         // Capture stdout in a separate thread
@@ -91,11 +92,15 @@ impl Logger {
 
             // Wrap the saved fd so we can write to the real terminal.
             // ManuallyDrop prevents File::drop from closing the fd prematurely.
+            #[cfg(unix)]
             let mut real_out: Option<ManuallyDrop<File>> = if real_stdout_fd >= 0 {
+                use std::os::unix::io::FromRawFd;
                 Some(ManuallyDrop::new(unsafe { File::from_raw_fd(real_stdout_fd) }))
             } else {
                 None
             };
+            #[cfg(not(unix))]
+            let mut real_out: Option<ManuallyDrop<File>> = None;
 
             let mut stdout_buffer = match BufferRedirect::stdout() {
                 Ok(buf) => buf,
@@ -142,11 +147,15 @@ impl Logger {
             use gag::BufferRedirect;
             use std::io::Read;
 
+            #[cfg(unix)]
             let mut real_err: Option<ManuallyDrop<File>> = if real_stderr_fd >= 0 {
+                use std::os::unix::io::FromRawFd;
                 Some(ManuallyDrop::new(unsafe { File::from_raw_fd(real_stderr_fd) }))
             } else {
                 None
             };
+            #[cfg(not(unix))]
+            let mut real_err: Option<ManuallyDrop<File>> = None;
 
             let mut stderr_buffer = match BufferRedirect::stderr() {
                 Ok(buf) => buf,
