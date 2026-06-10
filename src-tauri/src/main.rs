@@ -16,6 +16,7 @@ mod cache_metadata;
 mod subtitles;
 mod subtitle_packs;
 mod anime_list;
+mod updater;
 
 use search::{nyaa::NyaaProvider, limetorrents::LimeTorrentsProvider, piratebay::PirateBayProvider,
              SearchProvider};
@@ -693,9 +694,15 @@ async fn install_update(installer_path: String, _app_handle: tauri::AppHandle) -
         std::process::exit(0);
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
-        Err("auto-update only supported on windows".to_string())
+        // Hands off to a detached helper script and exits — never returns on success.
+        updater::install_macos(installer_path)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        Err("auto-update not supported on this platform".to_string())
     }
 }
 
@@ -990,6 +997,9 @@ fn main() {
             cache_metadata::get_all_cache_metadata,
             download_update,
             install_update,
+            updater::get_platform_info,
+            updater::enable_touch_id_sudo,
+            updater::is_touch_id_sudo_enabled,
             open_external_url,
             subtitles::fetch_subtitles,
             subtitles::download_subtitle,
