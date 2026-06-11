@@ -30,6 +30,23 @@
     return l.preRelease > c.preRelease;
   }
 
+  // Pick the release asset for this platform.
+  // Windows ships an NSIS installer (.exe); macOS ships a zipped .app named
+  // like "Magnolia_X.X.X_arm64-macos.zip".
+  function pickAsset(assets, os, arch) {
+    if (os === 'windows') {
+      return assets.find(a => a.name.endsWith('.exe'));
+    }
+    if (os === 'macos') {
+      const archTokens = arch === 'aarch64' ? ['arm64', 'aarch64'] : ['x64', 'x86_64', 'intel'];
+      return (
+        assets.find(a => a.name.endsWith('-macos.zip') && archTokens.some(t => a.name.includes(t))) ||
+        assets.find(a => a.name.endsWith('-macos.zip'))
+      );
+    }
+    return null;
+  }
+
   async function checkForUpdates() {
     if (!checkForUpdatesEnabled) {
       console.log('update check disabled in settings');
@@ -39,19 +56,22 @@
     try {
       currentVersion = await getVersion();
       console.log(`current version: ${currentVersion}`);
-      
+
+      const [os, arch] = await invoke('get_platform_info');
       const response = await fetch('https://api.github.com/repos/chwair/magnolia/releases/latest');
       const release = await response.json();
-      
+
       latestVersion = release.tag_name.replace('v', '');
       console.log(`latest version: ${latestVersion}`);
-      
+
       if (isNewerVersion(latestVersion, currentVersion)) {
-        const asset = release.assets.find(a => a.name.endsWith('.exe'));
+        const asset = pickAsset(release.assets || [], os, arch);
         if (asset) {
           updateAvailable = true;
           updateUrl = asset.browser_download_url;
-          console.log(`update available: ${latestVersion}`);
+          console.log(`update available: ${latestVersion} (${asset.name})`);
+        } else {
+          console.log(`update ${latestVersion} found, but no asset for ${os}/${arch}`);
         }
       } else {
         console.log('app is up to date');

@@ -1,10 +1,11 @@
 <script>
-    import { createEventDispatcher, onDestroy } from "svelte";
+    import { createEventDispatcher, onDestroy, onMount } from "svelte";
     import { fade, scale } from "svelte/transition";
     import { cubicOut } from 'svelte/easing';
     import { getTrackerPreference, setTrackerPreference } from "./stores/watchHistoryStore.js";
     import { open } from "@tauri-apps/plugin-dialog";
     import { readFile } from "@tauri-apps/plugin-fs";
+    import { invoke } from "@tauri-apps/api/core";
 
     export let results = [];
     export let searchQuery = "";
@@ -30,7 +31,34 @@
         trackerMode = 'manual';
         selectedTrackers = storedPref;
     }
-    
+
+    // Installed tracker extensions: [{ id, label, isAnime }]
+    let trackerExtensions = [];
+
+    async function loadTrackerExtensions() {
+        try {
+            const exts = await invoke('list_extensions');
+            trackerExtensions = exts
+                .filter(e => e.enabled && e.manifest.type === 'tracker')
+                .map(e => ({
+                    id: e.id,
+                    label: e.manifest.tracker_name || e.manifest.name,
+                    isAnime: !!e.manifest.is_anime,
+                }));
+            // Drop stored selections that point at removed/disabled extensions
+            const known = new Set(trackerExtensions.map(t => t.id));
+            const filtered = selectedTrackers.filter(t => known.has(t));
+            if (filtered.length !== selectedTrackers.length) {
+                selectedTrackers = filtered;
+                if (selectedTrackers.length === 0) trackerMode = 'auto';
+            }
+        } catch (err) {
+            console.error('failed to load tracker extensions:', err);
+        }
+    }
+
+    onMount(loadTrackerExtensions);
+
     onDestroy(() => {
         if (researchTimeout) {
             clearTimeout(researchTimeout);
@@ -369,27 +397,15 @@
     // Compute which trackers are being used for display
     $: activeTrackerNames = (() => {
         if (trackerMode === 'auto') {
-            // Auto mode - matches backend logic
-            if (isAnime) {
-                return ['Nyaa'];
-            } else {
-                // Regular TV/movies: limetorrents, thepiratebay, and eztv if imdb available
-                const names = ['LimeTorrents', 'TPB'];
-                if (hasImdbId) {
-                    names.push('EZTV');
-                }
-                return names;
-            }
+            // Auto mode - matches backend logic: anime media uses anime
+            // trackers, everything else uses the general ones
+            return trackerExtensions
+                .filter(t => t.isAnime === isAnime)
+                .map(t => t.label);
         }
-        return selectedTrackers.map(t => {
-            switch(t) {
-                case 'nyaa': return 'Nyaa';
-                case 'limetorrents': return 'LimeTorrents';
-                case 'thepiratebay': return 'TPB';
-                case 'eztv': return 'EZTV';
-                default: return t;
-            }
-        });
+        return selectedTrackers.map(t =>
+            trackerExtensions.find(e => e.id === t)?.label ?? t
+        );
     })();
 </script>
 
@@ -411,10 +427,9 @@
                 <span class="tracker-label">Tracker:</span>
                 <div class="tracker-buttons">
                     <button class="tracker-btn" class:active={trackerMode === 'auto'} on:click={selectAuto} disabled={loading}>Auto</button>
-                    <button class="tracker-btn" class:active={selectedTrackers.includes('nyaa')} on:click={() => toggleTracker('nyaa')} disabled={loading}>Nyaa</button>
-                    <button class="tracker-btn" class:active={selectedTrackers.includes('limetorrents')} on:click={() => toggleTracker('limetorrents')} disabled={loading}>Lime</button>
-                    <button class="tracker-btn" class:active={selectedTrackers.includes('thepiratebay')} on:click={() => toggleTracker('thepiratebay')} disabled={loading}>TPB</button>
-                    <button class="tracker-btn" class:active={selectedTrackers.includes('eztv')} on:click={() => toggleTracker('eztv')} disabled={loading}>EZTV</button>
+                    {#each trackerExtensions as tracker (tracker.id)}
+                        <button class="tracker-btn" class:active={selectedTrackers.includes(tracker.id)} on:click={() => toggleTracker(tracker.id)} disabled={loading}>{tracker.label}</button>
+                    {/each}
                 </div>
             </div>
         </div>

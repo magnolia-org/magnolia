@@ -17,9 +17,9 @@ mod subtitles;
 mod subtitle_packs;
 mod anime_list;
 mod updater;
+mod extensions;
 
-use search::{nyaa::NyaaProvider, limetorrents::LimeTorrentsProvider, piratebay::PirateBayProvider,
-             SearchProvider};
+use extensions::ExtensionManager;
 use std::sync::{Arc, Mutex};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -142,151 +142,129 @@ async fn mpv_set_option_string(
 
 // ── search commands ──────────────────────────────────────────────────────────
 
-#[tauri::command]
-async fn search_nyaa(query: String) -> Result<Vec<search::SearchResult>, String> {
-    let provider = NyaaProvider::new();
-    provider.search(&query).await.map_err(|e| e.to_string())
+/// Run a set of tracker extensions in parallel and collect their results.
+async fn search_tracker_extensions(
+    trackers: Vec<extensions::LoadedExtension>,
+    query: String,
+    media_type: Option<String>,
+    imdb_id: Option<String>,
+    season: Option<u32>,
+    episode: Option<u32>,
+) -> Vec<search::SearchResult> {
+    let mut handles = vec![];
+
+    for ext in trackers {
+        let ctx = extensions::runtime::TrackerSearchContext {
+            query: query.clone(),
+            media_type: media_type.clone(),
+            imdb_id: imdb_id.clone(),
+            season,
+            episode,
+        };
+        // Rhai execution and its HTTP calls are blocking
+        handles.push(tokio::task::spawn_blocking(move || {
+            let result = extensions::runtime::run_tracker_search(
+                &ext.source,
+                &ext.manifest,
+                &ext.field_values,
+                &ctx,
+            );
+            (ext.id, result)
+        }));
+    }
+
+    let mut all_results = Vec::new();
+    for handle in handles {
+        match handle.await {
+            Ok((id, Ok(results))) => {
+                println!("tracker extension {} returned {} results", id, results.len());
+                all_results.extend(results);
+            }
+            Ok((id, Err(e))) => println!("tracker extension {} error: {}", id, e),
+            Err(e) => println!("tracker extension task panicked: {}", e),
+        }
+    }
+    all_results
 }
 
 #[tauri::command]
 async fn search_nyaa_filtered(
+    ext_manager: State<'_, Arc<ExtensionManager>>,
     query: String,
-    _season: Option<u32>,
-    _episode: Option<u32>,
+    season: Option<u32>,
+    episode: Option<u32>,
     _is_movie: bool,
     media_type: Option<String>, // "anime", "tv", "movie"
-    tracker_preference: Option<Vec<String>>, // ["nyaa", "limetorrents", ...] or None for auto
-    imdb_id: Option<String>, // For EZTV: pass IMDB ID like "tt1234567" or "1234567"
+    tracker_preference: Option<Vec<String>>, // extension ids, or None/[] for auto
+    imdb_id: Option<String>, // For trackers that support IMDB lookup
 ) -> Result<Vec<search::SearchResult>, String> {
     println!("search_nyaa_filtered called with tracker_preference: {:?}, imdb_id: {:?}", tracker_preference, imdb_id);
-    
+
     // Normalize query
     let normalized_query = query
         .replace("-", " ")
         .replace(":", " ")
         .replace("_", " ");
-    
-    // Determine if this is auto mode
+
     let is_auto_mode = match &tracker_preference {
         Some(prefs) => prefs.is_empty(),
         None => true,
     };
-    
     let is_anime = media_type.as_deref() == Some("anime");
-    
-    let trackers: Vec<String> = if let Some(prefs) = tracker_preference {
-        if prefs.is_empty() {
-            match media_type.as_deref() {
-                Some("anime") => vec!["nyaa".to_string()],
-                _ => {
-                    let mut t = vec!["limetorrents".to_string(), "thepiratebay".to_string()];
-                    if imdb_id.is_some() {
-                        t.push("eztv".to_string());
-                    }
-                    t
-                }
-            }
-        } else {
-            prefs
-        }
+
+    let all_trackers = ext_manager.enabled_trackers().await;
+
+    let selected: Vec<extensions::LoadedExtension> = if is_auto_mode {
+        // Auto mode: anime → anime trackers, everything else → general trackers
+        all_trackers
+            .iter()
+            .filter(|e| e.manifest.is_anime == Some(is_anime))
+            .cloned()
+            .collect()
     } else {
-        // null/undefined means auto mode
-        match media_type.as_deref() {
-            Some("anime") => vec!["nyaa".to_string()],
-            _ => {
-                let mut t = vec!["limetorrents".to_string(), "thepiratebay".to_string()];
-                if imdb_id.is_some() {
-                    t.push("eztv".to_string());
-                }
-                t
-            }
-        }
+        let prefs = tracker_preference.unwrap_or_default();
+        all_trackers
+            .iter()
+            .filter(|e| prefs.contains(&e.id))
+            .cloned()
+            .collect()
     };
-    
-    println!("Using trackers: {:?}", trackers);
-    
-    // Helper function to search trackers
-    async fn search_trackers(
-        trackers: Vec<String>,
-        query: String,
-        imdb_id: Option<String>,
-    ) -> Vec<search::SearchResult> {
-        let mut handles = vec![];
-        
-        for tracker in trackers {
-            let query_clone = query.clone();
-            let imdb_clone = imdb_id.clone();
-            
-            let handle = tokio::spawn(async move {
-                let result: Result<Vec<search::SearchResult>, Box<dyn std::error::Error + Send + Sync>> = match tracker.as_str() {
-                    "nyaa" => {
-                        println!("Searching Nyaa...");
-                        NyaaProvider::new().search(&query_clone).await
-                    }
-                    "limetorrents" => {
-                        println!("Searching LimeTorrents...");
-                        LimeTorrentsProvider::new().search(&query_clone).await
-                    }
-                    "thepiratebay" => {
-                        println!("Searching ThePirateBay...");
-                        let provider = PirateBayProvider::new();
-                        if let Some(ref imdb) = imdb_clone {
-                            provider.search_with_imdb(&query_clone, Some(imdb)).await
-                        } else {
-                            provider.search(&query_clone).await
-                        }
-                    }
-                    "eztv" => {
-                        if let Some(ref imdb) = imdb_clone {
-                            println!("Searching EZTV with IMDB ID: {}", imdb);
-                            search::eztv::EZTVProvider::new().search_by_imdb(imdb).await
-                        } else {
-                            println!("EZTV requires IMDB ID, skipping");
-                            Ok(vec![])
-                        }
-                    }
-                    _ => {
-                        println!("Unknown tracker: {}", tracker);
-                        Ok(vec![])
-                    }
-                };
-                
-                match result {
-                    Ok(results) => {
-                        println!("{} returned {} results", tracker, results.len());
-                        results
-                    }
-                    Err(e) => {
-                        println!("{} error: {}", tracker, e);
-                        vec![]
-                    }
-                }
-            });
-            handles.push(handle);
-        }
-        
-        let mut all_results = Vec::new();
-        for handle in handles {
-            if let Ok(results) = handle.await {
-                all_results.extend(results);
-            }
-        }
-        all_results
-    }
-    
-    let mut all_results = search_trackers(trackers, normalized_query.clone(), imdb_id.clone()).await;
-    
+
+    println!(
+        "Using tracker extensions: {:?}",
+        selected.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+    );
+
+    let mut all_results = search_tracker_extensions(
+        selected,
+        normalized_query.clone(),
+        media_type.clone(),
+        imdb_id.clone(),
+        season,
+        episode,
+    )
+    .await;
+
     if is_auto_mode && is_anime && all_results.is_empty() {
         println!("Anime search returned no results, falling back to regular trackers");
-        let mut fallback_trackers = vec!["limetorrents".to_string(), "thepiratebay".to_string()];
-        if imdb_id.is_some() {
-            fallback_trackers.push("eztv".to_string());
-        }
-        all_results = search_trackers(fallback_trackers, normalized_query.clone(), imdb_id.clone()).await;
+        let fallback: Vec<extensions::LoadedExtension> = all_trackers
+            .iter()
+            .filter(|e| e.manifest.is_anime == Some(false))
+            .cloned()
+            .collect();
+        all_results = search_tracker_extensions(
+            fallback,
+            normalized_query.clone(),
+            media_type.clone(),
+            imdb_id.clone(),
+            season,
+            episode,
+        )
+        .await;
     }
-    
+
     println!("Total results before deduplication: {}", all_results.len());
-    
+
     let mut seen_hashes = std::collections::HashSet::new();
     all_results.retain(|result| {
         if let Some(hash) = extract_info_hash(&result.magnet_link) {
@@ -295,7 +273,7 @@ async fn search_nyaa_filtered(
             true
         }
     });
-    
+
     println!("Total results after deduplication: {}", all_results.len());
     Ok(all_results)
 }
@@ -307,13 +285,6 @@ fn extract_info_hash(magnet: &str) -> Option<String> {
         .find(|part| part.starts_with("xt=urn:btih:"))
         .and_then(|part| part.strip_prefix("xt=urn:btih:"))
         .map(|hash| hash.to_lowercase())
-}
-
-#[tauri::command]
-async fn search_eztv_by_imdb(imdb_id: String) -> Result<Vec<search::SearchResult>, String> {
-    println!("Searching EZTV with IMDb ID: {}", imdb_id);
-    let provider = search::eztv::EZTVProvider::new();
-    provider.search_by_imdb(&imdb_id).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -788,6 +759,9 @@ fn main() {
             let settings_manager = SettingsManager::new(app_data_dir.clone());
             app.manage(settings_manager);
 
+            let extension_manager = Arc::new(ExtensionManager::new(app_data_dir.clone()));
+            app.manage(extension_manager);
+
             let logger = Logger::new(&app_handle)
                 .expect("failed to create logger");
             app.manage(logger);
@@ -961,9 +935,7 @@ fn main() {
             torrent::resume_torrent,
             torrent::remove_torrent,
             torrent::get_download_dir,
-            search_nyaa,
             search_nyaa_filtered,
-            search_eztv_by_imdb,
             save_torrent_selection,
             save_multiple_torrent_selections,
             get_saved_selection,
@@ -1003,6 +975,13 @@ fn main() {
             open_external_url,
             subtitles::fetch_subtitles,
             subtitles::download_subtitle,
+            extensions::list_extensions,
+            extensions::install_extension_from_path,
+            extensions::install_extension_from_url,
+            extensions::remove_extension,
+            extensions::set_extension_enabled,
+            extensions::set_extension_field_values,
+            extensions::fetch_extension_subtitles,
             subtitle_packs::import_subtitle_pack,
             subtitle_packs::get_subtitle_pack_for_episode,
             subtitle_packs::get_subtitle_pack_coverage,

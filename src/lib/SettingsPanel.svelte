@@ -290,6 +290,17 @@
             </div>
           </div>
         </div>
+        <div class="setting-item">
+          <div class="setting-label">
+            <span>Extensions</span>
+          </div>
+          <div class="setting-control">
+            <button class="manage-btn" on:click={() => { openModal('extensions'); closeSettings(); }} type="button">
+              <i class="ri-puzzle-line"></i>
+              Manage
+            </button>
+          </div>
+        </div>
       </div>
 
       <div class="about-link">
@@ -302,6 +313,24 @@
 </div>
 
 <style>
+  .manage-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    color: #fff;
+    padding: 6px 12px;
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .manage-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+  }
+
   .about-link {
     padding: 8px 0;
     display: flex;

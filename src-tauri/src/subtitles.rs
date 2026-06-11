@@ -127,6 +127,23 @@ pub async fn fetch_subtitles(
     Ok(unique)
 }
 
+fn extension_from_name(name: &str) -> Option<&'static str> {
+    let lower = name.to_lowercase();
+    // strip query string for URLs
+    let lower = lower.split('?').next().unwrap_or(&lower);
+    if lower.ends_with(".ass") || lower.ends_with(".ssa") {
+        Some("ass")
+    } else if lower.ends_with(".vtt") {
+        Some("vtt")
+    } else if lower.ends_with(".sub") {
+        Some("sub")
+    } else if lower.ends_with(".srt") {
+        Some("srt")
+    } else {
+        None
+    }
+}
+
 #[tauri::command]
 pub async fn download_subtitle(url: String) -> Result<String, String> {
     let bytes = reqwest::get(&url)
@@ -136,32 +153,32 @@ pub async fn download_subtitle(url: String) -> Result<String, String> {
         .await
         .map_err(|e| format!("Read failed: {}", e))?;
 
-    let cursor = std::io::Cursor::new(bytes);
-    let mut archive =
-        zip::ZipArchive::new(cursor).map_err(|e| format!("ZIP open failed: {}", e))?;
-
     let mut subtitle_content: Option<Vec<u8>> = None;
     let mut subtitle_ext = "srt".to_string();
 
-    for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .map_err(|e| format!("ZIP read failed: {}", e))?;
-        let name = file.name().to_lowercase();
-        if name.ends_with(".srt") || name.ends_with(".ass") || name.ends_with(".vtt") {
-            subtitle_ext = if name.ends_with(".ass") {
-                "ass".to_string()
-            } else if name.ends_with(".vtt") {
-                "vtt".to_string()
-            } else {
-                "srt".to_string()
-            };
-            let mut content = Vec::new();
-            file.read_to_end(&mut content)
-                .map_err(|e| format!("Read sub file failed: {}", e))?;
-            subtitle_content = Some(content);
-            break;
+    if bytes.starts_with(b"PK") {
+        // ZIP archive — extract the first subtitle file inside
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive =
+            zip::ZipArchive::new(cursor).map_err(|e| format!("ZIP open failed: {}", e))?;
+
+        for i in 0..archive.len() {
+            let mut file = archive
+                .by_index(i)
+                .map_err(|e| format!("ZIP read failed: {}", e))?;
+            if let Some(ext) = extension_from_name(file.name()) {
+                subtitle_ext = ext.to_string();
+                let mut content = Vec::new();
+                file.read_to_end(&mut content)
+                    .map_err(|e| format!("Read sub file failed: {}", e))?;
+                subtitle_content = Some(content);
+                break;
+            }
         }
+    } else {
+        // Raw subtitle file (extension subtitle sources may link directly)
+        subtitle_ext = extension_from_name(&url).unwrap_or("srt").to_string();
+        subtitle_content = Some(bytes.to_vec());
     }
 
     let content = subtitle_content

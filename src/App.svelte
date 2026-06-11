@@ -10,6 +10,7 @@
   import Onboarding from "./lib/Onboarding.svelte";
   import CacheManager from "./lib/CacheManager.svelte";
   import AboutModal from "./lib/AboutModal.svelte";
+  import ExtensionManager from "./lib/ExtensionManager.svelte";
   import Updater from "./lib/Updater.svelte";
   import { myListStore } from "./lib/stores/listStore.js";
   import { watchHistoryStore } from "./lib/stores/watchHistoryStore.js";
@@ -288,6 +289,10 @@
     <CacheManager on:close={closeModal} />
   {/if}
   
+  {#if activeModal === 'extensions'}
+    <ExtensionManager on:close={closeModal} />
+  {/if}
+
   {#if activeModal === 'about'}
     <AboutModal on:close={closeModal} />
   {/if}

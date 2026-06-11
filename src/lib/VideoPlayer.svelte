@@ -373,33 +373,96 @@
     if (loadingExternalSubs) return;
     loadingExternalSubs = true;
     lastSubtitleFetchKey = fetchKey;
-    
+    extensionSubsFetched = false;
+
+    let subs = [];
     try {
-      const subs = await invoke('fetch_subtitles', {
+      subs = await invoke('fetch_subtitles', {
         tmdbId: String(mediaId),
         mediaType,
         season: seasonNum != null ? Number(seasonNum) : null,
         episode: episodeNum != null ? Number(episodeNum) : null,
       });
+    } catch (error) {
+      console.error("failed to load external subtitles:", error);
+    }
+
+    // Auto-fetch subtitle extensions run alongside the built-in source
+    try {
+      const extSubs = await invoke('fetch_extension_subtitles', {
+        tmdbId: String(mediaId),
+        mediaType,
+        season: seasonNum != null ? Number(seasonNum) : null,
+        episode: episodeNum != null ? Number(episodeNum) : null,
+        autoOnly: true,
+      });
+      subs = subs.concat(extSubs);
+    } catch (error) {
+      console.error("failed to load extension subtitles:", error);
+    }
+
+    try {
       // Sort subtitles alphabetically by language
       subs.sort((a, b) => {
         const langA = (a.language || "").toLowerCase();
         const langB = (b.language || "").toLowerCase();
         return langA.localeCompare(langB);
       });
-      
+
       externalSubtitles = subs;
       console.log("loaded external subtitles:", externalSubtitles.length);
-      
+
       // Try to apply subtitle preference if external subs were loaded
       if (subs.length > 0 && magnetLink) {
         setTimeout(() => loadTrackPreferences(), 100);
       }
-    } catch (error) {
-      console.error("failed to load external subtitles:", error);
-      externalSubtitles = [];
     } finally {
       loadingExternalSubs = false;
+    }
+  }
+
+  // Subtitle extensions that require a manual "Fetch Subtitles" trigger
+  let manualSubtitleExtensions = [];
+  let fetchingExtensionSubs = false;
+  let extensionSubsFetched = false;
+
+  async function loadManualSubtitleExtensions() {
+    try {
+      const exts = await invoke('list_extensions');
+      manualSubtitleExtensions = exts.filter(
+        e => e.enabled && e.manifest.type === 'subtitles' && !e.manifest.can_auto_fetch
+      );
+    } catch (e) {
+      manualSubtitleExtensions = [];
+    }
+  }
+  loadManualSubtitleExtensions();
+
+  async function fetchExtensionSubtitles() {
+    if (fetchingExtensionSubs) return;
+    fetchingExtensionSubs = true;
+    try {
+      const extSubs = await invoke('fetch_extension_subtitles', {
+        tmdbId: String(mediaId),
+        mediaType,
+        season: seasonNum != null ? Number(seasonNum) : null,
+        episode: episodeNum != null ? Number(episodeNum) : null,
+        autoOnly: false,
+      });
+      // Merge, dropping duplicates by URL
+      const seen = new Set(externalSubtitles.map(s => s.url));
+      const merged = externalSubtitles.concat(extSubs.filter(s => !seen.has(s.url)));
+      merged.sort((a, b) => {
+        const langA = (a.language || "").toLowerCase();
+        const langB = (b.language || "").toLowerCase();
+        return langA.localeCompare(langB);
+      });
+      externalSubtitles = merged;
+      extensionSubsFetched = true;
+    } catch (error) {
+      console.error("failed to fetch extension subtitles:", error);
+    } finally {
+      fetchingExtensionSubs = false;
     }
   }
 
@@ -1236,15 +1299,16 @@
     selectedSubtitleTrack = trackIndex;
     loadingSubtitle = true;
     try {
-      if (track.source === "subdl") {
-        // Download ZIP from SubDL, extract to temp file, load via sub-add
-        const filePath = await invoke("download_subtitle", { url: track.url });
-        await invoke("mpv_run_command", { args: ["sub-add", filePath, "select"] });
-        selectedSubtitleLanguage = track.lang || track.language;
-      } else if (track.source === "local") {
+      if (track.source === "local") {
         // Local subtitle pack file — load directly from disk
         await invoke("mpv_run_command", { args: ["sub-add", track.url, "select"] });
         selectedSubtitleLanguage = null;
+      } else if (track.url && /^https?:/i.test(track.url)) {
+        // External subtitle (SubDL or extension source) — download (and
+        // unzip if needed) to a temp file, then load via sub-add
+        const filePath = await invoke("download_subtitle", { url: track.url });
+        await invoke("mpv_run_command", { args: ["sub-add", filePath, "select"] });
+        selectedSubtitleLanguage = track.lang || track.language;
       } else {
         // Embedded subtitle — use mpv track id
         const subTrack = videoMetadata?.subtitle_tracks?.[trackIndex];
@@ -2495,6 +2559,24 @@
                 <i class="ri-folder-open-line"></i> Load from file...
               </span>
             </button>
+            {#if manualSubtitleExtensions.length > 0}
+              <button
+                class="player-track-option menu-item"
+                on:click|stopPropagation={fetchExtensionSubtitles}
+                disabled={fetchingExtensionSubs}
+              >
+                <span class="player-track-info">
+                  {#if extensionSubsFetched && !fetchingExtensionSubs}
+                    <i class="ri-check-line"></i> Subtitles fetched
+                  {:else}
+                    <i class="ri-download-cloud-line"></i> Fetch subtitles
+                  {/if}
+                </span>
+                {#if fetchingExtensionSubs}
+                  <span class="loading-spinner-small"></span>
+                {/if}
+              </button>
+            {/if}
             <div class="menu-divider"></div>
 
             <button
@@ -2582,8 +2664,8 @@
                       <span class="player-track-lang">External {i + 1}</span>
                     {/if}
                   </span>
-                  {#if track.source === 'subdl'}
-                    <span class="player-track-badge subdl-badge">SUBDL</span>
+                  {#if track.source}
+                    <span class="player-track-badge subdl-badge">{track.source.toUpperCase().slice(0, 10)}</span>
                   {:else}
                     <span class="player-track-badge">SRT</span>
                   {/if}

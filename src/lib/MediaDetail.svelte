@@ -668,9 +668,9 @@
     const trackerArray = Array.isArray(storedTrackers) && storedTrackers.length > 0 ? storedTrackers : null;
     console.log("Tracker preference:", trackerArray);
 
-    // Fetch IMDB ID for EZTV support (TV shows only)
+    // Fetch IMDB ID — tracker extensions (e.g. EZTV) may use it for lookup
     let imdbId = null;
-    if (!isMovie && (!trackerArray || trackerArray.includes('eztv'))) {
+    if (!isMovie) {
       try {
         const externalIds = await getTVExternalIds(details.id);
         if (externalIds?.imdb_id) {
