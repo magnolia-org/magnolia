@@ -180,9 +180,6 @@
           <span class="header-sub">{extensions.length} installed</span>
         {/if}
       </div>
-      <button class="close-btn" on:click={() => dispatch('close')} aria-label="Close">
-        <i class="ri-close-line"></i>
-      </button>
     </div>
 
     <div class="modal-body">

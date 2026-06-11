@@ -280,7 +280,10 @@ async fn search_nyaa_filtered(
 
 // Extract info hash from magnet link for deduplication
 fn extract_info_hash(magnet: &str) -> Option<String> {
-    magnet
+    // Strip the scheme so `xt=` matches even as the first parameter
+    // ("magnet:?xt=urn:btih:...").
+    let params = magnet.split_once('?').map(|(_, q)| q).unwrap_or(magnet);
+    params
         .split('&')
         .find(|part| part.starts_with("xt=urn:btih:"))
         .and_then(|part| part.strip_prefix("xt=urn:btih:"))
@@ -705,6 +708,26 @@ fn open_external_url(url: String) -> Result<(), String> {
     }
     
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_info_hash;
+
+    #[test]
+    fn extract_info_hash_handles_leading_scheme() {
+        // hash as the first magnet parameter (the common case)
+        assert_eq!(
+            extract_info_hash("magnet:?xt=urn:btih:ABCDEF123456&dn=Some%20Title&tr=udp%3A%2F%2Ffoo"),
+            Some("abcdef123456".to_string())
+        );
+        // hash not first
+        assert_eq!(
+            extract_info_hash("magnet:?dn=Some%20Title&xt=urn:btih:ABCDEF123456"),
+            Some("abcdef123456".to_string())
+        );
+        assert_eq!(extract_info_hash("magnet:?dn=No%20Hash"), None);
+    }
 }
 
 fn main() {
