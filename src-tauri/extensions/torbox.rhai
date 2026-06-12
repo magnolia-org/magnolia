@@ -48,6 +48,8 @@ fn resolve(ctx) {
 }
 
 
+fn api() { "https://api.torbox.app/v1/api" }
+
 fn require_key(ctx) {
     let key = ctx.fields.api_key;
     if key == "" {
