@@ -10,7 +10,7 @@ use crate::search::{parse_audio_codec, parse_title_metadata, SearchResult};
 use crate::subtitles::Subtitle;
 use regex::Regex;
 use rhai::{Array, Dynamic, Engine, Map as RhaiMap, Scope};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -209,6 +209,12 @@ pub fn build_engine() -> Engine {
         dynamic_to_i64(&value, default)
     });
     engine.register_fn("log", |s: &str| log::info!("[extension] {}", s));
+    // Bounded sleep — debrid extensions poll their service while a torrent is
+    // being cached. Capped so a script can't hang the blocking thread pool.
+    engine.register_fn("sleep_ms", |ms: i64| {
+        let capped = ms.clamp(0, 15_000) as u64;
+        std::thread::sleep(std::time::Duration::from_millis(capped));
+    });
 
     // Shared release-title parser so tracker extensions get the same
     // season/episode/quality detection as the built-in providers had.
@@ -493,4 +499,166 @@ pub fn run_subtitle_fetch(
         });
     }
     Ok(results)
+}
+
+fn debrid_service_name(manifest: &ExtensionManifest) -> String {
+    manifest
+        .debrid_name
+        .clone()
+        .unwrap_or_else(|| manifest.name.clone())
+}
+
+pub struct DebridListContext {
+    pub magnet: String,
+    pub season: Option<u32>,
+    pub episode: Option<u32>,
+    pub media_type: Option<String>,
+}
+
+/// A file inside a debrid torrent, as reported by the extension's
+/// `list_files(ctx)`. Shaped to feed Magnolia's existing (torrent) file
+/// selector: `index` is the id the extension wants back in `resolve(ctx)`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DebridFile {
+    pub index: i64,
+    pub name: String,
+    pub size: u64,
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDebridFile {
+    id: i64,
+    name: String,
+    #[serde(default)]
+    size: Option<i64>,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+/// Execute a debrid extension's `list_files(ctx)`: given a magnet, return the
+/// files in that torrent. Magnolia runs its own automatic/manual file selection
+/// over this list — the script must NOT pick a file itself. Blocking — call
+/// from `spawn_blocking`.
+pub fn run_debrid_list_files(
+    source: &str,
+    manifest: &ExtensionManifest,
+    field_values: &HashMap<String, String>,
+    ctx: &DebridListContext,
+) -> Result<Vec<DebridFile>, String> {
+    let service = debrid_service_name(manifest);
+
+    let mut ctx_map = RhaiMap::new();
+    ctx_map.insert("magnet".into(), ctx.magnet.clone().into());
+    ctx_map.insert("season".into(), opt_u32_to_dynamic(ctx.season));
+    ctx_map.insert("episode".into(), opt_u32_to_dynamic(ctx.episode));
+    ctx_map.insert(
+        "media_type".into(),
+        opt_string_to_dynamic(ctx.media_type.clone()),
+    );
+    ctx_map.insert(
+        "fields".into(),
+        Dynamic::from_map(build_fields_map(&manifest.fields, field_values)),
+    );
+
+    let array = call_entry_point(source, "list_files", ctx_map)
+        .map_err(|e| format!("[{}] {}", service, e))?;
+
+    let mut files = Vec::new();
+    for item in array {
+        let raw: RawDebridFile = match rhai::serde::from_dynamic(&item) {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("[debrid {}] skipping invalid file entry: {}", service, e);
+                continue;
+            }
+        };
+        if raw.name.is_empty() {
+            continue;
+        }
+        let path = raw.path.unwrap_or_else(|| raw.name.clone());
+        files.push(DebridFile {
+            index: raw.id,
+            size: raw.size.unwrap_or(0).max(0) as u64,
+            name: raw.name,
+            path,
+        });
+    }
+    Ok(files)
+}
+
+pub struct DebridResolveContext {
+    pub magnet: String,
+    /// The id (from `list_files`) of the file Magnolia's selection chose.
+    pub file_id: Option<i64>,
+    pub file_name: Option<String>,
+    pub season: Option<u32>,
+    pub episode: Option<u32>,
+    pub media_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDebridStream {
+    url: String,
+}
+
+/// Execute a debrid extension's `resolve(ctx)`, which turns the file Magnolia
+/// already selected (`ctx.file_id`) into a directly-playable HTTP URL. The
+/// script may return either a bare URL string or a map `#{ url: "..." }`.
+/// Blocking — call from `spawn_blocking`.
+pub fn run_debrid_resolve(
+    source: &str,
+    manifest: &ExtensionManifest,
+    field_values: &HashMap<String, String>,
+    ctx: &DebridResolveContext,
+) -> Result<String, String> {
+    let service = debrid_service_name(manifest);
+
+    let mut ctx_map = RhaiMap::new();
+    ctx_map.insert("magnet".into(), ctx.magnet.clone().into());
+    ctx_map.insert(
+        "file_id".into(),
+        match ctx.file_id {
+            Some(i) => Dynamic::from_int(i),
+            None => Dynamic::UNIT,
+        },
+    );
+    ctx_map.insert("file_name".into(), opt_string_to_dynamic(ctx.file_name.clone()));
+    ctx_map.insert("season".into(), opt_u32_to_dynamic(ctx.season));
+    ctx_map.insert("episode".into(), opt_u32_to_dynamic(ctx.episode));
+    ctx_map.insert(
+        "media_type".into(),
+        opt_string_to_dynamic(ctx.media_type.clone()),
+    );
+    ctx_map.insert(
+        "fields".into(),
+        Dynamic::from_map(build_fields_map(&manifest.fields, field_values)),
+    );
+
+    let engine = build_engine();
+    let ast = engine
+        .compile(source)
+        .map_err(|e| format!("script compile error: {}", e))?;
+    let mut scope = Scope::new();
+    let result: Dynamic = engine
+        .call_fn(&mut scope, &ast, "resolve", (Dynamic::from_map(ctx_map),))
+        .map_err(|e| format!("[{}] resolve() failed: {}", service, e))?;
+
+    // Accept a bare URL string or a map with a `url` field.
+    let url = if result.is_string() {
+        result.into_string().unwrap_or_default()
+    } else {
+        let raw: RawDebridStream = rhai::serde::from_dynamic(&result)
+            .map_err(|e| format!("[{}] resolve() must return a url string or #{{ url }}: {}", service, e))?;
+        raw.url
+    };
+
+    let url = url.trim().to_string();
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(format!(
+            "[{}] resolve() returned an invalid stream url: '{}'",
+            service, url
+        ));
+    }
+    Ok(url)
 }

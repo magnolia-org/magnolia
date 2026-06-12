@@ -78,6 +78,46 @@
   let isPlayLoading = false;
   let detectedIsAnime = false;
 
+  // Resolve the active streaming client. Returns the debrid extension when one
+  // is selected, or null for the built-in torrent pipeline.
+  async function getDebridClient() {
+    try {
+      const settings = await invoke("get_settings");
+      const clientId = settings.streaming_client || "builtin";
+      if (clientId === "builtin") return null;
+      const exts = await invoke("list_extensions");
+      return (
+        exts.find(
+          (e) => e.id === clientId && e.manifest.type === "debrid" && e.enabled,
+        ) || null
+      );
+    } catch (e) {
+      console.error("failed to resolve streaming client:", e);
+      return null;
+    }
+  }
+
+  // Fetch the file list for a magnet so the selection UI/auto-matcher can run.
+  // With a debrid client active the list comes from the extension (no local
+  // torrent); otherwise librqbit resolves the metadata. Returns
+  // { handleId, info } where info.files is shaped { index, name, size, path }.
+  async function fetchTorrentMetadata(magnetLink) {
+    const debrid = await getDebridClient();
+    if (debrid) {
+      const files = await invoke("list_debrid_files", {
+        extId: debrid.id,
+        magnet: magnetLink,
+        season: pendingPlayRequest?.season ?? null,
+        episode: pendingPlayRequest?.episode ?? null,
+        mediaType: media.media_type ?? null,
+      });
+      return { handleId: null, info: { files } };
+    }
+    const handleId = await invoke("add_torrent", { magnetOrUrl: magnetLink });
+    const info = await invoke("get_torrent_info", { handleId });
+    return { handleId, info };
+  }
+
   $: {
     if (media && !media.media_type) {
       media.media_type = media.name && !media.title ? "tv" : "movie";
@@ -778,11 +818,10 @@
         handleId = torrentFileCache[firstTorrent.magnetLink].handleId;
       } else {
         console.log('[cache] fetching new file list for torrent');
-        handleId = await invoke("add_torrent", {
-          magnetOrUrl: firstTorrent.magnetLink,
-        });
-        const info = await invoke("get_torrent_info", { handleId });
-        
+        const meta = await fetchTorrentMetadata(firstTorrent.magnetLink);
+        handleId = meta.handleId;
+        const info = meta.info;
+
         files = info.files.filter(f => {
           const ext = f.name.toLowerCase();
           return ext.endsWith('.mkv') || ext.endsWith('.mp4') || 
@@ -852,15 +891,13 @@
     // then try to match the episode.
 
     try {
-      // 1. Add torrent to get metadata
-      // Note: add_torrent returns a handle_id
-      const handleId = await invoke("add_torrent", {
-        magnetOrUrl: torrent.magnet_link,
-      });
-      const info = await invoke("get_torrent_info", { handleId });
+      // 1. Get the torrent's file list (from the debrid client when active,
+      //    otherwise librqbit metadata). add_torrent returns a handle_id;
+      //    debrid mode has no local handle (handleId is null).
+      const { handleId, info } = await fetchTorrentMetadata(torrent.magnet_link);
 
       console.log("Torrent info:", info);
-      
+
       // Filter to video files only
       const videoFiles = info.files.filter(f => {
         const ext = f.name.toLowerCase();
@@ -1016,7 +1053,12 @@
     try {
       let handleId = existingHandleId;
       if (handleId === null) {
-        handleId = await invoke("add_torrent", { magnetOrUrl: magnetLink });
+        // Built-in client needs a local torrent handle; a debrid client streams
+        // remotely from the magnet, so leave handleId null for it.
+        const debrid = await getDebridClient();
+        if (!debrid) {
+          handleId = await invoke("add_torrent", { magnetOrUrl: magnetLink });
+        }
       }
 
       // Don't update progress here - let VideoPlayer handle it to preserve saved timestamps
@@ -1294,11 +1336,10 @@
         handleId = torrentFileCache[newTorrent.magnetLink].handleId;
       } else {
         console.log('[cache] fetching new file list for torrent');
-        handleId = await invoke("add_torrent", {
-          magnetOrUrl: newTorrent.magnetLink,
-        });
-        const info = await invoke("get_torrent_info", { handleId });
-        
+        const meta = await fetchTorrentMetadata(newTorrent.magnetLink);
+        handleId = meta.handleId;
+        const info = meta.info;
+
         files = info.files.filter(f => {
           const ext = f.name.toLowerCase();
           return ext.endsWith('.mkv') || ext.endsWith('.mp4') || 

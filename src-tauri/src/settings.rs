@@ -19,6 +19,14 @@ pub struct Settings {
     pub hide_chapter_markers: bool,
     #[serde(default)]
     pub subtitle_language: String,
+    /// Streaming client: "builtin" (local torrent pipeline) or the id of an
+    /// installed debrid extension.
+    #[serde(default = "default_streaming_client")]
+    pub streaming_client: String,
+}
+
+fn default_streaming_client() -> String {
+    "builtin".to_string()
 }
 
 fn default_true() -> bool {
@@ -36,6 +44,7 @@ impl Default for Settings {
             check_for_updates: true,
             hide_chapter_markers: false,
             subtitle_language: String::new(),
+            streaming_client: default_streaming_client(),
         }
     }
 }

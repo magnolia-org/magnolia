@@ -475,8 +475,85 @@
     await invoke("mpv_set_option_string", { name: "speed", value: String(rate) }).catch(() => {});
   }
 
+  // Resolve the chosen streaming client. "builtin" (or a missing/disabled
+  // extension) means the local torrent pipeline; anything else is a debrid
+  // extension that turns the magnet into a remote HTTP stream.
+  async function resolveStreamingClient() {
+    let clientId = "builtin";
+    try {
+      const settings = await invoke("get_settings");
+      clientId = settings.streaming_client || "builtin";
+    } catch (e) {
+      console.error("Failed to load streaming client setting:", e);
+    }
+    if (clientId === "builtin") return null;
+    try {
+      const exts = await invoke("list_extensions");
+      const ext = exts.find(
+        (e) => e.id === clientId && e.manifest.type === "debrid" && e.enabled,
+      );
+      if (!ext) {
+        console.warn(`streaming client '${clientId}' unavailable, falling back to built-in`);
+        return null;
+      }
+      return ext;
+    } catch (e) {
+      console.error("Failed to resolve streaming client:", e);
+      return null;
+    }
+  }
+
+  // Stream a magnet through a debrid extension instead of the local torrent
+  // pipeline: resolve a remote HTTP URL and hand it straight to mpv. The file
+  // was already chosen by Magnolia's selection (fileIndex is the debrid file
+  // id from list_debrid_files), so the extension just resolves that id.
+  async function startDebridStream(debridExt) {
+    loading = true;
+    loadingPhase = "initializing";
+    loadingStatus.status = `Resolving via ${debridExt.manifest.debrid_name || debridExt.manifest.name}...`;
+    loadingStatus.phaseProgress = 30;
+
+    try {
+      const url = await invoke("resolve_debrid_stream", {
+        extId: debridExt.id,
+        magnet: magnetLink,
+        fileId: fileIndex !== null ? Number(fileIndex) : null,
+        fileName: null,
+        season: seasonNum ?? null,
+        episode: episodeNum ?? null,
+        mediaType: mediaType ?? null,
+      });
+      src = url;
+      loadingStatus.status = "Starting player...";
+      loadingStatus.phaseProgress = 90;
+      await invoke("load_file", { path: src });
+      // loading = false is set by the file_loaded mpv event listener
+    } catch (error) {
+      // Keep the loading overlay up so the error text + Cancel button stay
+      // visible (matches the built-in pipeline's poll-error behaviour).
+      console.error("Debrid resolve failed:", error);
+      loadingStatus.status = `${debridExt.manifest.debrid_name || debridExt.manifest.name}: ${error}`;
+      loadingPhase = "error";
+    }
+  }
+
   async function startStreamProcess() {
-    if (handleId === null || fileIndex === null) return;
+    if (handleId === null || fileIndex === null) {
+      // No torrent handle, but a debrid client may still resolve a bare magnet.
+      const debridExt = await resolveStreamingClient();
+      if (debridExt && magnetLink) {
+        await startDebridStream(debridExt);
+      } else {
+        loading = false;
+      }
+      return;
+    }
+
+    const debridExt = await resolveStreamingClient();
+    if (debridExt) {
+      await startDebridStream(debridExt);
+      return;
+    }
 
     const numericHandle = Number(handleId);
     const numericFile = Number(fileIndex);
@@ -2106,7 +2183,7 @@
       }
     }, 2000);
 
-    if (handleId !== null && fileIndex !== null) {
+    if ((handleId !== null && fileIndex !== null) || magnetLink) {
       startStreamProcess();
     } else {
       loading = false;

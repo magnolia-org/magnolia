@@ -21,6 +21,7 @@
 
   $: trackers = extensions.filter(e => e.manifest.type === 'tracker');
   $: subtitleSources = extensions.filter(e => e.manifest.type === 'subtitles');
+  $: debridSources = extensions.filter(e => e.manifest.type === 'debrid');
   $: dirtyIds = new Set(
     Object.keys(fieldDrafts).filter(
       id => JSON.stringify(fieldDrafts[id]) !== JSON.stringify(originalDrafts[id])
@@ -227,6 +228,7 @@
       {:else}
         {#each [
           { label: 'Trackers', icon: 'ri-radar-line', items: trackers },
+          { label: 'Streaming clients', icon: 'ri-cloud-line', items: debridSources },
           { label: 'Subtitle sources', icon: 'ri-closed-captioning-line', items: subtitleSources },
         ] as section}
           {#if section.items.length > 0}
@@ -243,7 +245,7 @@
                       {#if iconSrc(ext)}
                         <img src={iconSrc(ext)} alt={ext.manifest.name} />
                       {:else}
-                        <i class={ext.manifest.type === 'tracker' ? 'ri-radar-line' : 'ri-closed-captioning-line'}></i>
+                        <i class={ext.manifest.type === 'tracker' ? 'ri-radar-line' : ext.manifest.type === 'debrid' ? 'ri-cloud-line' : 'ri-closed-captioning-line'}></i>
                       {/if}
                     </div>
                     <div class="ext-details">
@@ -260,6 +262,9 @@
                         {/if}
                         {#if ext.manifest.type === 'subtitles'}
                           <span class="ext-badge auto-badge">{ext.manifest.can_auto_fetch ? 'Auto-fetch' : 'Manual'}</span>
+                        {/if}
+                        {#if ext.manifest.type === 'debrid'}
+                          <span class="ext-badge debrid-badge">Debrid</span>
                         {/if}
                       </div>
                       <div class="ext-meta">
@@ -328,13 +333,14 @@
                                 id="ext-field-{ext.id}-{field.key}"
                                 type="checkbox"
                                 checked={fieldDrafts[ext.id]?.[field.key] === 'true'}
-                                on:change={(e) => { fieldDrafts[ext.id][field.key] = e.target.checked ? 'true' : 'false'; }}
+                                on:change={(e) => { fieldDrafts[ext.id][field.key] = e.target.checked ? 'true' : 'false'; fieldDrafts = fieldDrafts; }}
                               />
                               <span class="toggle-slider"></span>
                             </label>
                           {:else if field.type === 'select'}
                             <select
                               id="ext-field-{ext.id}-{field.key}"
+                              class="setting-select ext-field-select"
                               bind:value={fieldDrafts[ext.id][field.key]}
                             >
                               {#each field.options || [] as option}
@@ -346,7 +352,8 @@
                               id="ext-field-{ext.id}-{field.key}"
                               type="number"
                               placeholder={field.placeholder || ''}
-                              bind:value={fieldDrafts[ext.id][field.key]}
+                              value={fieldDrafts[ext.id]?.[field.key] ?? ''}
+                              on:input={(e) => { fieldDrafts[ext.id][field.key] = e.target.value; fieldDrafts = fieldDrafts; }}
                             />
                           {:else}
                             <input
@@ -529,25 +536,6 @@
     border-color: var(--accent-color);
   }
 
-  .btn-standard {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
-    color: #fff;
-    padding: 8px 14px;
-    font-size: 13px;
-    cursor: pointer;
-    transition: background 0.2s;
-    white-space: nowrap;
-  }
-
-  .btn-standard:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.14);
-  }
-
   .btn-standard.accent {
     background: color-mix(in srgb, var(--accent-color, #9a6ad0) 28%, transparent);
     border-color: color-mix(in srgb, var(--accent-color, #9a6ad0) 45%, transparent);
@@ -555,11 +543,6 @@
 
   .btn-standard.accent:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent-color, #9a6ad0) 42%, transparent);
-  }
-
-  .btn-standard:disabled {
-    opacity: 0.45;
-    cursor: default;
   }
 
   .install-error {
@@ -754,6 +737,11 @@
     color: #b3e3c0;
   }
 
+  .ext-badge.debrid-badge {
+    background: rgba(120, 160, 230, 0.2);
+    color: #b2cbf3;
+  }
+
   .ext-meta {
     display: flex;
     align-items: center;
@@ -855,8 +843,7 @@
 
   .ext-field input[type='text'],
   .ext-field input[type='password'],
-  .ext-field input[type='number'],
-  .ext-field select {
+  .ext-field input[type='number'] {
     background: rgba(255, 255, 255, 0.06);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 7px;
@@ -868,12 +855,17 @@
     transition: border-color 0.15s;
   }
 
-  .ext-field input:focus,
-  .ext-field select:focus {
+  .ext-field input:focus {
     border-color: var(--accent-color);
   }
 
-  .ext-field select option {
+  .ext-field-select {
+    width: 230px;
+    font-size: 13px;
+    padding: 7px 32px 7px 10px;
+  }
+
+  .ext-field-select option {
     background: #1b1722;
   }
 
@@ -893,58 +885,15 @@
     gap: 4px;
   }
 
-  /* Toggle switch (matches settings panel styling) */
-  .toggle-switch {
-    position: relative;
-    display: inline-block;
-    width: 38px;
-    height: 22px;
-    flex-shrink: 0;
-  }
-
+  /* Small toggle variant used for checkbox fields — inherits visual style from global toggle-switch */
   .toggle-switch.small {
     width: 34px;
     height: 20px;
   }
 
-  .toggle-switch input {
-    opacity: 0;
-    width: 0;
-    height: 0;
-  }
-
-  .toggle-slider {
-    position: absolute;
-    cursor: pointer;
-    inset: 0;
-    background: rgba(255, 255, 255, 0.15);
-    border-radius: 99px;
-    transition: background 0.2s;
-  }
-
-  .toggle-slider::before {
-    content: '';
-    position: absolute;
-    height: 16px;
-    width: 16px;
-    left: 3px;
-    top: 3px;
-    background: #fff;
-    border-radius: 50%;
-    transition: transform 0.2s;
-  }
-
   .toggle-switch.small .toggle-slider::before {
     height: 14px;
     width: 14px;
-  }
-
-  .toggle-switch input:checked + .toggle-slider {
-    background: var(--accent-color, #9a6ad0);
-  }
-
-  .toggle-switch input:checked + .toggle-slider::before {
-    transform: translateX(16px);
   }
 
   .toggle-switch.small input:checked + .toggle-slider::before {

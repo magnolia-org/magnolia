@@ -1005,6 +1005,8 @@ fn main() {
             extensions::set_extension_enabled,
             extensions::set_extension_field_values,
             extensions::fetch_extension_subtitles,
+            extensions::list_debrid_files,
+            extensions::resolve_debrid_stream,
             subtitle_packs::import_subtitle_pack,
             subtitle_packs::get_subtitle_pack_for_episode,
             subtitle_packs::get_subtitle_pack_coverage,

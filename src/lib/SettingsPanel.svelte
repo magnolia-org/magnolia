@@ -1,5 +1,5 @@
 <script>
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { createEventDispatcher, onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { openModal } from './stores/modalStore.js';
   
@@ -13,9 +13,12 @@
   let hideRecommendations = false;
   let checkForUpdates = true;
   let subtitleLanguage = '';
+  let streamingClient = 'builtin';
+  let debridExtensions = [];
   let settingsPanel;
   let playerDropdownOpen = false;
   let langDropdownOpen = false;
+  let clientDropdownOpen = false;
   let settingsLoaded = false;
   
   const playerOptions = [
@@ -42,6 +45,19 @@
     { value: 'zh', label: 'Chinese', flag: 'CN' },
   ];
   
+  async function loadDebridExtensions() {
+    try {
+      const exts = await invoke('list_extensions');
+      debridExtensions = exts.filter(e => e.manifest.type === 'debrid' && e.enabled);
+      // If the selected client is no longer available, fall back to built-in.
+      if (streamingClient !== 'builtin' && !debridExtensions.some(e => e.id === streamingClient)) {
+        streamingClient = 'builtin';
+      }
+    } catch (e) {
+      console.error('failed to load debrid extensions:', e);
+    }
+  }
+
   onMount(async () => {
     try {
       const settings = await invoke('get_settings');
@@ -51,7 +67,9 @@
       hideRecommendations = settings.hide_recommendations;
       checkForUpdates = settings.check_for_updates !== undefined ? settings.check_for_updates : true;
       subtitleLanguage = settings.subtitle_language || '';
+      streamingClient = settings.streaming_client || 'builtin';
       console.log('loaded settings from backend:', settings);
+      await loadDebridExtensions();
       // Set loaded flag after a tick to ensure reactive statements see the loaded values
       await new Promise(resolve => setTimeout(resolve, 0));
       settingsLoaded = true;
@@ -59,6 +77,12 @@
       console.error('failed to load settings:', error);
       settingsLoaded = true;
     }
+
+    window.addEventListener('extensionsChanged', loadDebridExtensions);
+  });
+
+  onDestroy(() => {
+    window.removeEventListener('extensionsChanged', loadDebridExtensions);
   });
   
   async function saveSettings() {
@@ -71,7 +95,8 @@
         show_skip_prompts: showSkipPrompts,
         hide_recommendations: hideRecommendations,
         check_for_updates: checkForUpdates,
-        subtitle_language: subtitleLanguage
+        subtitle_language: subtitleLanguage,
+        streaming_client: streamingClient
       };
       await invoke('save_settings', { settings });
       console.log('settings saved to backend');
@@ -86,11 +111,16 @@
   // Auto-save when any setting changes (tracks the actual variables)
   $: if (settingsLoaded) {
     // This will re-run whenever externalPlayer, rememberPreferences, or showSkipPrompts change
-    externalPlayer, rememberPreferences, showSkipPrompts, hideRecommendations, checkForUpdates, subtitleLanguage;
+    externalPlayer, rememberPreferences, showSkipPrompts, hideRecommendations, checkForUpdates, subtitleLanguage, streamingClient;
     saveSettings();
   }
 
   $: selectedLangOption = langOptions.find(o => o.value === subtitleLanguage) ?? langOptions[0];
+  $: streamingClientOptions = [
+    { value: 'builtin', label: 'Built-in' },
+    ...debridExtensions.map(e => ({ value: e.id, label: e.manifest.debrid_name || e.manifest.name })),
+  ];
+  $: selectedClientOption = streamingClientOptions.find(o => o.value === streamingClient) ?? streamingClientOptions[0];
   
   function handleClickOutside(event) {
     if (settingsPanel && !settingsPanel.contains(event.target) && settingsActive) {
@@ -103,14 +133,16 @@
       if (!dropdown.contains(event.target)) {
         playerDropdownOpen = false;
         langDropdownOpen = false;
+        clientDropdownOpen = false;
       }
     }
   }
-  
+
   function closeSettings() {
     settingsActive = false;
     playerDropdownOpen = false;
     langDropdownOpen = false;
+    clientDropdownOpen = false;
     dispatch('close');
   }
   
@@ -138,6 +170,18 @@
   function selectLang(value) {
     subtitleLanguage = value;
     langDropdownOpen = false;
+  }
+
+  function toggleClientDropdown(event) {
+    event.stopPropagation();
+    clientDropdownOpen = !clientDropdownOpen;
+    playerDropdownOpen = false;
+    langDropdownOpen = false;
+  }
+
+  function selectClient(value) {
+    streamingClient = value;
+    clientDropdownOpen = false;
   }
 </script>
 
@@ -189,7 +233,43 @@
             </div>
           </div>
         </div>
-        
+
+        <div class="setting-item">
+          <div class="setting-label">
+            <span>Streaming client</span>
+            <span class="setting-hint">Built-in streams locally; debrid services stream from the cloud</span>
+          </div>
+          <div class="setting-control">
+            <div class="custom-dropdown">
+              <button
+                class="dropdown-button"
+                on:click={toggleClientDropdown}
+                type="button"
+              >
+                <span>{selectedClientOption?.label ?? 'Built-in'}</span>
+                <i class="ri-arrow-down-s-line dropdown-icon" class:open={clientDropdownOpen}></i>
+              </button>
+              {#if clientDropdownOpen}
+                <div class="dropdown-menu">
+                  {#each streamingClientOptions as option}
+                    <button
+                      class="dropdown-option"
+                      class:selected={option.value === streamingClient}
+                      on:click|stopPropagation={() => selectClient(option.value)}
+                      type="button"
+                    >
+                      {option.label}
+                      {#if option.value === streamingClient}
+                        <i class="ri-check-line"></i>
+                      {/if}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          </div>
+        </div>
+
         <div class="setting-item">
           <div class="setting-label">
             <span>Remember audio track & subtitle preference</span>
@@ -295,7 +375,7 @@
             <span>Extensions</span>
           </div>
           <div class="setting-control">
-            <button class="manage-btn" on:click={() => { openModal('extensions'); closeSettings(); }} type="button">
+            <button class="btn-standard" on:click={() => { openModal('extensions'); closeSettings(); }} type="button">
               <i class="ri-puzzle-line"></i>
               Manage
             </button>
@@ -313,22 +393,11 @@
 </div>
 
 <style>
-  .manage-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
-    color: #fff;
-    padding: 6px 12px;
-    font-size: 12.5px;
-    cursor: pointer;
-    transition: background 0.2s;
-  }
-
-  .manage-btn:hover {
-    background: rgba(255, 255, 255, 0.15);
+  .setting-hint {
+    display: block;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.35);
+    margin-top: 3px;
   }
 
   .about-link {

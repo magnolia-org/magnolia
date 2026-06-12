@@ -22,6 +22,7 @@ const PREINSTALLED: &[(&str, &str)] = &[
     ("limetorrents", include_str!("../../extensions/limetorrents.rhai")),
     ("thepiratebay", include_str!("../../extensions/thepiratebay.rhai")),
     ("eztv", include_str!("../../extensions/eztv.rhai")),
+    ("torbox", include_str!("../../extensions/torbox.rhai")),
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +67,8 @@ pub struct ExtensionManifest {
     #[serde(default)]
     pub can_auto_fetch: Option<bool>,
     #[serde(default)]
+    pub debrid_name: Option<String>,
+    #[serde(default)]
     pub fields: Vec<FieldDef>,
 }
 
@@ -100,9 +103,20 @@ impl ExtensionManifest {
                     );
                 }
             }
+            "debrid" => {
+                if self
+                    .debrid_name
+                    .as_deref()
+                    .map_or(true, |s| s.trim().is_empty())
+                {
+                    return Err(
+                        "manifest: 'debrid_name' is required for debrid extensions".to_string(),
+                    );
+                }
+            }
             other => {
                 return Err(format!(
-                    "manifest: 'type' must be 'tracker' or 'subtitles', got '{}'",
+                    "manifest: 'type' must be 'tracker', 'subtitles' or 'debrid', got '{}'",
                     other
                 ))
             }
@@ -459,7 +473,12 @@ mod tests {
         for (id, source) in PREINSTALLED {
             let manifest = runtime::parse_manifest(source)
                 .unwrap_or_else(|e| panic!("{}: {}", id, e));
-            assert_eq!(manifest.ext_type, "tracker", "{}", id);
+            // Trackers and debrid services both ship preinstalled.
+            assert!(
+                matches!(manifest.ext_type.as_str(), "tracker" | "debrid"),
+                "{}",
+                id
+            );
             assert_eq!(&slugify(&manifest.name), id);
         }
     }
@@ -672,4 +691,79 @@ pub async fn fetch_extension_subtitles(
         }
     }
     Ok(all)
+}
+
+async fn require_debrid(
+    manager: &ExtensionManager,
+    ext_id: &str,
+) -> Result<LoadedExtension, String> {
+    let ext = manager
+        .get(ext_id)
+        .await
+        .ok_or_else(|| format!("streaming client '{}' is not installed", ext_id))?;
+    if ext.manifest.ext_type != "debrid" {
+        return Err(format!("'{}' is not a debrid extension", ext_id));
+    }
+    if !ext.enabled {
+        return Err(format!("streaming client '{}' is disabled", ext.manifest.name));
+    }
+    Ok(ext)
+}
+
+/// Ask a debrid extension for the files in a magnet's torrent. Magnolia runs
+/// its own automatic/manual file selection over the returned list — the
+/// extension does not pick a file itself.
+#[tauri::command]
+pub async fn list_debrid_files(
+    manager: State<'_, Arc<ExtensionManager>>,
+    ext_id: String,
+    magnet: String,
+    season: Option<u32>,
+    episode: Option<u32>,
+    media_type: Option<String>,
+) -> Result<Vec<runtime::DebridFile>, String> {
+    let ext = require_debrid(&manager, &ext_id).await?;
+    let ctx = runtime::DebridListContext {
+        magnet,
+        season,
+        episode,
+        media_type,
+    };
+    tokio::task::spawn_blocking(move || {
+        runtime::run_debrid_list_files(&ext.source, &ext.manifest, &ext.field_values, &ctx)
+    })
+    .await
+    .map_err(|e| format!("debrid list_files task panicked: {}", e))?
+}
+
+/// Resolve the file Magnolia already selected (`file_id`, from
+/// `list_debrid_files`) to a directly-playable HTTP stream URL. Used when the
+/// user picks a debrid service as their streaming client instead of the
+/// built-in torrent pipeline.
+#[tauri::command]
+pub async fn resolve_debrid_stream(
+    manager: State<'_, Arc<ExtensionManager>>,
+    ext_id: String,
+    magnet: String,
+    file_id: Option<i64>,
+    file_name: Option<String>,
+    season: Option<u32>,
+    episode: Option<u32>,
+    media_type: Option<String>,
+) -> Result<String, String> {
+    let ext = require_debrid(&manager, &ext_id).await?;
+    let ctx = runtime::DebridResolveContext {
+        magnet,
+        file_id,
+        file_name,
+        season,
+        episode,
+        media_type,
+    };
+
+    tokio::task::spawn_blocking(move || {
+        runtime::run_debrid_resolve(&ext.source, &ext.manifest, &ext.field_values, &ctx)
+    })
+    .await
+    .map_err(|e| format!("debrid resolve task panicked: {}", e))?
 }

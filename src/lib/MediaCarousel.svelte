@@ -281,7 +281,18 @@ async function handleQuickPlay(event, item) {
     });
 
     if (saved && saved.magnet_link) {
-      const handleId = await invoke('add_torrent', { magnetOrUrl: saved.magnet_link });
+      // Built-in client needs a local torrent handle; a debrid client streams
+      // remotely, so skip the local add and let VideoPlayer resolve the magnet.
+      let handleId = null;
+      try {
+        const settings = await invoke('get_settings');
+        const clientId = settings.streaming_client || 'builtin';
+        if (clientId === 'builtin') {
+          handleId = await invoke('add_torrent', { magnetOrUrl: saved.magnet_link });
+        }
+      } catch (e) {
+        handleId = await invoke('add_torrent', { magnetOrUrl: saved.magnet_link });
+      }
 
       const mediaTitle = item.title || item.name || '';
       const playerTitle = isMovie
