@@ -15,6 +15,8 @@
     - LimeTorrents
     - ThePirateBay
     - EZTV
+- Support for debrid services, with TorBox built in
+- Extension support for adding custom torrent providers, subtitle sources and debrid services
 - Video playback through mpv
 - Manage multiple torrents per season/episode for episodic media
 - Import subtitles individually or from a folder for a full series
