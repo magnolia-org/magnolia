@@ -7,6 +7,9 @@ use tokio::sync::RwLock;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub external_player: String,
+    /// Path to a user-chosen program, used when `external_player` is "custom".
+    #[serde(default)]
+    pub external_player_custom_path: String,
     pub remember_preferences: bool,
     pub show_skip_prompts: bool,
     #[serde(default)]
@@ -37,6 +40,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             external_player: "vlc".to_string(),
+            external_player_custom_path: String::new(),
             remember_preferences: true,
             show_skip_prompts: true,
             hide_recommendations: false,

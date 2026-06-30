@@ -8,6 +8,7 @@
   import { watchProgressStore } from "./stores/watchProgressStore.js";
   import { watchHistoryStore } from "./stores/watchHistoryStore.js";
   import { getSeasonDetails, getTVDetails, getImageUrl } from "./tmdb.js";
+  import { randomSubtitlePreviewBackground } from "./subtitlePreviewBackgrounds.js";
 
   import { createEventDispatcher } from "svelte";
   import { fade } from "svelte/transition";
@@ -80,17 +81,22 @@
   let showAudioSubmenu = false;
   let showSubtitleSubmenu = false;
   let showSubtitleSettings = false;
+  let subtitlePreviewBg = randomSubtitlePreviewBackground();
   let subtitleSettingsElement = null;
   let subtitleSettingsX = 0;
   let subtitleSettingsY = 0;
   
   const defaultSubtitleSettings = {
-    fontSize: 24,
-    backgroundOpacity: 0.5,
+    font: 'Geist',          // 'Geist' (bundled) | 'default' (mpv/system sans-serif)
+    fontSize: 34,
+    bold: false,
     color: '#ffffff',
-    textShadow: false,
-    textShadowColor: '#000000',
-    windowMargin: 60
+    outlineSize: 2,         // black outline width (px)
+    outlineColor: '#000000',
+    backgroundColor: '#000000',
+    backgroundOpacity: 0,
+    windowMargin: 60,
+    overrideAssStyles: false, // force these styles onto styled (ASS) subtitles
   };
   
   let subtitleSettings = { ...defaultSubtitleSettings };
@@ -151,26 +157,73 @@
     }
   }
 
-  // Convert #RRGGBB to mpv #RRGGBBAA (full opacity)
-  function hexToMpvColor(hex) {
-    return hex.replace(/^#/, '#') + 'FF';
+  // mpv color strings are #AARRGGBB — the alpha byte comes FIRST. (The old
+  // code appended it, which rotated the channels: red came out blue.)
+  function mpvColor(hex, alpha = 1) {
+    const a = Math.round(Math.max(0, Math.min(1, alpha)) * 255)
+      .toString(16)
+      .padStart(2, '0')
+      .toUpperCase();
+    return `#${a}${hex.replace(/^#/, '')}`;
   }
 
   async function applyAllSubtitleSettingsToMpv() {
-    const { fontSize, color, backgroundOpacity, textShadow, textShadowColor, windowMargin } = subtitleSettings;
-    const alpha = Math.round(backgroundOpacity * 255).toString(16).padStart(2, '0');
+    const s = subtitleSettings;
     const cmds = [
-      ["sub-font-size", String(fontSize)],
-      ["sub-color", hexToMpvColor(color)],
-      ["sub-back-color", `#000000${alpha}`],
-      ["sub-shadow-offset", textShadow ? "2" : "0"],
-      ["sub-shadow-color", hexToMpvColor(textShadowColor)],
-      ["sub-margin-y", String(windowMargin)],
+      ["sub-font", s.font === 'default' ? 'sans-serif' : s.font],
+      ["sub-font-size", String(s.fontSize)],
+      ["sub-bold", s.bold ? "yes" : "no"],
+      ["sub-color", mpvColor(s.color)],
+      // sub-outline-* needs mpv >= 0.36; sub-border-* covers older builds
+      // (on new mpv it's an alias, so setting both is harmless).
+      ["sub-outline-size", String(s.outlineSize)],
+      ["sub-border-size", String(s.outlineSize)],
+      ["sub-outline-color", mpvColor(s.outlineColor)],
+      ["sub-border-color", mpvColor(s.outlineColor)],
+      ["sub-shadow-offset", "0"],
+      // The background box only renders under the "background-box" border style;
+      // the default "outline-and-shadow" ignores sub-back-color entirely.
+      ["sub-border-style", s.backgroundOpacity > 0 ? "background-box" : "outline-and-shadow"],
+      ["sub-back-color", mpvColor(s.backgroundColor, s.backgroundOpacity)],
+      ["sub-margin-y", String(s.windowMargin)],
+      ["sub-ass-override", s.overrideAssStyles ? "force" : "yes"],
     ];
     for (const [name, value] of cmds) {
       await invoke("mpv_set_option_string", { name, value }).catch(() => {});
     }
   }
+
+  function hexToRgba(hex, alpha) {
+    const h = hex.replace('#', '');
+    const r = parseInt(h.slice(0, 2), 16);
+    const g = parseInt(h.slice(2, 4), 16);
+    const b = parseInt(h.slice(4, 6), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+
+  // Approximate libass's outline with stacked text-shadows for the settings
+  // preview (CSS has no real text outline).
+  function buildPreviewTextShadow(s) {
+    const parts = [];
+    const r = s.outlineSize * 0.8; // outline is in mpv's 720p-scaled px; shrink for the preview
+    if (r > 0) {
+      for (const radius of [r, r / 2]) {
+        for (let i = 0; i < 16; i++) {
+          const a = (i / 16) * Math.PI * 2;
+          parts.push(
+            `${(Math.cos(a) * radius).toFixed(1)}px ${(Math.sin(a) * radius).toFixed(1)}px 0 ${s.outlineColor}`
+          );
+        }
+      }
+    }
+    return parts.length ? parts.join(', ') : 'none';
+  }
+
+  $: previewTextShadow = buildPreviewTextShadow(subtitleSettings);
+  $: previewFontFamily =
+    subtitleSettings.font === 'Geist'
+      ? "'Geist Sans', sans-serif"
+      : 'Helvetica, Arial, sans-serif';
 
   async function applySubtitleLangPreference(lang) {
     const match = externalSubtitles.find(s =>
@@ -1444,15 +1497,21 @@
     try {
       const settings = await invoke('get_settings');
       const externalPlayer = settings.external_player || 'mpv';
-      const installed = await invoke('check_external_player', { player: externalPlayer });
+      const customPath = settings.external_player_custom_path || '';
+      const installed = await invoke('check_external_player', { player: externalPlayer, customPath });
       if (!installed) {
-        alert(`${externalPlayer.toUpperCase()} is not installed or not in PATH. Please install it to use external playback.`);
+        if (externalPlayer === 'custom') {
+          alert('No custom player program is set, or it could not be found. Choose one in Settings → External video player.');
+        } else {
+          alert(`${externalPlayer.toUpperCase()} is not installed or not in PATH. Please install it to use external playback.`);
+        }
         return;
       }
       await invoke('open_in_external_player', {
         player: externalPlayer,
         streamUrl: src,
-        title: title
+        title: title,
+        customPath
       });
       playingInExternal = true;
       // Pause mpv when switching to external
@@ -1552,8 +1611,9 @@
 
   function toggleSubtitleSettings(event) {
     showSubtitleSettings = !showSubtitleSettings;
-    
+
     if (showSubtitleSettings) {
+      subtitlePreviewBg = randomSubtitlePreviewBackground();
       const button = event.currentTarget;
       const buttonRect = button.getBoundingClientRect();
       
@@ -1588,23 +1648,7 @@
   function updateSubtitleSettings(key, value) {
     subtitleSettings = { ...subtitleSettings, [key]: value };
     localStorage.setItem('subtitleSettings', JSON.stringify(subtitleSettings));
-    // Apply individual setting to mpv
-    if (key === 'fontSize') {
-      invoke("mpv_set_option_string", { name: "sub-font-size", value: String(value) }).catch(() => {});
-    } else if (key === 'color') {
-      invoke("mpv_set_option_string", { name: "sub-color", value: hexToMpvColor(value) }).catch(() => {});
-    } else if (key === 'backgroundOpacity') {
-      const alpha = Math.round(value * 255).toString(16).padStart(2, '0');
-      invoke("mpv_set_option_string", { name: "sub-back-color", value: `#000000${alpha}` }).catch(() => {});
-    } else if (key === 'textShadow') {
-      invoke("mpv_set_option_string", { name: "sub-shadow-offset", value: value ? "2" : "0" }).catch(() => {});
-    } else if (key === 'textShadowColor') {
-      if (subtitleSettings.textShadow) {
-        invoke("mpv_set_option_string", { name: "sub-shadow-color", value: hexToMpvColor(value) }).catch(() => {});
-      }
-    } else if (key === 'windowMargin') {
-      invoke("mpv_set_option_string", { name: "sub-margin-y", value: String(value) }).catch(() => {});
-    }
+    applyAllSubtitleSettingsToMpv();
   }
 
   function updateSubtitleOffset(delta) {
@@ -2089,7 +2133,16 @@
     const savedSubtitleSettings = localStorage.getItem('subtitleSettings');
     if (savedSubtitleSettings) {
       try {
-        subtitleSettings = { ...defaultSubtitleSettings, ...JSON.parse(savedSubtitleSettings) };
+        const saved = JSON.parse(savedSubtitleSettings);
+        // Migration: the old schema (pre backgroundColor) stored a background
+        // opacity that never rendered — the mpv color string was built wrong,
+        // making the box invisible. Drop it so fixing the format doesn't
+        // suddenly draw a box nobody had before.
+        if (!('backgroundColor' in saved)) delete saved.backgroundOpacity;
+        // The shadow setting was removed; drop any persisted values.
+        delete saved.textShadow;
+        delete saved.textShadowColor;
+        subtitleSettings = { ...defaultSubtitleSettings, ...saved };
       } catch (e) {
         console.error('Failed to parse saved subtitle settings:', e);
       }
@@ -2755,17 +2808,54 @@
         <!-- Subtitle Settings Submenu -->
         {#if showSubtitleSettings}
           <div class="submenu settings-submenu" style="left: {subtitleSettingsX}px; top: {subtitleSettingsY}px;" bind:this={subtitleSettingsElement}>
-            <div class="settings-preview-container">
-              <div class="settings-preview-text" style="
-                font-size: {subtitleSettings.fontSize}px;
-                background: rgba(0, 0, 0, {subtitleSettings.backgroundOpacity});
-                color: {subtitleSettings.color};
-                text-shadow: {subtitleSettings.textShadow ? `2px 2px 2px ${subtitleSettings.textShadowColor}` : 'none'};
-              ">
-                Preview Text
+            <div class="settings-preview-container" style="background-image: url('{subtitlePreviewBg.src}');">
+              <div class="settings-preview-sub" style="bottom: {6 + subtitleSettings.windowMargin * 0.2}px;">
+                <span class="settings-preview-line" style="
+                  font-family: {previewFontFamily};
+                  font-size: {Math.max(11, Math.round(subtitleSettings.fontSize * 0.75))}px;
+                  font-weight: {subtitleSettings.bold ? 700 : 400};
+                  color: {subtitleSettings.color};
+                  text-shadow: {previewTextShadow};
+                  background: {subtitleSettings.backgroundOpacity > 0 ? hexToRgba(subtitleSettings.backgroundColor, subtitleSettings.backgroundOpacity) : 'transparent'};
+                ">
+                  Subtitles will look like this
+                </span>
               </div>
             </div>
-            
+            {#if subtitlePreviewBg.attribution}
+              <div class="settings-preview-attribution">{@html subtitlePreviewBg.attribution}</div>
+            {/if}
+
+            <div class="settings-group">
+              <label>Font</label>
+              <div class="settings-controls-wrapper">
+                <div class="settings-controls">
+                  <button
+                    class="settings-btn seg-btn"
+                    class:active={subtitleSettings.font === 'Geist'}
+                    on:click|stopPropagation={() => updateSubtitleSettings('font', 'Geist')}
+                  >Geist</button>
+                  <button
+                    class="settings-btn seg-btn"
+                    class:active={subtitleSettings.font === 'default'}
+                    on:click|stopPropagation={() => updateSubtitleSettings('font', 'default')}
+                  >System</button>
+                  <button
+                    class="settings-btn bold-btn"
+                    class:active={subtitleSettings.bold}
+                    title="Bold"
+                    on:click|stopPropagation={() => updateSubtitleSettings('bold', !subtitleSettings.bold)}
+                  >B</button>
+                </div>
+                <button class="settings-reset-btn" title="Reset" on:click|stopPropagation={() => {
+                  resetSubtitleSetting('font');
+                  resetSubtitleSetting('bold');
+                }}>
+                  <i class="ri-refresh-line"></i>
+                </button>
+              </div>
+            </div>
+
             <div class="settings-group">
               <label>Size</label>
               <div class="settings-controls-wrapper">
@@ -2798,34 +2888,30 @@
             </div>
 
             <div class="settings-group">
-              <label>Shadow</label>
+              <label>Outline</label>
               <div class="settings-controls-wrapper">
                 <div class="settings-controls">
-                  <button 
-                    class="settings-btn toggle-btn" 
-                    class:active={subtitleSettings.textShadow}
-                    on:click|stopPropagation={() => updateSubtitleSettings('textShadow', !subtitleSettings.textShadow)}
-                  >
-                    <i class={subtitleSettings.textShadow ? "ri-checkbox-circle-fill" : "ri-checkbox-blank-circle-line"}></i>
-                  </button>
-                  {#if subtitleSettings.textShadow}
-                    <input 
-                      type="color" 
+                  <button class="settings-btn" on:click|stopPropagation={() => updateSubtitleSettings('outlineSize', Math.max(0, subtitleSettings.outlineSize - 1))}>-</button>
+                  <span class="settings-value">{subtitleSettings.outlineSize}px</span>
+                  <button class="settings-btn" on:click|stopPropagation={() => updateSubtitleSettings('outlineSize', Math.min(8, subtitleSettings.outlineSize + 1))}>+</button>
+                  {#if subtitleSettings.outlineSize > 0}
+                    <input
+                      type="color"
                       class="settings-color-input"
-                      value={subtitleSettings.textShadowColor} 
-                      on:input={(e) => updateSubtitleSettings('textShadowColor', e.target.value)}
+                      value={subtitleSettings.outlineColor}
+                      on:input={(e) => updateSubtitleSettings('outlineColor', e.target.value)}
                     />
                   {/if}
                 </div>
                 <button class="settings-reset-btn" title="Reset" on:click|stopPropagation={() => {
-                  resetSubtitleSetting('textShadow');
-                  resetSubtitleSetting('textShadowColor');
+                  resetSubtitleSetting('outlineSize');
+                  resetSubtitleSetting('outlineColor');
                 }}>
                   <i class="ri-refresh-line"></i>
                 </button>
               </div>
             </div>
-            
+
             <div class="settings-group">
               <label>Background</label>
               <div class="settings-controls-wrapper">
@@ -2833,8 +2919,19 @@
                   <button class="settings-btn" on:click|stopPropagation={() => updateSubtitleSettings('backgroundOpacity', Math.max(0, parseFloat((subtitleSettings.backgroundOpacity - 0.1).toFixed(1))))}>-</button>
                   <span class="settings-value">{Math.round(subtitleSettings.backgroundOpacity * 100)}%</span>
                   <button class="settings-btn" on:click|stopPropagation={() => updateSubtitleSettings('backgroundOpacity', Math.min(1, parseFloat((subtitleSettings.backgroundOpacity + 0.1).toFixed(1))))}>+</button>
+                  {#if subtitleSettings.backgroundOpacity > 0}
+                    <input
+                      type="color"
+                      class="settings-color-input"
+                      value={subtitleSettings.backgroundColor}
+                      on:input={(e) => updateSubtitleSettings('backgroundColor', e.target.value)}
+                    />
+                  {/if}
                 </div>
-                <button class="settings-reset-btn" title="Reset" on:click|stopPropagation={() => resetSubtitleSetting('backgroundOpacity')}>
+                <button class="settings-reset-btn" title="Reset" on:click|stopPropagation={() => {
+                  resetSubtitleSetting('backgroundOpacity');
+                  resetSubtitleSetting('backgroundColor');
+                }}>
                   <i class="ri-refresh-line"></i>
                 </button>
               </div>
@@ -2869,6 +2966,24 @@
                   <button class="settings-btn" on:click|stopPropagation={() => updateSubtitleSettings('windowMargin', Math.min(200, subtitleSettings.windowMargin + 10))}>↑</button>
                 </div>
                 <button class="settings-reset-btn" title="Reset" on:click|stopPropagation={() => resetSubtitleSetting('windowMargin')}>
+                  <i class="ri-refresh-line"></i>
+                </button>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <label title="Apply these styles even to subtitles with their own styling (ASS)">Override styled subs</label>
+              <div class="settings-controls-wrapper">
+                <div class="settings-controls">
+                  <button
+                    class="settings-btn toggle-btn"
+                    class:active={subtitleSettings.overrideAssStyles}
+                    on:click|stopPropagation={() => updateSubtitleSettings('overrideAssStyles', !subtitleSettings.overrideAssStyles)}
+                  >
+                    <i class={subtitleSettings.overrideAssStyles ? "ri-checkbox-circle-fill" : "ri-checkbox-blank-circle-line"}></i>
+                  </button>
+                </div>
+                <button class="settings-reset-btn" title="Reset" on:click|stopPropagation={() => resetSubtitleSetting('overrideAssStyles')}>
                   <i class="ri-refresh-line"></i>
                 </button>
               </div>

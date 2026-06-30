@@ -32,6 +32,37 @@ pub struct MpvHandle {
 unsafe impl Send for MpvHandle {}
 unsafe impl Sync for MpvHandle {}
 
+/// Write the app's bundled Geist fonts to `<app data>/fonts` so libass can
+/// load them via `sub-fonts-dir` — subtitles then default to the same
+/// typeface as the UI without requiring the font to be installed system-wide.
+fn seed_subtitle_fonts(app_handle: &AppHandle) -> Option<std::path::PathBuf> {
+    use tauri::Manager;
+    const FONTS: &[(&str, &[u8])] = &[
+        (
+            "Geist-Regular.ttf",
+            include_bytes!("../../resources/fonts/Geist-Regular.ttf"),
+        ),
+        (
+            "Geist-Bold.ttf",
+            include_bytes!("../../resources/fonts/Geist-Bold.ttf"),
+        ),
+    ];
+    let dir = app_handle.path().app_data_dir().ok()?.join("fonts");
+    std::fs::create_dir_all(&dir).ok()?;
+    for (name, bytes) in FONTS {
+        let path = dir.join(name);
+        let needs_write = std::fs::metadata(&path)
+            .map(|m| m.len() != bytes.len() as u64)
+            .unwrap_or(true);
+        if needs_write {
+            if let Err(e) = std::fs::write(&path, bytes) {
+                log::warn!("failed to seed subtitle font {}: {}", name, e);
+            }
+        }
+    }
+    Some(dir)
+}
+
 fn release_mpv_context(ctx: &AtomicPtr<c_void>, terminate: bool) {
     let ptr = ctx.swap(std::ptr::null_mut(), Ordering::AcqRel);
     if ptr.is_null() {
@@ -98,6 +129,13 @@ impl MpvHandle {
         // Disable automatic subtitle selection so the UI and mpv stay in sync.
         // loadTrackPreferences() will apply any saved preference after file load.
         set_str("sub-auto", "no");
+        // Default subtitles to the bundled Geist font. sub-fonts-dir needs
+        // mpv >= 0.36; on older builds the option is unknown and the font
+        // falls back to the system default.
+        if let Some(fonts_dir) = seed_subtitle_fonts(&app_handle) {
+            set_str("sub-fonts-dir", &fonts_dir.to_string_lossy());
+            set_str("sub-font", "Geist");
+        }
 
         let init_result = unsafe { mpv_initialize(ctx) };
         if init_result < 0 {

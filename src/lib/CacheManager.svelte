@@ -26,7 +26,7 @@
     }
 
     try {
-      const response = await fetch('https://magnolia-tmdb.netlify.app/tmdb-proxy');
+      const response = await fetch('https://magnoliatmdb.wyziemagnolia.workers.dev/tmdb-proxy');
       const data = await response.json();
       if (data.token) {
         bearerToken = data.token;

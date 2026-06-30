@@ -515,9 +515,33 @@ async fn get_settings(
 }
 
 #[tauri::command]
-async fn check_external_player(player: String) -> Result<bool, String> {
+async fn check_external_player(player: String, custom_path: Option<String>) -> Result<bool, String> {
     use std::process::Command;
-    
+
+    // Custom player: verify the chosen program exists on disk or resolves in PATH.
+    if player.to_lowercase() == "custom" {
+        use std::path::Path;
+        let path = custom_path.unwrap_or_default();
+        let path = path.trim();
+        if path.is_empty() {
+            return Ok(false);
+        }
+        if Path::new(path).exists() {
+            return Ok(true);
+        }
+
+        #[cfg(target_os = "windows")]
+        let check_result = Command::new("where")
+            .arg(path)
+            .creation_flags(0x08000000)
+            .output();
+
+        #[cfg(not(target_os = "windows"))]
+        let check_result = Command::new("which").arg(path).output();
+
+        return Ok(check_result.map(|o| o.status.success()).unwrap_or(false));
+    }
+
     let command_name = match player.to_lowercase().as_str() {
         "mpv" => "mpv",
         "vlc" => if cfg!(target_os = "windows") { "vlc" } else { "vlc" },
@@ -562,9 +586,44 @@ async fn open_in_external_player(
     player: String,
     stream_url: String,
     title: String,
+    custom_path: Option<String>,
 ) -> Result<(), String> {
     use std::process::Command;
-    
+
+    // Custom player: launch the user-chosen program with the stream URL.
+    if player.to_lowercase() == "custom" {
+        let path = custom_path.unwrap_or_default();
+        let path = path.trim();
+        if path.is_empty() {
+            return Err("No custom player program selected".to_string());
+        }
+
+        // On macOS the user usually picks a `.app` bundle, which is a directory
+        // and cannot be executed directly. Launch it through `open -a` instead.
+        #[cfg(target_os = "macos")]
+        if path.ends_with(".app") || std::path::Path::new(path).is_dir() {
+            Command::new("open")
+                .arg("-a")
+                .arg(path)
+                .arg(&stream_url)
+                .spawn()
+                .map_err(|e| format!("Failed to launch custom player: {}", e))?;
+            return Ok(());
+        }
+
+        let mut cmd = Command::new(path);
+
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x08000000);
+
+        cmd.arg(&stream_url);
+
+        cmd.spawn()
+            .map_err(|e| format!("Failed to launch custom player: {}", e))?;
+
+        return Ok(());
+    }
+
     let command_name = match player.to_lowercase().as_str() {
         "mpv" => "mpv".to_string(),
         "vlc" => {

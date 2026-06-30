@@ -1,6 +1,7 @@
 <script>
   import { createEventDispatcher, onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { open } from '@tauri-apps/plugin-dialog';
   import { openModal } from './stores/modalStore.js';
   
   export let settingsActive = false;
@@ -8,6 +9,7 @@
   const dispatch = createEventDispatcher();
   
   let externalPlayer = 'vlc';
+  let externalPlayerCustomPath = '';
   let rememberPreferences = true;
   let showSkipPrompts = true;
   let hideRecommendations = false;
@@ -23,7 +25,8 @@
   
   const playerOptions = [
     { value: 'mpv', label: 'MPV' },
-    { value: 'vlc', label: 'VLC' }
+    { value: 'vlc', label: 'VLC' },
+    { value: 'custom', label: 'Custom' }
   ];
 
   const langOptions = [
@@ -62,6 +65,7 @@
     try {
       const settings = await invoke('get_settings');
       externalPlayer = settings.external_player;
+      externalPlayerCustomPath = settings.external_player_custom_path || '';
       rememberPreferences = settings.remember_preferences;
       showSkipPrompts = settings.show_skip_prompts;
       hideRecommendations = settings.hide_recommendations;
@@ -91,6 +95,7 @@
     try {
       const settings = {
         external_player: externalPlayer,
+        external_player_custom_path: externalPlayerCustomPath,
         remember_preferences: rememberPreferences,
         show_skip_prompts: showSkipPrompts,
         hide_recommendations: hideRecommendations,
@@ -111,7 +116,7 @@
   // Auto-save when any setting changes (tracks the actual variables)
   $: if (settingsLoaded) {
     // This will re-run whenever externalPlayer, rememberPreferences, or showSkipPrompts change
-    externalPlayer, rememberPreferences, showSkipPrompts, hideRecommendations, checkForUpdates, subtitleLanguage, streamingClient;
+    externalPlayer, externalPlayerCustomPath, rememberPreferences, showSkipPrompts, hideRecommendations, checkForUpdates, subtitleLanguage, streamingClient;
     saveSettings();
   }
 
@@ -160,6 +165,25 @@
     externalPlayer = value;
     playerDropdownOpen = false;
   }
+
+  async function chooseCustomProgram() {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        title: 'Select a video player program',
+      });
+      if (typeof selected === 'string') {
+        externalPlayerCustomPath = selected;
+      }
+    } catch (e) {
+      console.error('failed to pick custom player:', e);
+    }
+  }
+
+  $: customProgramName = externalPlayerCustomPath
+    ? externalPlayerCustomPath.split(/[\\/]/).pop()
+    : '';
 
   function toggleLangDropdown(event) {
     event.stopPropagation();
@@ -234,10 +258,26 @@
           </div>
         </div>
 
+        {#if externalPlayer === 'custom'}
+          <div class="setting-item">
+            <div class="setting-label">
+              <span>Custom player</span>
+              {#if customProgramName}
+                <span class="setting-hint">{customProgramName}</span>
+              {/if}
+            </div>
+            <div class="setting-control">
+              <button class="btn-standard" on:click={chooseCustomProgram} type="button">
+                <i class="ri-folder-open-line"></i>
+                {externalPlayerCustomPath ? 'Change' : 'Browse'}
+              </button>
+            </div>
+          </div>
+        {/if}
+
         <div class="setting-item">
           <div class="setting-label">
             <span>Streaming client</span>
-            <span class="setting-hint">Built-in streams locally; debrid services stream from the cloud</span>
           </div>
           <div class="setting-control">
             <div class="custom-dropdown">

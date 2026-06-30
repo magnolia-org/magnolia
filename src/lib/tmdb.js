@@ -1,6 +1,6 @@
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p';
-const TOKEN_ENDPOINT = 'https://magnolia-tmdb.netlify.app/tmdb-proxy';
+const TOKEN_ENDPOINT = 'https://magnoliatmdb.wyziemagnolia.workers.dev/tmdb-proxy';
 
 let cachedToken = null;
 
