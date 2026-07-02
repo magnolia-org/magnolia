@@ -26,7 +26,7 @@
 
 ## Download
 ### Get the latest build [here](https://github.com/chwair/magnolia/releases/latest)
-(Windows, MacOS (Apple Silicon) and Linux (.deb) support.)
+(Windows, MacOS (Apple Silicon) and Linux (.deb) support.)<br>
 You can also get it through the AUR if using Arch.
 ```bash
 yay -S magnolia-bin
