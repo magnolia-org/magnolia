@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { getVersion } from '@tauri-apps/api/app';
   import { invoke } from '@tauri-apps/api/core';
+  import { isLinux } from './utils/platform.js';
 
   let currentVersion = '';
   let latestVersion = '';
@@ -65,6 +66,14 @@
       console.log(`latest version: ${latestVersion}`);
 
       if (isNewerVersion(latestVersion, currentVersion)) {
+        if (isLinux) {
+          // No in-app install on Linux (packages come from the distro/AUR/deb):
+          // just alert that a new version exists and link to the release page.
+          updateAvailable = true;
+          updateUrl = release.html_url;
+          console.log(`update available: ${latestVersion} (linux: notify only)`);
+          return;
+        }
         const asset = pickAsset(release.assets || [], os, arch);
         if (asset) {
           updateAvailable = true;
@@ -104,6 +113,15 @@
   }
 
   function remindLater() {
+    updateAvailable = false;
+  }
+
+  async function viewRelease() {
+    try {
+      await invoke('open_external_url', { url: updateUrl });
+    } catch (error) {
+      console.error('failed to open release page:', error);
+    }
     updateAvailable = false;
   }
 
@@ -155,6 +173,23 @@
           <div class="subtitle">App will restart soon</div>
         </div>
       </div>
+    {:else if isLinux}
+      <div class="notification-content">
+        <i class="ri-notification-3-line icon"></i>
+        <div class="text-content">
+          <div class="title">New Version Available</div>
+          <div class="subtitle">Version {latestVersion} is out — update via your package manager</div>
+        </div>
+      </div>
+
+      <div class="button-group">
+        <button class="btn btn-secondary" on:click={remindLater}>
+          Dismiss
+        </button>
+        <button class="btn btn-primary" on:click={viewRelease}>
+          View Release
+        </button>
+      </div>
     {:else}
       <div class="notification-content">
         <i class="ri-download-cloud-line icon"></i>
@@ -163,7 +198,7 @@
           <div class="subtitle">Version {latestVersion} is ready</div>
         </div>
       </div>
-      
+
       <div class="button-group">
         <button class="btn btn-secondary" on:click={remindLater}>
           Later

@@ -147,6 +147,15 @@ fn main() {
                 );
             }
             println!("cargo:rustc-link-lib=dylib=soia_utils");
+            // Resolve the bundled runtime libs relative to the executable instead
+            // of LD_LIBRARY_PATH (which would leak the bundled OpenSSL/ffmpeg into
+            // every child process, e.g. node). $ORIGIN covers dev runs (apply
+            // script copies the libs into target/<profile>), $ORIGIN/../lib covers
+            // deb/AppImage layouts. --disable-new-dtags emits legacy DT_RPATH,
+            // which unlike DT_RUNPATH also applies to the bundled libraries'
+            // own dependencies (libmpv -> libavcodec, ...).
+            println!("cargo:rustc-link-arg=-Wl,--disable-new-dtags");
+            println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN:$ORIGIN/../lib");
         }
         "windows" => {
             if !has_windows_soia_utils_runtime(&mpv_lib_dir) {

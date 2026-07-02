@@ -9,6 +9,7 @@
   import { watchHistoryStore } from "./stores/watchHistoryStore.js";
   import { getSeasonDetails, getTVDetails, getImageUrl } from "./tmdb.js";
   import { randomSubtitlePreviewBackground } from "./subtitlePreviewBackgrounds.js";
+  import { isWindows } from "./utils/platform.js";
 
   import { createEventDispatcher } from "svelte";
   import { fade } from "svelte/transition";
@@ -693,7 +694,6 @@
 
   async function toggleFullscreen() {
     const appWindow = getCurrentWindow();
-    const isWindows = navigator.userAgent.includes("Windows");
     try {
       if (!fullscreen) {
         // Windows WebView2 glitches when fullscreening a maximized window —

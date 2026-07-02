@@ -790,14 +790,17 @@
     inset: 0;
     z-index: 1;
     background: rgb(6, 6, 6);
-    mask-image:
-        repeating-linear-gradient(0deg, black 0px, black 36px, transparent 36px, transparent 37px),
-        repeating-linear-gradient(90deg, black 0px, black 36px, transparent 36px, transparent 37px);
-    mask-composite: intersect;
-    -webkit-mask-image:
-        repeating-linear-gradient(0deg, black 0px, black 36px, transparent 36px, transparent 37px),
-        repeating-linear-gradient(90deg, black 0px, black 36px, transparent 36px, transparent 37px);
-    -webkit-mask-composite: source-in;
+    /* Single-tile mask (36px solid square + 1px transparent gap on two edges)
+       instead of two gradient layers + mask-composite: WebKitGTK composites
+       the layers differently from WKWebView/Safari, which turned the grid
+       into stretched stripes on Linux. One layer needs no compositing and
+       renders identically everywhere. */
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='37' height='37'%3E%3Crect width='36' height='36' fill='black'/%3E%3C/svg%3E");
+    mask-size: 37px 37px;
+    mask-repeat: repeat;
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='37' height='37'%3E%3Crect width='36' height='36' fill='black'/%3E%3C/svg%3E");
+    -webkit-mask-size: 37px 37px;
+    -webkit-mask-repeat: repeat;
     pointer-events: none;
 }
 

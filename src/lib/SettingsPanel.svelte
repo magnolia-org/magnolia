@@ -3,6 +3,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
   import { openModal } from './stores/modalStore.js';
+  import { isLinux } from './utils/platform.js';
   
   export let settingsActive = false;
   
@@ -348,7 +349,7 @@
 
         <div class="setting-item">
           <div class="setting-label">
-            <span>Check for updates on startup</span>
+            <span>{isLinux ? 'Notify about new versions on startup' : 'Check for updates on startup'}</span>
           </div>
           <div class="setting-control">
             <label class="toggle-switch">

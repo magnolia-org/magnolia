@@ -26,7 +26,7 @@ on:
         default: true
         type: boolean
       build_linux:
-        description: "Build Linux (AppImage)"
+        description: "Build Linux (.deb)"
         required: false
         default: true
         type: boolean
@@ -194,10 +194,10 @@ jobs:
           if-no-files-found: error
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Linux - AppImage
+  # Linux - .deb
   # ─────────────────────────────────────────────────────────────────────────────
   build-linux:
-    name: Build (Linux AppImage)
+    name: Build (Linux .deb)
     needs: bump-version
     if: inputs.build_linux
     runs-on: ubuntu-24.04
@@ -227,7 +227,6 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
-            libfuse2 \
             libssl-dev \
             pkg-config
 
@@ -260,19 +259,17 @@ jobs:
           node scripts/sync_runtime_libs.mjs --platform linux --check
           node scripts/apply_runtime_libs.mjs --platform linux --mode bundle --profile release
 
-      - name: Build (AppImage)
-        run: cargo tauri build --bundles appimage
-        env:
-          NO_STRIP: "true"
+      - name: Build (.deb)
+        run: cargo tauri build --bundles deb
 
       - name: Bundle runtime libraries (Linux)
         run: node scripts/bundle_runtime_libs_linux.mjs --profile release
 
-      - name: Upload AppImage
+      - name: Upload .deb
         uses: actions/upload-artifact@v4
         with:
-          name: magnolia-linux-appimage
-          path: src-tauri/target/release/bundle/appimage/*.AppImage
+          name: magnolia-linux-deb
+          path: src-tauri/target/release/bundle/deb/*.deb
           if-no-files-found: error
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -300,4 +297,4 @@ jobs:
           files: |
             artifacts/magnolia-windows-nsis/*.exe
             artifacts/magnolia-macos-zip/*.zip
-            artifacts/magnolia-linux-appimage/*.AppImage
+            artifacts/magnolia-linux-deb/*.deb
