@@ -86,6 +86,7 @@ impl MpvHandle {
     pub(crate) fn new(
         raw_window: *const c_void,
         display: Option<*const c_void>,
+        mode: i32,
         app_handle: AppHandle,
     ) -> Result<Self, String> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -110,6 +111,16 @@ impl MpvHandle {
         // Force Metal API on macOS to avoid MoltenVK/Vulkan shader compilation delays.
         #[cfg(target_os = "macos")]
         set_str("gpu-api", "metal");
+        // Hardware decode. On Linux the bundled ffmpeg's hw paths (nvdec/vdpau)
+        // segfault inside avcodec_send_packet on NVIDIA driver stacks, so
+        // default to software decoding there; override with MAGNOLIA_HWDEC=auto
+        // (or any other mpv hwdec value) to experiment.
+        #[cfg(target_os = "linux")]
+        {
+            let hwdec = std::env::var("MAGNOLIA_HWDEC").unwrap_or_else(|_| "no".into());
+            set_str("hwdec", &hwdec);
+        }
+        #[cfg(not(target_os = "linux"))]
         set_str("hwdec", "auto");
         set_str("osc", "no");
         set_str("osd-level", "0");
@@ -144,20 +155,8 @@ impl MpvHandle {
         }
 
         // ── soia_utils: handles embedding on all platforms ─────────────────
-        // mode: macOS = 0 (native/Metal), Linux X11 = 1, Linux Wayland = 2,
-        //       Windows = 1 (D3D/OpenGL child-window render context).
-        #[cfg(target_os = "macos")]
-        let mode: i32 = 0;
-        #[cfg(target_os = "linux")]
-        let mode: i32 = {
-            let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
-            if session.trim().eq_ignore_ascii_case("wayland") { 2 } else { 1 }
-        };
-        #[cfg(target_os = "windows")]
-        let mode: i32 = 1;
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-        let mode: i32 = 0;
-
+        // mode (decided by the caller from the actual window handle type):
+        // macOS = 0 (native/Metal), X11/HWND = 1 (wid), Wayland = 2 (render context).
         let display_ptr = display.unwrap_or(std::ptr::null());
         let soia_utils_ptr = unsafe {
             soia_utils_create(

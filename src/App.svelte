@@ -48,12 +48,6 @@
   $: document.body.classList.toggle('video-active', showVideoPlayer);
 
   onMount(async () => {
-    // Tag the document root with the current platform so CSS can apply
-    // platform-specific fallbacks (e.g. backdrop-filter workarounds on Windows/Linux).
-    if (navigator.userAgent.includes('Mac OS X')) {
-      document.documentElement.classList.add('macos');
-    }
-
     try {
       const settings = await invoke('get_settings');
       hideRecommendations = settings.hide_recommendations;

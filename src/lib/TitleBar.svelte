@@ -2,13 +2,12 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import SearchBar from "./SearchBar.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
+  import { isMacOS } from "./utils/platform.js";
 
   export let searchActive = false;
   export let settingsActive = false;
   export let accentColor = null;
   export let immersive = false;
-
-  const isMacOS = navigator.userAgent.includes("Mac");
   const appWindow = getCurrentWindow();
 
   async function minimizeWindow() {

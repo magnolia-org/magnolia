@@ -71,17 +71,6 @@ body {
   overflow: hidden;
 }
 
-/* macOS specific styles */
-@supports (-webkit-backdrop-filter: blur(10px)) {
-  :global(html) {
-    overflow: hidden;
-  }
-  
-  :global(body) {
-    overflow: hidden;
-  }
-}
-
 #app {
   width: 100vw;
   height: 100vh;
@@ -314,15 +303,16 @@ pre {
   backdrop-filter: blur(100px);
 }
 
-/* macOS specific titlebar padding for inset traffic lights */
-@supports (-webkit-backdrop-filter: blur(10px)) {
-  .titlebar {
-    padding-left: 90px;
-    padding-right: 14px;
-  }
-  .settings-wrapper {
-    padding-right: 8px;
-  }
+/* macOS specific titlebar padding for inset traffic lights.
+   Keyed off html.macos (set from the real OS via plugin-os) — a
+   @supports (-webkit-*) check would also match WebKitGTK on Linux. */
+html.macos .titlebar {
+  padding-left: 90px;
+  padding-right: 14px;
+}
+
+html.macos .settings-wrapper {
+  padding-right: 8px;
 }
 
 .titlebar.immersive-mode {

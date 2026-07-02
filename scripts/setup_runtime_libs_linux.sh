@@ -302,15 +302,36 @@ resolve_runtime_dir_from_shared_objects() {
   dirname "$runtime_so"
 }
 
+# Libraries that must come from the host system, not the bundle. The app
+# process also loads system GTK/WebKitGTK, and the executable's rpath applies
+# to every library resolution in the process — so a bundled copy of any lib
+# the system stack depends on shadows the host version and breaks on distros
+# newer than the bundle (e.g. bundled glib missing symbols system libsecret
+# needs). Same rationale as the AppImage excludelist: graphics drivers, glibc/
+# gcc runtime, glib/GTK stack, X11/Wayland, audio daemons, crypto and other
+# host-coupled infrastructure stay on the system; codecs and mpv-specific
+# libraries stay bundled.
 is_excluded_runtime_so() {
   local so_name="$1"
   case "$so_name" in
-    libEGL.so*|libGL.so*|libGLX.so*|libGLdispatch.so*|libGLES*.so*|libgbm.so*|libdrm.so*|libwayland*.so*)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
+    libEGL.so*|libGL.so*|libGLX.so*|libGLdispatch.so*|libGLES*.so*|libgbm.so*|libdrm.so*|libwayland*.so*) return 0 ;;
+    libstdc++.so*|libgcc_s.so*|libgomp.so*|libgfortran.so*) return 0 ;;
+    libglib-2.0.so*|libgobject-2.0.so*|libgio-2.0.so*|libgmodule-2.0.so*|libgthread-2.0.so*) return 0 ;;
+    libgdk_pixbuf*.so*|libcairo*.so*|libpango*.so*|librsvg-2.so*) return 0 ;;
+    libfontconfig.so*|libfreetype.so*|libharfbuzz*.so*|libthai.so*|libdatrie.so*) return 0 ;;
+    libX11*.so*|libXau.so*|libXcomposite.so*|libXcursor.so*|libXdamage.so*|libXdmcp.so*) return 0 ;;
+    libXext.so*|libXfixes.so*|libXi.so*|libXinerama.so*|libXrandr.so*) return 0 ;;
+    libXrender.so*|libXss.so*|libXtst.so*|libXv.so*|libXxf86vm.so*|libxcb*.so*|libxkbcommon*.so*) return 0 ;;
+    libdbus-1.so*|libsystemd.so*|libudev.so*) return 0 ;;
+    libasound.so*|libpulse*.so*|libpipewire*.so*|libjack*.so*) return 0 ;;
+    libvulkan.so*|libva.so*|libva-drm.so*|libva-x11.so*|libvdpau.so*|libOpenCL.so*) return 0 ;;
+    libssl.so*|libcrypto.so*|libgcrypt.so*|libgpg-error.so*|libp11-kit.so*) return 0 ;;
+    libkrb5*.so*|libgssapi_krb5.so*|libk5crypto.so*|libkeyutils.so*|libcom_err.so*) return 0 ;;
+    libselinux.so*|libapparmor.so*|libmount.so*|libblkid.so*|libcap.so*|libacl.so*) return 0 ;;
+    libpcre2-8.so*|libffi.so*|libexpat.so*|libz.so*|libzstd.so*|liblzma.so*|liblz4.so*) return 0 ;;
+    libbz2.so*|libbrotli*.so*|libpng16.so*|libjpeg.so*|libmd.so*|libbsd.so*) return 0 ;;
+    libwebp*.so*|libsharpyuv.so*) return 0 ;;
+    *) return 1 ;;
   esac
 }
 

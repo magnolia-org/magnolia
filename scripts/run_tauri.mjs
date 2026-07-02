@@ -179,11 +179,11 @@ if (isDev && existsSync(runtimeLibsDir)) {
         : dedupedIcdList;
     }
   } else if (process.platform === "linux") {
-    const extra = [runtimeLibsDir];
-    if (existsSync(mpvRuntimeLibsDir)) {
-      extra.push(mpvRuntimeLibsDir);
-    }
-    prependEnvPath("LD_LIBRARY_PATH", extra);
+    // Do NOT prepend the runtime libs to LD_LIBRARY_PATH here: it is inherited
+    // by every child process (node, cargo, vite), and the bundled OpenSSL/glibc
+    // era libs break the system node. The app binary instead carries an
+    // $ORIGIN rpath (see src-tauri/build.rs) and apply_runtime_libs.mjs copies
+    // the runtime libs next to it in target/<profile>.
   } else if (process.platform === "win32") {
     const extra = [runtimeLibsDir];
     if (existsSync(mpvRuntimeLibsDir)) {

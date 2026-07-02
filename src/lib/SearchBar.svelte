@@ -2,10 +2,10 @@
   import { searchMulti, getImageUrl } from './tmdb.js';
   import { onMount } from 'svelte';
   import { getRatingColor } from './utils/colorUtils.js';
-  
+  import { isMacOS as isMac } from './utils/platform.js';
+
   export let searchActive = false;
   let searchQuery = '';
-  const isMac = typeof navigator !== 'undefined' && navigator.platform.startsWith('Mac');
   let searchResults = [];
   let searching = false;
   let searchTimeout;

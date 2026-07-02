@@ -75,6 +75,12 @@ impl Logger {
     }
     
     fn start_capturing_output(&self) {
+        // Escape hatch for debugging: the gag redirect races with abrupt
+        // process exits (e.g. GDK calling _exit on a Wayland disconnect),
+        // losing the very stderr lines that explain the crash.
+        if std::env::var("MAGNOLIA_NO_LOG_CAPTURE").is_ok() {
+            return;
+        }
         let backend_log = Arc::clone(&self.backend_log_file);
 
         // Duplicate the real stdout/stderr fds *before* gag redirects them so

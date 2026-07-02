@@ -790,6 +790,17 @@ mod tests {
 }
 
 fn main() {
+    // NVIDIA's Wayland EGL driver enables explicit sync (wp_linux_drm_syncobj)
+    // on the window's wl_surface; when GTK or the embedded mpv layer then
+    // commits a non-dmabuf buffer on that surface, the compositor raises a
+    // fatal protocol error ("Explicit Sync only supported on dmabuf buffers")
+    // and GDK exits the process. Disable explicit sync for this process before
+    // GTK/EGL initialise; the variable is ignored on non-NVIDIA systems.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("__NV_DISABLE_EXPLICIT_SYNC").is_none() {
+        std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1");
+    }
+
     // Default: info for our code, warn for librqbit peer churn noise.
     // Override with RUST_LOG env var, e.g. RUST_LOG=debug or RUST_LOG=info,librqbit=error
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -802,6 +813,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
@@ -873,6 +885,8 @@ fn main() {
             // ── initialise libmpv and embed it under the WebView ──────────
             {
                 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
+                #[cfg(target_os = "linux")]
+                use raw_window_handle::RawDisplayHandle;
 
                 let wh = main_window
                     .window_handle()
@@ -882,17 +896,20 @@ fn main() {
                     .display_handle()
                     .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 
-                let (raw_window_ptr, display_ptr): (
+                // soia_utils embed mode: macOS = 0 (native/Metal),
+                // X11/HWND = 1 (wid), Wayland = 2 (render context).
+                let (raw_window_ptr, display_ptr, embed_mode): (
                     *const std::ffi::c_void,
                     Option<*const std::ffi::c_void>,
+                    i32,
                 ) = match wh.as_raw() {
                     #[cfg(target_os = "macos")]
                     RawWindowHandle::AppKit(h) => {
-                        (h.ns_view.as_ptr() as *const std::ffi::c_void, None)
+                        (h.ns_view.as_ptr() as *const std::ffi::c_void, None, 0)
                     }
                     #[cfg(target_os = "windows")]
                     RawWindowHandle::Win32(h) => {
-                        (h.hwnd.get() as *const std::ffi::c_void, None)
+                        (h.hwnd.get() as *const std::ffi::c_void, None, 1)
                     }
                     #[cfg(target_os = "linux")]
                     RawWindowHandle::Xcb(h) => {
@@ -902,18 +919,38 @@ fn main() {
                             }
                             _ => None,
                         };
-                        (h.window.get() as *const std::ffi::c_void, connection)
+                        (h.window.get() as *const std::ffi::c_void, connection, 1)
+                    }
+                    #[cfg(target_os = "linux")]
+                    RawWindowHandle::Xlib(h) => {
+                        let display = match dh.as_raw() {
+                            RawDisplayHandle::Xlib(d) => {
+                                d.display.map(|p| p.as_ptr() as *const std::ffi::c_void)
+                            }
+                            _ => None,
+                        };
+                        (h.window as *const std::ffi::c_void, display, 1)
                     }
                     #[cfg(target_os = "linux")]
                     RawWindowHandle::Wayland(h) => {
-                        (h.surface.as_ptr() as *const std::ffi::c_void, None)
+                        let display = match dh.as_raw() {
+                            RawDisplayHandle::Wayland(d) => {
+                                Some(d.display.as_ptr() as *const std::ffi::c_void)
+                            }
+                            _ => None,
+                        };
+                        (h.surface.as_ptr() as *const std::ffi::c_void, display, 2)
                     }
                     _ => return Err("unsupported platform window handle".into()),
                 };
 
-                let mpv_handle =
-                    mpv::MpvHandle::new(raw_window_ptr, display_ptr, app_handle.clone())
-                        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+                let mpv_handle = mpv::MpvHandle::new(
+                    raw_window_ptr,
+                    display_ptr,
+                    embed_mode,
+                    app_handle.clone(),
+                )
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
                 let mpv_arc = Arc::new(Mutex::new(mpv_handle));
                 // Register AppState BEFORE starting the event listener —
