@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { basename, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -188,6 +189,29 @@ async function downloadAsset(assetUrl, outputFile) {
   }
   const body = await response.arrayBuffer();
   writeFileSync(outputFile, Buffer.from(body));
+}
+
+async function fetchExpectedSha256(assetUrl) {
+  const response = await fetch(`${assetUrl}.sha256`);
+  if (!response.ok) {
+    return null;
+  }
+  const text = await response.text();
+  const match = text.match(/\b[0-9a-f]{64}\b/i);
+  return match ? match[0].toLowerCase() : null;
+}
+
+function verifyAssetChecksum(assetFile, expectedSha256) {
+  const actual = createHash("sha256").update(readFileSync(assetFile)).digest("hex");
+  if (actual !== expectedSha256) {
+    throw new Error(
+      `[ERROR] Checksum mismatch for ${basename(assetFile)}.\n` +
+        `  expected: ${expectedSha256}\n` +
+        `  actual:   ${actual}\n` +
+        `  Refusing to install a runtime bundle that does not match its published checksum.`
+    );
+  }
+  console.log(`[INFO] Checksum verified: ${actual}`);
 }
 
 function extractAsset(assetFile, extractDir) {
@@ -407,7 +431,19 @@ async function installFromRelease(outputDir) {
     const assetFile = resolve(tmpRoot, assetName);
 
     console.log(`[INFO] Downloading asset: ${assetName}`);
+    const expectedSha256 = await fetchExpectedSha256(assetUrl);
     await downloadAsset(assetUrl, assetFile);
+
+    if (expectedSha256) {
+      verifyAssetChecksum(assetFile, expectedSha256);
+    } else if (process.env.MPV_ALLOW_UNVERIFIED === "1") {
+      console.warn(`[WARN] No published .sha256 for ${assetName}; continuing (MPV_ALLOW_UNVERIFIED=1).`);
+    } else {
+      throw new Error(
+        `[ERROR] No published .sha256 checksum found for ${assetName}.\n` +
+          `  Set MPV_ALLOW_UNVERIFIED=1 to install without verification.`
+      );
+    }
 
     console.log("[INFO] Extracting asset...");
     extractAsset(assetFile, extractDir);

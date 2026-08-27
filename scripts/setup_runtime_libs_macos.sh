@@ -269,6 +269,43 @@ validate_dylib_minos() {
   fi
 }
 
+verify_asset_checksum() {
+  local asset_file="$1"
+  local asset_url="$2"
+  local asset_name expected actual sum_output
+
+  asset_name="$(basename "$asset_file")"
+  expected="$(curl -fsL --retry 3 --retry-delay 1 "${asset_url}.sha256" 2>/dev/null \
+    | grep -oiE '\b[0-9a-f]{64}\b' | head -n1 | tr 'A-F' 'a-f')"
+
+  if [[ -z "$expected" ]]; then
+    if [[ "${MPV_ALLOW_UNVERIFIED:-}" == "1" ]]; then
+      echo "[WARN] No published .sha256 for ${asset_name}; continuing (MPV_ALLOW_UNVERIFIED=1)."
+      return 0
+    fi
+    echo "[ERROR] No published .sha256 checksum found for ${asset_name}."
+    echo "[ERROR] Set MPV_ALLOW_UNVERIFIED=1 to install without verification."
+    exit 1
+  fi
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    sum_output="$(sha256sum "$asset_file")"
+  else
+    sum_output="$(shasum -a 256 "$asset_file")"
+  fi
+  actual="$(printf '%s' "$sum_output" | awk '{print $1}' | tr 'A-F' 'a-f')"
+
+  if [[ "$actual" != "$expected" ]]; then
+    echo "[ERROR] Checksum mismatch for ${asset_name}."
+    echo "[ERROR]   expected: ${expected}"
+    echo "[ERROR]   actual:   ${actual}"
+    echo "[ERROR] Refusing to install a runtime bundle that does not match its published checksum."
+    exit 1
+  fi
+
+  echo "🔐 Checksum verified: ${actual}"
+}
+
 extract_asset() {
   local asset_file="$1"
   local extract_dir="$2"
@@ -630,6 +667,8 @@ download_mpv() {
 
   echo "⬇️ Downloading asset: $asset_name"
   curl -fL --retry 3 --retry-delay 1 -o "$asset_file" "$asset_url"
+
+  verify_asset_checksum "$asset_file" "$asset_url"
 
   echo "📦 Extracting asset..."
   extract_asset "$asset_file" "$extract_dir"
