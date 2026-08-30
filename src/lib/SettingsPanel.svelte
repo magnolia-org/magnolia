@@ -23,6 +23,9 @@
   let langDropdownOpen = false;
   let clientDropdownOpen = false;
   let settingsLoaded = false;
+  // Settings owned by other surfaces (the in-player menu) that this panel must
+  // carry through untouched instead of resetting them to their defaults.
+  let loadedSettings = {};
   
   const playerOptions = [
     { value: 'mpv', label: 'MPV' },
@@ -65,6 +68,7 @@
   onMount(async () => {
     try {
       const settings = await invoke('get_settings');
+      loadedSettings = settings;
       externalPlayer = settings.external_player;
       externalPlayerCustomPath = settings.external_player_custom_path || '';
       rememberPreferences = settings.remember_preferences;
@@ -95,6 +99,7 @@
     
     try {
       const settings = {
+        ...loadedSettings,
         external_player: externalPlayer,
         external_player_custom_path: externalPlayerCustomPath,
         remember_preferences: rememberPreferences,

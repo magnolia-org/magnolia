@@ -22,6 +22,10 @@ pub struct Settings {
     pub hide_chapter_markers: bool,
     #[serde(default)]
     pub subtitle_language: String,
+    /// Downmix every audio track to stereo instead of letting mpv pick the
+    /// layout the output device advertises.
+    #[serde(default)]
+    pub force_stereo_audio: bool,
     /// Streaming client: "builtin" (local torrent pipeline) or the id of an
     /// installed debrid extension.
     #[serde(default = "default_streaming_client")]
@@ -48,6 +52,7 @@ impl Default for Settings {
             check_for_updates: true,
             hide_chapter_markers: false,
             subtitle_language: String::new(),
+            force_stereo_audio: false,
             streaming_client: default_streaming_client(),
         }
     }

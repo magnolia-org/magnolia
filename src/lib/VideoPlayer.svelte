@@ -126,6 +126,7 @@
   let showSkipPrompts = true;
   let clearCacheAfterWatch = false;
   let hideChapterMarkers = false;
+  let forceStereoAudio = false;
   let cacheCleared = false;
   
   let torrentSessionId = null;
@@ -386,6 +387,14 @@
   // Sync mpv volume/mute when changed
   $: invoke("mpv_set_option_string", { name: "volume", value: String(Math.round(volume * 100)) }).catch(() => {});
   $: invoke("mpv_set_option_string", { name: "mute", value: muted ? "yes" : "no" }).catch(() => {});
+
+  // "auto-safe" is mpv's default: only use the layout the output device
+  // reports as safe. Setting this reinitialises the audio chain, so the
+  // toggle applies to the current file as well as later ones.
+  $: invoke("mpv_set_option_string", {
+    name: "audio-channels",
+    value: forceStereoAudio ? "stereo" : "auto-safe",
+  }).catch(() => {});
 
   // Fetch external subtitles when media info is available
   $: {
@@ -1679,6 +1688,17 @@
     }
   }
 
+  async function toggleForceStereo() {
+    forceStereoAudio = !forceStereoAudio;
+    try {
+      const settings = await invoke('get_settings');
+      settings.force_stereo_audio = forceStereoAudio;
+      await invoke('save_settings', { settings });
+    } catch (error) {
+      console.error('failed to save forceStereoAudio:', error);
+    }
+  }
+
   async function toggleSkipPrompts() {
     showSkipPrompts = !showSkipPrompts;
     try {
@@ -2117,6 +2137,7 @@
       showSkipPrompts = settings.show_skip_prompts;
       clearCacheAfterWatch = settings.clear_cache_after_watch;
       hideChapterMarkers = settings.hide_chapter_markers ?? false;
+      forceStereoAudio = settings.force_stereo_audio ?? false;
     } catch (error) {
       console.error('Failed to load settings:', error);
     }
@@ -2608,6 +2629,14 @@
             </div>
 
             <div class="menu-divider"></div>
+
+            <!-- Audio options -->
+            <button class="player-track-option menu-item" on:click={toggleForceStereo}>
+              <span class="player-track-info">
+                <i class="ri-headphone-line"></i> Force stereo
+              </span>
+              <span class="menu-toggle-indicator" class:on={forceStereoAudio}></span>
+            </button>
 
             <!-- Chapter options -->
             {#if chapters && chapters.length > 0}
