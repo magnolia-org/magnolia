@@ -38,6 +38,7 @@
   let showVideoPlayer = false;
   let videoPlayerProps = null;
   let videoControlsVisible = true;
+  let pipMode = false;
   let onboardingVisible = false;
 
   $: myList = $myListStore;
@@ -117,6 +118,11 @@
 
     window.addEventListener("videoControlsVisibility", (e) => {
       videoControlsVisible = e.detail.visible;
+    });
+
+    // the mini player owns the whole window, so the titlebar steps aside
+    window.addEventListener("videoPipMode", (e) => {
+      pipMode = e.detail.active;
     });
 
     window.addEventListener("mouseup", (e) => {
@@ -260,12 +266,14 @@
   }
 
   function closeVideoPlayer() {
+    pipMode = false;
     showVideoPlayer = false;
     videoPlayerProps = null;
   }
 
   function backFromVideoPlayer() {
     // Return to media detail that was shown before video player
+    pipMode = false;
     showVideoPlayer = false;
     videoPlayerProps = null;
     // selectedMedia should still be set, so it will show the detail page
@@ -291,7 +299,7 @@
     <AboutModal on:close={closeModal} />
   {/if}
 
-  <div class="titlebar-wrapper" class:hidden={showVideoPlayer && !videoControlsVisible}>
+  <div class="titlebar-wrapper" class:hidden={showVideoPlayer && (pipMode || !videoControlsVisible)}>
     <TitleBar 
       bind:searchActive 
       bind:settingsActive

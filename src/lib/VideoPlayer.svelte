@@ -1,6 +1,7 @@
 <script>
   import { onMount, onDestroy } from "svelte";
-  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
+  import { LogicalSize, LogicalPosition } from "@tauri-apps/api/dpi";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
@@ -50,6 +51,14 @@
   const VOLUME_STEP_LARGE = 0.2;
   const CONTROLS_HIDE_TIMEOUT = 2000;
   const REFRESH_INTERVAL = 1000;
+  // pip window geometry (logical px, 16:9)
+  const PIP_WIDTH = 480;
+  const PIP_HEIGHT = 270;
+  const PIP_MIN_WIDTH = 320;
+  const PIP_MIN_HEIGHT = 180;
+  const PIP_MARGIN = 24;
+  const WINDOW_MIN_WIDTH = 1000;
+  const WINDOW_MIN_HEIGHT = 700;
 
   // mpv container (no videoElement)
   let mpvContainer;
@@ -65,6 +74,9 @@
   let volume = 1;
   let muted = false;
   let fullscreen = false;
+  let pipMode = false;
+  let pipAlwaysOnTop = true;
+  let preWindowState = null;
   let showControls = true;
   let justSeeked = false;
   let showBufferingIndicator = false;
@@ -703,6 +715,7 @@
 
   async function toggleFullscreen() {
     const appWindow = getCurrentWindow();
+    if (pipMode) await exitPip();
     try {
       if (!fullscreen) {
         // Windows WebView2 glitches when fullscreening a maximized window —
@@ -725,6 +738,93 @@
     } catch (err) {
       console.error("Fullscreen error:", err);
     }
+  }
+
+  function notifyPipMode() {
+    window.dispatchEvent(new CustomEvent("videoPipMode", { detail: { active: pipMode } }));
+  }
+
+  async function enterPip() {
+    const appWindow = getCurrentWindow();
+    try {
+      if (fullscreen) {
+        await appWindow.setFullscreen(false);
+        fullscreen = false;
+        wasMaximizedBeforeFullscreen = false;
+      }
+      const scale = await appWindow.scaleFactor();
+      const maximized = await appWindow.isMaximized();
+      const size = (await appWindow.innerSize()).toLogical(scale);
+      const position = (await appWindow.outerPosition()).toLogical(scale);
+      preWindowState = { maximized, size, position };
+      if (maximized) await appWindow.unmaximize();
+
+      // the configured min size is larger than the pip window, so drop it first
+      await appWindow.setMinSize(new LogicalSize(PIP_MIN_WIDTH, PIP_MIN_HEIGHT));
+      await appWindow.setSize(new LogicalSize(PIP_WIDTH, PIP_HEIGHT));
+
+      const monitor = await currentMonitor();
+      if (monitor) {
+        const area = monitor.workArea ?? { position: monitor.position, size: monitor.size };
+        const origin = area.position.toLogical(monitor.scaleFactor);
+        const bounds = area.size.toLogical(monitor.scaleFactor);
+        await appWindow.setPosition(new LogicalPosition(
+          Math.round(origin.x + bounds.width - PIP_WIDTH - PIP_MARGIN),
+          Math.round(origin.y + bounds.height - PIP_HEIGHT - PIP_MARGIN)
+        ));
+      }
+
+      await appWindow.setAlwaysOnTop(pipAlwaysOnTop);
+      pipMode = true;
+      closeAllMenus();
+      notifyPipMode();
+    } catch (err) {
+      console.error("Enter PiP error:", err);
+    }
+  }
+
+  async function exitPip() {
+    const appWindow = getCurrentWindow();
+    try {
+      await appWindow.setAlwaysOnTop(false);
+      await appWindow.setMinSize(new LogicalSize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT));
+      if (preWindowState) {
+        const { maximized, size, position } = preWindowState;
+        await appWindow.setSize(new LogicalSize(
+          Math.max(size.width, WINDOW_MIN_WIDTH),
+          Math.max(size.height, WINDOW_MIN_HEIGHT)
+        ));
+        await appWindow.setPosition(new LogicalPosition(position.x, position.y));
+        if (maximized) await appWindow.maximize();
+      }
+    } catch (err) {
+      console.error("Exit PiP error:", err);
+    } finally {
+      preWindowState = null;
+      pipMode = false;
+      notifyPipMode();
+    }
+  }
+
+  function togglePip() {
+    return pipMode ? exitPip() : enterPip();
+  }
+
+  async function togglePipAlwaysOnTop() {
+    pipAlwaysOnTop = !pipAlwaysOnTop;
+    try {
+      await getCurrentWindow().setAlwaysOnTop(pipMode && pipAlwaysOnTop);
+    } catch (err) {
+      console.error("Always on top error:", err);
+    }
+  }
+
+  function closeAllMenus() {
+    showAudioMenu = false;
+    showSubtitleMenu = false;
+    showChaptersMenu = false;
+    showPlayerMenu = false;
+    showEpisodesPanel = false;
   }
 
   function handleProgressHover(event) {
@@ -1987,6 +2087,25 @@
           fullscreen ? "ri-fullscreen-exit-fill" : "ri-fullscreen-fill"
         );
         break;
+      case "p":
+        event.preventDefault();
+        togglePip();
+        showShortcutIndicator(
+          pipMode ? "exit-pip" : "pip",
+          pipMode ? "Exit Mini Player" : "Mini Player",
+          "ri-picture-in-picture-line"
+        );
+        break;
+      case "t":
+        if (!pipMode) break;
+        event.preventDefault();
+        togglePipAlwaysOnTop();
+        showShortcutIndicator(
+          "pin",
+          pipAlwaysOnTop ? "Pinned" : "Unpinned",
+          pipAlwaysOnTop ? "ri-pushpin-fill" : "ri-pushpin-line"
+        );
+        break;
       case "a":
         event.preventDefault();
         updateSubtitleOffset(-0.1);
@@ -2282,6 +2401,8 @@
     // Remove mpv event listeners
     for (const unlisten of mpvUnlisteners) unlisten();
     mpvUnlisteners = [];
+    // Restore the window before the player goes away, or it stays tiny and pinned
+    if (pipMode) await exitPip();
     // Stop mpv playback so the native layer goes dark
     await invoke("mpv_run_command", { args: ["stop"] }).catch(() => {});
   });
@@ -2293,6 +2414,7 @@
   bind:this={videoContainer}
   on:mousemove={handleMouseMove}
   class:fullscreen
+  class:pip={pipMode}
   class:hide-cursor={!showControls && playing}
 >
   <!-- mpv renders into native view below this transparent WebView -->
@@ -2301,6 +2423,13 @@
     class="mpv-container"
     on:click={togglePlay}
   ></div>
+
+  {#if pipMode && showControls}
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div class="pip-drag-strip" data-tauri-drag-region title="Drag to move">
+      <span class="pip-drag-grip"></span>
+    </div>
+  {/if}
 
   {#if loading}
     <div class="loading-overlay">
@@ -3020,6 +3149,26 @@
           </div>
         {/if}
       </div>
+
+      {#if pipMode}
+        <button
+          on:click={togglePipAlwaysOnTop}
+          class="control-btn pip-pin-btn"
+          class:active={pipAlwaysOnTop}
+          title={pipAlwaysOnTop ? "Unpin from top (T)" : "Pin on top (T)"}
+        >
+          <i class={pipAlwaysOnTop ? "ri-pushpin-fill" : "ri-pushpin-line"}></i>
+        </button>
+      {/if}
+
+      <button
+        on:click={togglePip}
+        class="pip-toggle-btn control-btn"
+        class:active={pipMode}
+        title={pipMode ? "Exit mini player (P)" : "Mini player (P)"}
+      >
+        <i class={pipMode ? "ri-picture-in-picture-exit-line" : "ri-picture-in-picture-line"}></i>
+      </button>
 
       <button on:click={toggleFullscreen} class="fullscreen-btn control-btn">
         <i class={fullscreen ? "ri-fullscreen-exit-line" : "ri-fullscreen-line"}

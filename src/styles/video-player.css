@@ -1976,3 +1976,297 @@ html:not(.macos) .player-track-dropdown {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
 }
+
+/* ─── picture-in-picture (mini player) ─────────────────────────────────── */
+/* keep the real player ui, just shrink it down into something cute */
+
+/* the big centered key-shortcut popup would swallow the tiny window */
+.video-player.pip .shortcut-indicator {
+    display: none;
+}
+
+/* little grab pill at the top so the frameless window can be moved */
+.pip-drag-strip {
+    position: absolute;
+    top: 6px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 96px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+    cursor: grab;
+    z-index: 40;
+}
+
+.pip-drag-strip:active {
+    cursor: grabbing;
+}
+
+.pip-drag-grip {
+    width: 28px;
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.55);
+    pointer-events: none;
+}
+
+/* header: keep the back button, drop the title to save room */
+.video-player.pip .player-header {
+    top: 6px;
+    left: 6px;
+    gap: 6px;
+}
+
+.video-player.pip .player-title {
+    display: none;
+}
+
+.video-player.pip .player-header .back-btn {
+    width: 30px;
+    height: 30px;
+    border-radius: var(--border-radius-sm);
+}
+
+.video-player.pip .player-header .back-btn i {
+    font-size: 15px;
+}
+
+/* controls: tighter padding, smaller buttons */
+.video-player.pip .controls {
+    padding: 8px 10px 10px;
+    gap: 6px;
+}
+
+.video-player.pip .control-buttons {
+    gap: 6px;
+}
+
+.video-player.pip .control-buttons > button,
+.video-player.pip .control-buttons .volume-btn,
+.video-player.pip .control-buttons .audio-btn,
+.video-player.pip .control-buttons .subtitle-btn,
+.video-player.pip .control-buttons .chapters-btn,
+.video-player.pip .control-buttons .menu-btn,
+.video-player.pip .control-buttons .fullscreen-btn {
+    width: 30px;
+    height: 30px;
+    border-radius: var(--border-radius-sm);
+}
+
+.video-player.pip .control-buttons > button i,
+.video-player.pip .control-buttons .volume-btn i,
+.video-player.pip .control-buttons .audio-btn i,
+.video-player.pip .control-buttons .subtitle-btn i,
+.video-player.pip .control-buttons .chapters-btn i,
+.video-player.pip .control-buttons .menu-btn i,
+.video-player.pip .control-buttons .fullscreen-btn i {
+    font-size: 15px;
+}
+
+.video-player.pip .play-btn {
+    width: 34px !important;
+    height: 34px !important;
+}
+
+.video-player.pip .play-btn i {
+    font-size: 17px !important;
+}
+
+/* time readout eats horizontal room; the scrub bar covers it */
+.video-player.pip .time {
+    display: none;
+}
+
+/* keep the scrub bar fully interactive, just a touch slimmer */
+.video-player.pip .progress-bar {
+    height: 5px;
+}
+
+/* shrink the volume rocker so it clears the seek bar above it */
+.video-player.pip .volume-slider-wrapper {
+    padding: 8px 6px;
+}
+
+.video-player.pip .volume-slider-track {
+    height: 56px;
+}
+
+/* popups must still fit inside the small window */
+.video-player.pip .player-track-dropdown {
+    max-height: calc(100vh - 64px);
+    min-width: 170px;
+}
+
+.video-player.pip .player-menu {
+    max-height: calc(100vh - 64px);
+}
+
+/* pinned / active mini-player buttons glow with the accent */
+.pip-toggle-btn.active,
+.pip-pin-btn.active,
+.video-player.pip .menu-btn.active {
+    background: var(--accent-color) !important;
+    border-color: transparent !important;
+    color: #fff;
+}
+
+/* the real settings menu + submenus, shrunk to fit the mini player */
+.video-player.pip .player-menu {
+    min-width: 190px;
+}
+
+.video-player.pip .player-track-dropdown {
+    padding: 5px;
+    border-radius: 10px;
+}
+
+.video-player.pip .player-track-option {
+    padding: 6px 8px;
+    font-size: 11px;
+    gap: 8px;
+    margin-bottom: 2px;
+    border-radius: var(--border-radius-sm);
+}
+
+.video-player.pip .menu-item {
+    padding: 7px 9px;
+}
+
+.video-player.pip .menu-item .ri-external-link-line,
+.video-player.pip .menu-item .ri-music-2-line,
+.video-player.pip .menu-item .ri-closed-captioning-line,
+.video-player.pip .menu-item .ri-speed-line,
+.video-player.pip .menu-item .ri-headphone-line,
+.video-player.pip .menu-item .ri-bookmark-line {
+    margin-right: 6px;
+    font-size: 13px;
+}
+
+.video-player.pip .submenu-trigger i.ri-arrow-right-s-line {
+    font-size: 16px;
+}
+
+.video-player.pip .menu-divider {
+    margin: 5px 0;
+}
+
+.video-player.pip .player-track-lang {
+    font-size: 11px;
+}
+
+.video-player.pip .player-track-detail,
+.video-player.pip .chapter-time,
+.video-player.pip .chapter-title {
+    font-size: 10px;
+}
+
+.video-player.pip .player-track-badge {
+    font-size: 8px;
+    padding: 2px 5px;
+}
+
+.video-player.pip .track-flag {
+    width: 18px;
+    height: 13px;
+}
+
+/* speed slider row */
+.video-player.pip .speed-item {
+    gap: 10px;
+    padding-bottom: 12px;
+}
+
+.video-player.pip .speed-item-header {
+    font-size: 11px;
+}
+
+.video-player.pip .speed-slider-wrap {
+    padding: 2px 9px 8px;
+}
+
+/* pill toggles */
+.video-player.pip .menu-toggle-indicator {
+    width: 28px;
+    height: 16px;
+}
+
+.video-player.pip .menu-toggle-indicator::before {
+    width: 10px;
+    height: 10px;
+    top: 3px;
+    left: 3px;
+}
+
+.video-player.pip .menu-toggle-indicator.on::before {
+    transform: translateX(12px);
+}
+
+/* floating submenus (audio / subtitle / customize) */
+.video-player.pip .submenu {
+    min-width: 180px;
+    max-width: 260px;
+    max-height: calc(100vh - 40px);
+    padding: 5px;
+    border-radius: 10px;
+}
+
+.video-player.pip .submenu .menu-item {
+    padding: 6px 8px;
+    margin-bottom: 2px;
+}
+
+/* subtitle customize panel */
+.video-player.pip .settings-submenu {
+    width: 264px;
+    padding: 12px;
+    max-height: calc(100vh - 40px);
+}
+
+.video-player.pip .settings-preview-container {
+    height: 80px;
+    margin-bottom: 6px;
+}
+
+.video-player.pip .settings-group {
+    margin-bottom: 12px;
+}
+
+.video-player.pip .settings-group label {
+    font-size: 11px;
+    margin-right: 8px;
+}
+
+.video-player.pip .settings-btn,
+.video-player.pip .settings-color-input,
+.video-player.pip .settings-reset-btn {
+    width: 22px;
+    height: 22px;
+    font-size: 13px;
+}
+
+.video-player.pip .settings-btn.wide-btn,
+.video-player.pip .settings-btn.seg-btn {
+    width: auto;
+    font-size: 10px;
+}
+
+.video-player.pip .settings-reset-btn i {
+    font-size: 13px;
+}
+
+.video-player.pip .settings-value {
+    font-size: 11px;
+    min-width: 34px;
+}
+
+.video-player.pip .settings-controls {
+    gap: 3px;
+    padding: 2px;
+}
