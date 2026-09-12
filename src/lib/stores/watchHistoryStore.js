@@ -23,6 +23,7 @@ async function loadFromDisk() {
       current_episode: item.current_episode,
       current_timestamp: item.current_timestamp,
       number_of_seasons: item.number_of_seasons ?? null,
+      last_season_number: item.last_season_number ?? null,
       last_season_episode_count: item.last_season_episode_count ?? null,
     }));
   } catch (error) {
@@ -54,6 +55,7 @@ function createWatchHistoryStore() {
         current_episode: episodeData?.episode || item.currentEpisode || null,
         current_timestamp: episodeData?.timestamp || item.currentTimestamp || null,
         number_of_seasons: item.number_of_seasons ?? null,
+        last_season_number: item.last_season_number ?? null,
         last_season_episode_count: item.last_season_episode_count ?? null,
       };
 

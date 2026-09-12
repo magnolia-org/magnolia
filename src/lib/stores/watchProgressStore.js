@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
+import { isEntryWatched } from '../utils/watchState.js';
 
 // Mirror of current store value for synchronous getProgress/getEpisodeProgress reads
 let _currentProgress = {};
@@ -49,22 +50,27 @@ function createWatchProgressStore() {
 
     updateProgress: async (mediaId, mediaType, data) => {
       const key = `${mediaId}-${mediaType}`;
+      const epKey = data.currentSeason && data.currentEpisode
+        ? `${mediaId}-${mediaType}-S${data.currentSeason}-E${data.currentEpisode}`
+        : null;
+      const previous = _currentProgress[epKey || key];
       const entry = { ...data, updatedAt: Date.now() };
+
+      // keep the first finish time so saves during the credits don't reorder history
+      if (isEntryWatched(entry)) {
+        entry.completedAt = (isEntryWatched(previous) && previous.completedAt) || entry.updatedAt;
+      }
 
       // Update in-memory immediately so UI stays responsive
       update(progress => {
         const next = { ...progress, [key]: entry };
-        if (data.currentSeason && data.currentEpisode) {
-          const epKey = `${mediaId}-${mediaType}-S${data.currentSeason}-E${data.currentEpisode}`;
-          next[epKey] = entry;
-        }
+        if (epKey) next[epKey] = entry;
         return next;
       });
 
       try {
         await invoke('update_watch_progress_entry', { key, value: entry });
-        if (data.currentSeason && data.currentEpisode) {
-          const epKey = `${mediaId}-${mediaType}-S${data.currentSeason}-E${data.currentEpisode}`;
+        if (epKey) {
           await invoke('update_watch_progress_entry', { key: epKey, value: entry });
         }
         console.log('📊 Updated watch progress:', key, data);

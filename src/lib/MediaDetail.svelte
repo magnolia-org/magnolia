@@ -13,11 +13,13 @@
     getMovieRecommendations,
     getTVRecommendations,
     getImageUrl,
+    getCorsImageUrl,
     getTVExternalIds,
     getMovieExternalIds,
   } from "./tmdb.js";
   import { myListStore } from "./stores/listStore.js";
   import { watchProgressStore } from "./stores/watchProgressStore.js";
+  import { isEntryWatched } from "./utils/watchState.js";
   import { getTrackerPreference, setTrackerPreference } from "./stores/watchHistoryStore.js";
   import { invoke } from "@tauri-apps/api/core";
   import TorrentSelector from "./TorrentSelector.svelte";
@@ -64,7 +66,7 @@
   let selectedTorrentForManual = null;
   let selectedTorrentName = "";
   let manualHandleId = null;
-  let autoPlayTriggered = false;
+  let autoPlayedMedia = null;
 
   let showErrorModal = false;
   let errorMessage = "";
@@ -188,7 +190,6 @@
     selectedEpisode = null;
     recommendations = [];
     keywords = [];
-    autoPlayTriggered = false; // Reset autoplay flag for new media
     selectedTorrentName = ""; // Reset torrent name for new media
     isPlayLoading = false;
     detectedIsAnime = false;
@@ -221,9 +222,10 @@
     loadSeasonDetails();
   }
 
-  // Trigger autoPlay as soon as details are available, regardless of timing
-  $: if (details && media?.autoPlay && !autoPlayTriggered) {
-    autoPlayTriggered = true;
+  // trigger autoplay once per opened media, tracked by identity so the prop is never
+  // mutated (mutating it reruns loadDetails and nulls details mid-play)
+  $: if (details && media?.autoPlay && autoPlayedMedia !== media) {
+    autoPlayedMedia = media;
     handleAutoPlay();
   }
 
@@ -272,7 +274,7 @@
       }
 
       if (details && details.backdrop_path) {
-        await extractColors(getImageUrl(details.backdrop_path, "w300"));
+        await extractColors(getCorsImageUrl(details.backdrop_path, "w300"));
       }
     } catch (err) {
       console.error("Error loading details:", err);
@@ -505,19 +507,15 @@
   }
 
   // Get resume info for the play button
-  function getResumeInfo() {
-    if (!details) return null;
-    const progress = watchProgressStore.getProgress(details.id, media.media_type);
-    if (!progress) return null;
-    
+  function getResumeInfo(progress) {
+    if (!details || !progress) return null;
+
     const isMovie = media.media_type === 'movie' || !!details.title;
-    
+
     if (isMovie) {
       // For movies, show timestamp if we have progress
       if (progress.currentTimestamp && progress.currentTimestamp > 60) {
-        // Check if finished (>95%)
-        const isFinished = progress.duration && (progress.currentTimestamp / progress.duration > 0.95);
-        if (isFinished) return null; // Don't show resume if finished
+        if (isEntryWatched(progress)) return null; // Don't show resume if finished
 
         return {
           label: `Resume from ${formatTime(progress.currentTimestamp)}`,
@@ -534,29 +532,22 @@
         let timestamp = progress.currentTimestamp || 0;
         let label = `S${season}E${episode}`;
         
-        // Check if finished (>90%)
-        const isFinished = progress.duration && (progress.currentTimestamp / progress.duration > 0.9);
-        
-        if (isFinished && details.seasons) {
-            // Find next episode
-            const currentSeasonInfo = details.seasons.find(s => s.season_number === season);
-            
-            if (currentSeasonInfo) {
-                if (episode < currentSeasonInfo.episode_count) {
-                    episode++;
-                    timestamp = 0;
-                    label = `S${season}E${episode}`;
-                } else {
-                    // Next season?
-                    const nextSeason = details.seasons.find(s => s.season_number === season + 1);
-                    if (nextSeason) {
-                        season++;
-                        episode = 1;
-                        timestamp = 0;
-                        label = `S${season}E${episode}`;
-                    }
-                }
+        const currentSeasonInfo = details.seasons?.find(s => s.season_number === season);
+        // "next episode" from the player can point one past the end of a season
+        const pastSeasonEnd = currentSeasonInfo && episode > currentSeasonInfo.episode_count;
+
+        if (currentSeasonInfo && (isEntryWatched(progress) || pastSeasonEnd)) {
+            if (episode < currentSeasonInfo.episode_count) {
+                episode++;
+            } else {
+                const nextSeason = details.seasons.find(s => s.season_number === season + 1);
+                // nothing left to resume once the last episode is done
+                if (!nextSeason) return null;
+                season++;
+                episode = 1;
             }
+            timestamp = 0;
+            label = `S${season}E${episode}`;
         }
         
         const hasTimestamp = timestamp > 60;
@@ -572,7 +563,9 @@
   }
 
   // Reactive variable for resume info
-  $: resumeInfo = details ? getResumeInfo() : null;
+  $: resumeInfo = details ? getResumeInfo($watchProgressStore[`${details.id}-${media.media_type}`]) : null;
+
+  $: movieWatched = media?.media_type === 'movie' && isEntryWatched($watchProgressStore[`${media.id}-movie`]);
 
   // True when the last episode of the last season has been watched >85%
   $: seriesWatched = (() => {
@@ -584,8 +577,7 @@
     if (!lastSeasonData?.episodes?.length) return false;
     const lastEp = lastSeasonData.episodes[lastSeasonData.episodes.length - 1];
     const key = `${details.id}-${media.media_type}-S${lastSeason.season_number}-E${lastEp.episode_number}`;
-    const prog = $watchProgressStore[key];
-    return !!(prog?.duration && prog.currentTimestamp / prog.duration > 0.85);
+    return isEntryWatched($watchProgressStore[key]);
   })();
 
   function isSeasonWatched(seasonNum) {
@@ -593,8 +585,7 @@
     if (!seasonData?.episodes?.length) return false;
     const lastEp = seasonData.episodes[seasonData.episodes.length - 1];
     const key = `${details.id}-${media.media_type}-S${seasonNum}-E${lastEp.episode_number}`;
-    const prog = $watchProgressStore[key];
-    return !!(prog?.duration && prog.currentTimestamp / prog.duration > 0.85);
+    return isEntryWatched($watchProgressStore[key]);
   }
 
   function toggleSeason(seasonNumber) {
@@ -607,22 +598,18 @@
 
   async function handleAutoPlay() {
     console.log('Auto-play triggered');
-    
-    // Clear autoPlay flag immediately to prevent re-triggering
-    if (media && media.autoPlay) {
-      media.autoPlay = false;
-    }
-    
+
     // Use resumeProgress if passed from quick play, otherwise load from store
     const progress = media.resumeProgress || watchProgressStore.getProgress(media.id, media.media_type);
-    
+    // skips past finished episodes, and is null once the whole series is done
+    const next = getResumeInfo(progress);
+
     if (media.media_type === 'movie') {
       // Movie: play from beginning (timestamp resume handled by VideoPlayer)
       await handlePlay(0, 0);
-    } else if (progress && progress.currentSeason && progress.currentEpisode) {
-      // TV Show: resume from last watched episode
-      console.log(`Resuming from S${progress.currentSeason}E${progress.currentEpisode} at ${progress.currentTimestamp}s`);
-      await handlePlay(progress.currentSeason, progress.currentEpisode);
+    } else if (next?.season && next?.episode) {
+      console.log(`Resuming from S${next.season}E${next.episode} at ${next.timestamp}s`);
+      await handlePlay(next.season, next.episode);
     } else {
       // TV Show: start from S01E01
       await handlePlay(1, 1);
@@ -1076,15 +1063,17 @@
       // Get saved progress for timestamp
       const progress = watchProgressStore.getProgress(details.id, media.media_type);
       let initialTimestamp = 0;
-      
-      // For TV shows, only use saved timestamp if we're playing the same episode
-      if (!isMovie && progress && 
-          progress.currentSeason === pendingPlayRequest.season && 
-          progress.currentEpisode === pendingPlayRequest.episode) {
-        initialTimestamp = progress.currentTimestamp || 0;
-      } else if (isMovie && progress) {
-        // For movies, always use saved timestamp
-        initialTimestamp = progress.currentTimestamp || 0;
+
+      // a finished position starts over instead of resuming into the credits
+      if (progress && !isEntryWatched(progress)) {
+        // For TV shows, only use saved timestamp if we're playing the same episode
+        if (!isMovie &&
+            progress.currentSeason === pendingPlayRequest.season &&
+            progress.currentEpisode === pendingPlayRequest.episode) {
+          initialTimestamp = progress.currentTimestamp || 0;
+        } else if (isMovie) {
+          initialTimestamp = progress.currentTimestamp || 0;
+        }
       }
 
       // Dispatch event to open video player
@@ -1556,15 +1545,17 @@
                 >
                   {#if isPlayLoading}
                     <i class="ri-loader-4-line spin"></i>
-                  {:else if seriesWatched}
+                  {:else if seriesWatched || movieWatched}
                     <i class="ri-repeat-line"></i>
                   {:else}
                     <i class="ri-play-fill"></i>
                   {/if}
                   <div class="play-btn-content">
-                    <span class="play-btn-main">{seriesWatched ? 'Rewatch' : (resumeInfo ? 'Resume' : 'Play')}</span>
+                    <span class="play-btn-main">{seriesWatched || movieWatched ? 'Rewatch' : (resumeInfo ? 'Resume' : 'Play')}</span>
                     {#if seriesWatched && !isPlayLoading}
                       <span class="play-btn-resume-info">From S1E1</span>
+                    {:else if movieWatched && !isPlayLoading}
+                      <span class="play-btn-resume-info">From the start</span>
                     {:else if resumeInfo && !isPlayLoading}
                       <span class="play-btn-resume-info">{resumeInfo.label}</span>
                     {/if}
@@ -1705,7 +1696,7 @@
                               {@const episodeKey = `${details.id}-${media.media_type}-S${season.season_number}-E${episode.episode_number}`}
                               {@const episodeProgress = $watchProgressStore[episodeKey]}
                               {@const percentage = episodeProgress && episodeProgress.duration ? (episodeProgress.currentTimestamp / episodeProgress.duration) * 100 : 0}
-                              {@const isWatched = percentage > 85}
+                              {@const isWatched = isEntryWatched(episodeProgress)}
                               
                               <button
                                 type="button"

@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopRatedTV, getNowPlaying, discoverMovies, discoverTV, getImageUrl } from './tmdb.js';
 import { myListStore } from './stores/listStore.js';
 import { watchProgressStore } from './stores/watchProgressStore.js';
+import { isEntryWatched } from './utils/watchState.js';
 import { getRatingColor } from './utils/colorUtils.js';
 
 const dispatch = createEventDispatcher();
@@ -239,7 +240,9 @@ async function handleQuickPlay(event, item) {
         ? mediaTitle
         : `${mediaTitle} - S${targetSeason}E${targetEpisode}`;
       let initialTimestamp = 0;
-      if (isMovie && progress?.currentTimestamp) {
+      if (isEntryWatched(progress)) {
+        // finished, so start over
+      } else if (isMovie && progress?.currentTimestamp) {
         initialTimestamp = progress.currentTimestamp;
       } else if (!isMovie && progress?.currentSeason === targetSeason && progress?.currentEpisode === targetEpisode) {
         initialTimestamp = progress.currentTimestamp || 0;

@@ -36,6 +36,13 @@ export function getImageUrl(path, size = 'w500') {
   return `${TMDB_IMAGE_BASE_URL}/${size}${path}`;
 }
 
+// for canvas color reads: a plain <img> of the same url poisons the cache and the cors load fails,
+// so the query string keeps cors loads in their own cache entry
+export function getCorsImageUrl(path, size = 'w500') {
+  const url = getImageUrl(path, size);
+  return url ? `${url}?cors=1` : null;
+}
+
 export async function getConfiguration() {
   const headers = await getHeaders();
   const response = await fetch(`${TMDB_BASE_URL}/configuration`, { headers });

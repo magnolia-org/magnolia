@@ -20,6 +20,8 @@ pub struct WatchHistoryItem {
     #[serde(default)]
     pub number_of_seasons: Option<u32>,
     #[serde(default)]
+    pub last_season_number: Option<u32>,
+    #[serde(default)]
     pub last_season_episode_count: Option<u32>,
 }
 
@@ -49,9 +51,26 @@ impl WatchHistoryManager {
         }
     }
 
-    pub async fn add_item(&self, item: WatchHistoryItem) {
+    pub async fn add_item(&self, mut item: WatchHistoryItem) {
         let mut data = self.data.write().await;
-        
+
+        // quick play only has the stored history item, so keep metadata the new entry lacks
+        if let Some(existing) = data
+            .items
+            .iter()
+            .find(|existing| existing.id == item.id && existing.media_type == item.media_type)
+        {
+            item.poster_path = item.poster_path.or_else(|| existing.poster_path.clone());
+            item.backdrop_path = item.backdrop_path.or_else(|| existing.backdrop_path.clone());
+            item.release_date = item.release_date.or_else(|| existing.release_date.clone());
+            item.vote_average = item.vote_average.or(existing.vote_average);
+            item.number_of_seasons = item.number_of_seasons.or(existing.number_of_seasons);
+            item.last_season_number = item.last_season_number.or(existing.last_season_number);
+            item.last_season_episode_count = item
+                .last_season_episode_count
+                .or(existing.last_season_episode_count);
+        }
+
         // Remove existing entry if present
         data.items.retain(|existing| 
             !(existing.id == item.id && existing.media_type == item.media_type)

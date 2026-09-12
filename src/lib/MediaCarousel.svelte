@@ -1,9 +1,10 @@
 <script>
 import { onMount, afterUpdate, onDestroy, createEventDispatcher } from 'svelte';
 import { invoke } from '@tauri-apps/api/core';
-import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopRatedTV, getNowPlaying, discoverTV, getImageUrl } from './tmdb.js';
+import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopRatedTV, getNowPlaying, discoverTV, getImageUrl, getCorsImageUrl } from './tmdb.js';
 import { myListStore } from './stores/listStore.js';
 import { getRatingColor } from './utils/colorUtils.js';
+import { isEntryWatched, isMediaFinished } from './utils/watchState.js';
 
 const dispatch = createEventDispatcher();
 
@@ -47,7 +48,7 @@ $: if (customItems) {
     const itemKey = getItemKey(item);
     if (cardColors[itemKey]) return;
     if (item.poster_path) {
-      extractDominantColor(itemKey, getImageUrl(item.poster_path, 'w92'));
+      extractDominantColor(itemKey, getCorsImageUrl(item.poster_path, 'w92'));
     } else {
       cardColors[itemKey] = accentColor;
     }
@@ -94,7 +95,7 @@ onMount(async () => {
 
     items.forEach(item => {
       if (item.poster_path) {
-        extractDominantColor(getItemKey(item), getImageUrl(item.poster_path, 'w92'));
+        extractDominantColor(getItemKey(item), getCorsImageUrl(item.poster_path, 'w92'));
       }
     });
   } catch (err) {
@@ -208,8 +209,7 @@ cardColors[itemKey] = accentColor;
 }
 cardColors = cardColors;
 } catch (err) {
-cardColors[itemKey] = accentColor;
-cardColors = cardColors;
+// leave it unset so the section accent shows and a later list update can retry
 }
 }
 
@@ -256,6 +256,7 @@ async function handleQuickPlay(event, item) {
   const key = `${item.id}-${itemMediaType}`;
   if (playingItemKey === key) return; // already in-flight
   const progress = watchProgress[key];
+  const progressWatched = isEntryWatched(progress);
   const isMovie = itemMediaType === 'movie';
   playingItemKey = key;
 
@@ -272,7 +273,9 @@ async function handleQuickPlay(event, item) {
     }
   }
 
-  // Fast path: if a saved torrent exists, open the video player directly
+  // Fast path: if a saved torrent exists, open the video player directly.
+  // a finished episode means the next one is up, and only the detail view knows the season layout
+  const canUseFastPath = isMovie || !progressWatched;
   try {
     const saved = await invoke('get_saved_selection', {
       showId: Number(item.id),
@@ -280,7 +283,7 @@ async function handleQuickPlay(event, item) {
       episode: targetEpisode
     });
 
-    if (saved && saved.magnet_link) {
+    if (canUseFastPath && saved?.magnet_link) {
       // Built-in client needs a local torrent handle; a debrid client streams
       // remotely, so skip the local add and let VideoPlayer resolve the magnet.
       let handleId = null;
@@ -300,7 +303,9 @@ async function handleQuickPlay(event, item) {
         : `${mediaTitle} - S${targetSeason}E${targetEpisode}`;
 
       let initialTimestamp = 0;
-      if (isMovie && progress?.currentTimestamp) {
+      if (progressWatched) {
+        // finished, so start over
+      } else if (isMovie && progress?.currentTimestamp) {
         initialTimestamp = progress.currentTimestamp;
       } else if (!isMovie && progress?.currentSeason === targetSeason && progress?.currentEpisode === targetEpisode) {
         initialTimestamp = progress.currentTimestamp || 0;
@@ -393,29 +398,6 @@ function getProgressPercentage(item) {
   return Math.min(100, Math.max(0, (progress.currentTimestamp / progress.duration) * 100));
 }
 
-function isSeriesFullyWatched(item) {
-  if (item.media_type !== 'tv') return false;
-
-  // Season/episode always lives in the progress store, not the history item
-  const key = `${item.id}-${item.media_type}`;
-  const progress = watchProgress?.[key];
-  if (!progress?.currentSeason || !progress?.currentEpisode) return false;
-
-  const { currentSeason, currentEpisode } = progress;
-
-  // If we have stored series-length metadata, require it to be the actual finale
-  const nos = item.number_of_seasons;
-  const lastEpCount = item.last_season_episode_count;
-  if (nos && lastEpCount && (currentSeason !== nos || currentEpisode !== lastEpCount)) return false;
-
-  // Use the episode-specific progress key for a more accurate percentage
-  const epKey = `${key}-S${currentSeason}-E${currentEpisode}`;
-  const ep = watchProgress?.[epKey] || progress;
-  if (!ep?.duration) return false;
-
-  return (ep.currentTimestamp / ep.duration) * 100 > 85;
-}
-
 function handleViewAll() {
   const detail = {
     title,
@@ -460,7 +442,7 @@ function handleViewAll() {
 {#if item.poster_path}
 <img class="media-poster" src={getImageUrl(item.poster_path, 'w500')} alt={item.title || item.name} loading="lazy" />
 {#if isRecentlyWatched}
-  {#if isSeriesFullyWatched(item)}
+  {#if isMediaFinished(item, watchProgress)}
     <div class="progress-badge watched-badge"><i class="ri-checkbox-circle-fill"></i> Watched</div>
   {:else}
     {@const progressInfo = getProgressInfo(item)}

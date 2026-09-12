@@ -1,7 +1,7 @@
 <script>
 import { onMount } from 'svelte';
 import { invoke } from '@tauri-apps/api/core';
-import { getMovieRecommendations, getTVRecommendations, getImageUrl } from './tmdb.js';
+import { getMovieRecommendations, getTVRecommendations, getImageUrl, getCorsImageUrl } from './tmdb.js';
 import { getRatingColor } from './utils/colorUtils.js';
 import { myListStore } from './stores/listStore.js';
 import { watchProgressStore } from './stores/watchProgressStore.js';
@@ -132,7 +132,7 @@ function shuffleRecommendations() {
 
 async function extractColors(backdropPath) {
   try {
-    const imageUrl = getImageUrl(backdropPath, 'w300');
+    const imageUrl = getCorsImageUrl(backdropPath, 'w300');
     const img = new Image();
     img.crossOrigin = 'Anonymous';
     img.src = imageUrl;

@@ -15,6 +15,7 @@
   import { myListStore } from "./lib/stores/listStore.js";
   import { watchHistoryStore } from "./lib/stores/watchHistoryStore.js";
   import { watchProgressStore } from "./lib/stores/watchProgressStore.js";
+  import { sortWatchHistory } from "./lib/utils/watchState.js";
   import { modalStore, closeModal } from "./lib/stores/modalStore.js";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { invoke } from "@tauri-apps/api/core";
@@ -42,7 +43,7 @@
   let onboardingVisible = false;
 
   $: myList = $myListStore;
-  $: watchHistory = $watchHistoryStore;
+  $: watchHistory = sortWatchHistory($watchHistoryStore, $watchProgressStore);
   $: watchProgress = $watchProgressStore;
   $: activeModal = $modalStore.activeModal;
 

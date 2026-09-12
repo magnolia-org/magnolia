@@ -145,6 +145,7 @@
   let torrentFileId = null;
   let torrentHttpPort = null;
   let watchHistoryAdded = false;
+  let markedCompleted = false;
   let saveTimeout;
   
   function getStableCacheId() {
@@ -899,6 +900,62 @@
       .filter((r) => r.width >= 0.15);
   }
 
+  function buildProgressData() {
+    const progressData = {
+      currentTimestamp: Math.floor(currentTime),
+      duration: Math.floor(duration)
+    };
+    if (seasonNum !== null && episodeNum !== null) {
+      progressData.currentSeason = seasonNum;
+      progressData.currentEpisode = episodeNum;
+    }
+    if (markedCompleted) progressData.completed = true;
+    return progressData;
+  }
+
+  function saveProgress() {
+    if (!mediaId || !mediaType || !(currentTime > 0) || !(duration > 0)) return;
+    watchProgressStore.updateProgress(mediaId, mediaType, buildProgressData());
+  }
+
+  function markCompleted() {
+    if (markedCompleted) return;
+    markedCompleted = true;
+    saveProgress();
+  }
+
+  function isEndingChapterTitle(chapterTitle) {
+    const t = chapterTitle.toLowerCase();
+    return t.includes('ending') || (t.includes('credits') && !t.includes('opening')) || t === 'end';
+  }
+
+  async function addToWatchHistory(progressData) {
+    let seriesInfo = metadata;
+    // quick play hands over the stored history item, which has no season list
+    if (mediaType === 'tv' && !metadata?.seasons) {
+      try {
+        seriesInfo = await getTVDetails(mediaId);
+      } catch (e) {
+        console.warn('failed to fetch series info for watch history:', e);
+      }
+    }
+    const tvSeasons = seriesInfo?.seasons?.filter(s => s.season_number > 0) ?? [];
+    const lastSeason = tvSeasons.at(-1);
+    watchHistoryStore.addItem({
+      id: mediaId,
+      media_type: mediaType,
+      title: metadata.title || metadata.name || 'Unknown',
+      poster_path: metadata.poster_path,
+      backdrop_path: metadata.backdrop_path,
+      release_date: metadata.release_date || metadata.first_air_date,
+      vote_average: metadata.vote_average,
+      number_of_seasons: seriesInfo?.number_of_seasons ?? (tvSeasons.length || null),
+      last_season_number: lastSeason?.season_number ?? null,
+      last_season_episode_count: lastSeason?.episode_count ?? null,
+      ...progressData
+    });
+  }
+
   function handleMpvProgress(payload) {
     if (payload.time_pos !== undefined && payload.time_pos !== null) {
       currentTime = payload.time_pos;
@@ -922,32 +979,11 @@
       if (!progressTrackingInterval) {
         progressTrackingInterval = setInterval(() => {
           if (playing && !loading && currentTime > 0 && mediaId && mediaType) {
-            const progressData = {
-              currentTimestamp: Math.floor(currentTime),
-              duration: Math.floor(duration)
-            };
-            if (seasonNum !== null && episodeNum !== null) {
-              progressData.currentSeason = seasonNum;
-              progressData.currentEpisode = episodeNum;
-            }
+            const progressData = buildProgressData();
             watchProgressStore.updateProgress(mediaId, mediaType, progressData);
             if (!watchHistoryAdded && metadata) {
-              const tvSeasons = metadata.seasons?.filter(s => s.season_number > 0) ?? [];
-              const lastSeason = tvSeasons.at(-1);
-              const historyItem = {
-                id: mediaId,
-                media_type: mediaType,
-                title: metadata.title || metadata.name || 'Unknown',
-                poster_path: metadata.poster_path,
-                backdrop_path: metadata.backdrop_path,
-                release_date: metadata.release_date || metadata.first_air_date,
-                vote_average: metadata.vote_average,
-                number_of_seasons: metadata.number_of_seasons ?? (tvSeasons.length || null),
-                last_season_episode_count: lastSeason?.episode_count ?? null,
-                ...progressData
-              };
-              watchHistoryStore.addItem(historyItem);
               watchHistoryAdded = true;
+              addToWatchHistory(progressData);
             }
           }
         }, 10000);
@@ -973,6 +1009,11 @@
         currentChapter = { ...chapter, end_time: chapterEnd };
         break;
       }
+    }
+
+    // reaching the credits counts as finished even if the viewer closes before the very end
+    if (currentChapter?.title && currentTime / duration >= 0.7 && isEndingChapterTitle(currentChapter.title)) {
+      markCompleted();
     }
 
     // Check for skippable section
@@ -1031,11 +1072,8 @@
       let shouldShowNext = false;
 
       // Check if current chapter indicates ending
-      if (currentChapter && currentChapter.title) {
-        const title = currentChapter.title.toLowerCase();
-        if (title.includes('ending') || (title.includes('credits') && !title.includes('opening')) || title === 'end') {
-           shouldShowNext = true;
-        }
+      if (currentChapter?.title && isEndingChapterTitle(currentChapter.title)) {
+        shouldShowNext = true;
       }
 
       // Fallback to existing logic: last chapter is short and at the end
@@ -1078,16 +1116,9 @@
   async function goToNextEpisode() {
     if (seasonNum === null || episodeNum === null) return;
 
-    // Update progress before switching
-    if (mediaId && mediaType && currentTime > 0) {
-      const progressData = {
-        currentTimestamp: Math.floor(currentTime),
-        duration: Math.floor(duration),
-        currentSeason: seasonNum,
-        currentEpisode: episodeNum
-      };
-      watchProgressStore.updateProgress(mediaId, mediaType, progressData);
-    }
+    // moving on to the next episode means this one is done
+    markedCompleted = true;
+    saveProgress();
 
     const nextEpisode = episodeNum + 1;
     
@@ -2192,14 +2223,7 @@
     showEpisodesPanel = false;
 
     // Update progress for current episode before switching
-    if (mediaId && mediaType && currentTime > 0) {
-      watchProgressStore.updateProgress(mediaId, mediaType, {
-        currentTimestamp: Math.floor(currentTime),
-        duration: Math.floor(duration),
-        currentSeason: seasonNum,
-        currentEpisode: episodeNum,
-      });
-    }
+    saveProgress();
 
     try {
       const saved = await invoke('get_saved_selection', {
@@ -2335,6 +2359,8 @@
 
     mpvUnlisteners.push(await listen("mpv-end-file", () => {
       playing = false;
+      // mpv also reports end-file on stream errors, so only trust it near the end
+      if (duration > 0 && currentTime / duration >= 0.8) markCompleted();
     }));
 
     // Periodic skip section check
@@ -2384,6 +2410,8 @@
   });
 
   onDestroy(async () => {
+    // the interval only saves every 10s, so flush the final position on close
+    saveProgress();
     clearInterval(pollInterval);
     if (pieceRangeInterval) clearInterval(pieceRangeInterval);
     if (progressTrackingInterval) clearInterval(progressTrackingInterval);
