@@ -355,6 +355,44 @@ async fn stream_file(
     response.body(body).unwrap().into_response()
 }
 
+/// The persistent DHT reuses the UDP port saved in dht.json. If that port is now
+/// unavailable (e.g. Windows dynamically excluded it for Hyper-V/WSL2/WinNAT),
+/// librqbit's bind fails and the whole app would crash. Test-bind the exact saved
+/// port and, if it's taken, remove the stale state so librqbit picks a fresh one.
+fn clear_stale_dht_state_if_port_unavailable() {
+    let Ok(dht_path) = librqbit::dht::PersistentDht::default_persistence_filename() else {
+        return;
+    };
+    let Ok(contents) = std::fs::read_to_string(&dht_path) else {
+        return;
+    };
+    let Ok(state) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return;
+    };
+    let Some(addr) = state.get("addr").and_then(|a| a.as_str()) else {
+        return;
+    };
+    let Ok(socket_addr) = addr.parse::<SocketAddr>() else {
+        return;
+    };
+    if std::net::UdpSocket::bind(socket_addr).is_err() {
+        println!(
+            "DHT port {} is unavailable; clearing stale DHT state {}",
+            socket_addr,
+            dht_path.display()
+        );
+        if let Err(err) = std::fs::remove_file(&dht_path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "failed to remove stale DHT state {}: {}",
+                    dht_path.display(),
+                    err
+                );
+            }
+        }
+    }
+}
+
 impl TorrentManager {
     pub async fn new(download_dir: PathBuf) -> Result<Self> {
         println!("initializing TorrentManager with download_dir: {:?}", download_dir);
@@ -369,8 +407,7 @@ impl TorrentManager {
         // runs that never exit cleanly accumulate torrents there forever. Nothing
         // torrent-related should initialize at startup — torrents are only added
         // when the user actually streams one.
-        println!("creating librqbit session...");
-        let session = match Session::new_with_opts(download_dir.clone(), SessionOptions {
+        let session_options = || SessionOptions {
             // librqbit's default peer connect timeout is 10s; dead peers from DHT are
             // common, so churn through them quickly to find live ones sooner.
             peer_opts: Some(PeerConnectionOptions {
@@ -386,14 +423,41 @@ impl TorrentManager {
                 .filter_map(|t| url::Url::parse(t).ok())
                 .collect(),
             ..Default::default()
-        }).await {
+        };
+
+        println!("creating librqbit session...");
+        let session = match Session::new_with_opts(download_dir.clone(), session_options()).await {
             Ok(s) => {
                 println!("librqbit session created successfully");
                 s
             }
             Err(e) => {
+                // The persistent DHT reuses the UDP port saved in dht.json. If that
+                // port is now unavailable (e.g. Windows dynamically excluded it for
+                // Hyper-V/WSL2/WinNAT), the bind fails and the whole app would crash.
+                // Drop the stale state so librqbit picks a fresh port, then retry.
                 eprintln!("failed to create librqbit session: {}", e);
-                return Err(anyhow::anyhow!("Failed to create librqbit session: {}", e));
+                if let Ok(dht_path) = librqbit::dht::PersistentDht::default_persistence_filename() {
+                    match std::fs::remove_file(&dht_path) {
+                        Ok(_) => println!("removed stale DHT state: {}", dht_path.display()),
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(err) => eprintln!(
+                            "failed to remove stale DHT state {}: {}",
+                            dht_path.display(),
+                            err
+                        ),
+                    }
+                }
+                match Session::new_with_opts(download_dir.clone(), session_options()).await {
+                    Ok(s) => {
+                        println!("librqbit session created successfully (fresh DHT)");
+                        s
+                    }
+                    Err(e2) => {
+                        eprintln!("failed to create librqbit session with fresh DHT: {}", e2);
+                        return Err(anyhow::anyhow!("Failed to create librqbit session: {}", e2));
+                    }
+                }
             }
         };
 
