@@ -24,7 +24,7 @@ A clear and concise description of what you expected to happen.
 If applicable, add screenshots and/or a screen recording to help explain your problem.
 
 **Log files**
-Please include your related frontend + backend logs from %LOCALAPPDATA%\com.chair.magnolia\logs or ~/Library/Application Support/com.chair.magnolia/logs
+Please include your related frontend + backend logs from %APPDATA%\com.chair.magnolia\logs or ~/Library/Application Support/com.chair.magnolia/logs
 
 **Magnolia data (please complete the following information):**
  - OS: [e.g. Windows, Mac]
