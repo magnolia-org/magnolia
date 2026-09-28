@@ -28,7 +28,7 @@ main {
   overflow-y: auto;
   overflow-x: hidden;
   position: relative;
-  transition: filter 0.3s ease;
+  transition: opacity 0.3s ease;
 }
 
 .content-scroll.blur {

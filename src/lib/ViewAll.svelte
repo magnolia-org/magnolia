@@ -1,6 +1,7 @@
 <script>
 import { onMount, onDestroy, createEventDispatcher } from 'svelte';
 import { invoke } from '@tauri-apps/api/core';
+import { scrollHoverGuard } from './utils/scrollHoverGuard.js';
 import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopRatedTV, getNowPlaying, discoverMovies, discoverTV, getImageUrl } from './tmdb.js';
 import { myListStore } from './stores/listStore.js';
 import { watchProgressStore } from './stores/watchProgressStore.js';
@@ -44,14 +45,19 @@ $: if (scrollHost && infiniteScrollSentinel && !customItems && page < totalPages
 onMount(async () => {
   await loadItems();
 
-  const handleOverlayScroll = () => {
+  const titlebarHeight = parseInt(
+    getComputedStyle(document.documentElement).getPropertyValue('--titlebar-height') || '50',
+    10,
+  ) || 50;
+  let scrollFrame = null;
+  const updateStickyHeader = () => {
+    scrollFrame = null;
     if (!mainHeaderEl) return;
-    const titlebarHeight = parseInt(
-      getComputedStyle(document.documentElement).getPropertyValue('--titlebar-height') || '50',
-      10,
-    ) || 50;
     const headerRect = mainHeaderEl.getBoundingClientRect();
     showStickyHeader = headerRect.bottom <= titlebarHeight + 8;
+  };
+  const handleOverlayScroll = () => {
+    if (scrollFrame === null) scrollFrame = requestAnimationFrame(updateStickyHeader);
   };
 
   scrollHost = overlayEl;
@@ -65,6 +71,7 @@ onMount(async () => {
     if (scrollHost) {
       scrollHost.removeEventListener('scroll', handleOverlayScroll);
     }
+    if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
     if (loadMoreObserver) {
       loadMoreObserver.disconnect();
       loadMoreObserver = null;
@@ -299,7 +306,7 @@ function formatDate(dateString) {
 
 </script>
 
-<div class="view-all-overlay" bind:this={overlayEl}>
+<div class="view-all-overlay" bind:this={overlayEl} use:scrollHoverGuard>
 
   <div class="view-all-sticky-header" class:visible={showStickyHeader}>
     <button class="btn-standard back-btn" on:click={() => dispatch('close')}>
@@ -344,7 +351,7 @@ function formatDate(dateString) {
             on:mouseleave={() => handleCardLeave(item)}
           >
             {#if item.poster_path}
-              <img src={getImageUrl(item.poster_path, 'w342')} alt={item.title || item.name} loading="lazy" />
+              <img src={getImageUrl(item.poster_path, 'w342')} alt={item.title || item.name} loading="lazy" decoding="async" />
             {:else}
               <div class="no-poster">
                 <i class="ri-film-line"></i>

@@ -108,7 +108,7 @@ onMount(async () => {
 // Keep arrows in sync with window resizing so visibility toggles
 // when the viewport changes (e.g. responsive layout).
 function handleResize() {
-  updateArrows();
+  scheduleArrowUpdate();
 }
 
 onMount(() => {
@@ -117,10 +117,16 @@ onMount(() => {
 
 onDestroy(() => {
   window.removeEventListener('resize', handleResize);
+  if (arrowFrame !== null) cancelAnimationFrame(arrowFrame);
+  if (colorFlushFrame !== null) cancelAnimationFrame(colorFlushFrame);
 });
 
+let lastItemCount = -1;
 afterUpdate(() => {
-updateArrows();
+if (items.length !== lastItemCount) {
+  lastItemCount = items.length;
+  scheduleArrowUpdate();
+}
 });
 
 function formatRating(rating) {
@@ -133,6 +139,24 @@ const date = new Date(dateStr);
 return date.getFullYear();
 }
 
+
+let arrowFrame = null;
+function scheduleArrowUpdate() {
+if (arrowFrame !== null) return;
+arrowFrame = requestAnimationFrame(() => {
+  arrowFrame = null;
+  updateArrows();
+});
+}
+
+let colorFlushFrame = null;
+function flushCardColors() {
+if (colorFlushFrame !== null) return;
+colorFlushFrame = requestAnimationFrame(() => {
+  colorFlushFrame = null;
+  cardColors = cardColors;
+});
+}
 
 function updateArrows() {
 if (!carouselElement) return;
@@ -150,7 +174,7 @@ carouselElement.scrollBy({
 left: direction === 'left' ? -scrollAmount : scrollAmount,
 behavior: 'smooth'
 });
-setTimeout(updateArrows, 300);
+setTimeout(scheduleArrowUpdate, 300);
 }
 
 async function extractDominantColor(itemKey, imageUrl) {
@@ -169,7 +193,7 @@ if (img.complete) {
 });
 
 const canvas = document.createElement('canvas');
-const ctx = canvas.getContext('2d');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
 canvas.width = img.width;
 canvas.height = img.height;
 ctx.drawImage(img, 0, 0);
@@ -207,7 +231,7 @@ cardColors[itemKey] = `rgb(${r}, ${g}, ${b})`;
 } else {
 cardColors[itemKey] = accentColor;
 }
-cardColors = cardColors;
+flushCardColors();
 } catch (err) {
 // leave it unset so the section accent shows and a later list update can retry
 }
@@ -434,13 +458,13 @@ function handleViewAll() {
       <button class="carousel-arrow left" class:visible={showLeftArrow} on:click={() => scroll('left')} aria-label="Scroll left">
         <i class="ri-arrow-left-s-line"></i>
       </button>
-      <div class="carousel" bind:this={carouselElement} on:scroll={updateArrows}>
+      <div class="carousel" bind:this={carouselElement} on:scroll={scheduleArrowUpdate}>
 {#each items as item, index (`${item.id}-${item.media_type}-${index}`)}
 <!-- svelte-ignore a11y-click-events-have-key-events -->
 <!-- svelte-ignore a11y-no-static-element-interactions -->
 <div class="media-card" style="--card-accent: {cardColors[getItemKey(item)] || accentColor}" on:click={() => openDetail(item)}>
 {#if item.poster_path}
-<img class="media-poster" src={getImageUrl(item.poster_path, 'w500')} alt={item.title || item.name} loading="lazy" />
+<img class="media-poster" src={getImageUrl(item.poster_path, 'w342')} alt={item.title || item.name} loading="lazy" decoding="async" />
 {#if isRecentlyWatched}
   {#if isMediaFinished(item, watchProgress)}
     <div class="progress-badge watched-badge"><i class="ri-checkbox-circle-fill"></i> Watched</div>

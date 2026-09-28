@@ -22,9 +22,11 @@ let backdropImages = []; // Array of {url, id, visible}
 let backdropIdCounter = 0;
 
 function handleBackdropLoaded(imgId) {
-  backdropImages = backdropImages.map(i =>
-    i.id === imgId ? { ...i, loaded: true, visible: true } : i
-  );
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    backdropImages = backdropImages.map(i =>
+      i.id === imgId && !i.visible ? { ...i, loaded: true, visible: true } : i
+    );
+  }));
 }
 
 // Svelte action: resolves the cached-image case where onload never re-fires in WebKit
@@ -37,18 +39,12 @@ function imageLoadAction(node, imgId) {
 
 $: myList = $myListStore;
 $: myListItems = new Set(myList.map(item => `${item.id}-${item.media_type}`));
-$: {
-  if (currentItem) {
-    const inList = myListItems.has(`${currentItem.id}-${currentItem.media_type}`);
-    console.log('🎬 Recommendations: Button state for', currentItem.title || currentItem.name, ':', inList);
-  }
-}
 
 $: currentItem = displayedRecommendations[currentIndex];
 
 // Update backdrop with crossfade when currentItem changes
 $: if (currentItem?.backdrop_path) {
-  const newUrl = getImageUrl(currentItem.backdrop_path, 'original');
+  const newUrl = getImageUrl(currentItem.backdrop_path, 'w1280');
   // Check if this URL is already the latest in the array
   const latestImg = backdropImages[backdropImages.length - 1];
   if (!latestImg || latestImg.url !== newUrl) {

@@ -26,3 +26,5 @@ const app = mount(App, {
 })
 
 export default app
+
+;(() => { let n = 0; const t0 = performance.now(); const tick = (t) => { n++; if (t - t0 < 2000) requestAnimationFrame(tick); else console.log('[fps-probe]', Math.round(n / ((t - t0) / 1000))); }; setTimeout(() => requestAnimationFrame(tick), 1500); })();

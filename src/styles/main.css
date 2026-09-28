@@ -152,9 +152,6 @@ pre {
     transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
     box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   box-shadow: var(--shadow-highlight), var(--shadow-depth);
-  -webkit-backdrop-filter: blur(10px);
-  backdrop-filter: blur(10px);
-  will-change: transform;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -233,7 +230,6 @@ pre {
   top: 8px;
   right: 8px;
   background: rgba(0, 0, 0, 0.85);
-  backdrop-filter: blur(8px);
   color: var(--text-primary);
   padding: 4px 8px;
   border-radius: var(--border-radius-sm);
@@ -299,8 +295,6 @@ pre {
   gap: var(--spacing-md);
   box-shadow: var(--shadow-inset-highlight), var(--shadow-inset-depth);
   z-index: 10000;
-  -webkit-backdrop-filter: blur(100px);
-  backdrop-filter: blur(100px);
 }
 
 /* macOS specific titlebar padding for inset traffic lights.
@@ -449,8 +443,6 @@ html.macos .settings-wrapper {
   cursor: pointer;
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   box-shadow: var(--shadow-highlight), var(--shadow-depth);
-  -webkit-backdrop-filter: blur(10px);
-  backdrop-filter: blur(10px);
   display: flex;
   align-items: center;
 }
@@ -471,8 +463,6 @@ html.macos .settings-wrapper {
     var(--shadow-depth),
     0 0 20px color-mix(in srgb, var(--accent-color) 20%, transparent);
   font-weight: 600;
-  -webkit-backdrop-filter: blur(15px);
-  backdrop-filter: blur(15px);
 }
 
 /* Layout Containers */
@@ -963,4 +953,8 @@ html:not(.macos) .titlebar.immersive-mode {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   background: rgba(10, 10, 10, 0.92);
+}
+
+.is-scrolling * {
+  pointer-events: none !important;
 }

@@ -12,6 +12,7 @@
   import AboutModal from "./lib/AboutModal.svelte";
   import ExtensionManager from "./lib/ExtensionManager.svelte";
   import Updater from "./lib/Updater.svelte";
+  import WindowResizeHandles from "./lib/WindowResizeHandles.svelte";
   import { myListStore } from "./lib/stores/listStore.js";
   import { watchHistoryStore } from "./lib/stores/watchHistoryStore.js";
   import { watchProgressStore } from "./lib/stores/watchProgressStore.js";
@@ -20,6 +21,8 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { invoke } from "@tauri-apps/api/core";
   import { setupLogging } from "./lib/consoleLogger.js";
+  import { isLinux } from "./lib/utils/platform.js";
+  import { scrollHoverGuard } from "./lib/utils/scrollHoverGuard.js";
   
   // Initialize console logging to disk
   setupLogging();
@@ -312,7 +315,7 @@
     <VideoPlayer {...videoPlayerProps} on:close={closeVideoPlayer} on:back={backFromVideoPlayer} />
   {:else}
 
-    <div class="content-scroll" id="main-content" class:blur={searchActive || settingsActive}>
+    <div class="content-scroll" id="main-content" class:blur={searchActive || settingsActive} use:scrollHoverGuard>
       {#if viewAllData}
         <div style:display={selectedMedia ? 'none' : 'block'} style:pointer-events={selectedMedia ? 'none' : 'auto'}>
           <ViewAll {...viewAllData} on:close={() => {
@@ -403,6 +406,10 @@
   {/if}
   
   <Updater />
+
+  {#if isLinux}
+    <WindowResizeHandles />
+  {/if}
 </main>
 
 <style>

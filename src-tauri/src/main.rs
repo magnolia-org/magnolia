@@ -789,6 +789,71 @@ mod tests {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn disable_webkit_60fps_cap(webview: &webkit2gtk::WebView) {
+    use std::ffi::{c_char, c_void, CStr};
+    use webkit2gtk::glib::translate::ToGlibPtr;
+    use webkit2gtk::WebViewExt;
+
+    type GetAllFeatures = unsafe extern "C" fn() -> *mut c_void;
+    type FeatureListGetLength = unsafe extern "C" fn(*mut c_void) -> usize;
+    type FeatureListGet = unsafe extern "C" fn(*mut c_void, usize) -> *mut c_void;
+    type FeatureListUnref = unsafe extern "C" fn(*mut c_void);
+    type FeatureGetIdentifier = unsafe extern "C" fn(*mut c_void) -> *const c_char;
+    type SetFeatureEnabled = unsafe extern "C" fn(*mut c_void, *mut c_void, i32);
+
+    unsafe fn lookup<T>(name: &CStr) -> Option<T> {
+        let ptr = libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr());
+        if ptr.is_null() {
+            None
+        } else {
+            Some(std::mem::transmute_copy(&ptr))
+        }
+    }
+
+    let Some(settings) = WebViewExt::settings(webview) else {
+        return;
+    };
+    let settings_ptr: *mut webkit2gtk::ffi::WebKitSettings = settings.to_glib_none().0;
+
+    unsafe {
+        let (
+            Some(get_all_features),
+            Some(list_get_length),
+            Some(list_get),
+            Some(list_unref),
+            Some(get_identifier),
+            Some(set_feature_enabled),
+        ) = (
+            lookup::<GetAllFeatures>(c"webkit_settings_get_all_features"),
+            lookup::<FeatureListGetLength>(c"webkit_feature_list_get_length"),
+            lookup::<FeatureListGet>(c"webkit_feature_list_get"),
+            lookup::<FeatureListUnref>(c"webkit_feature_list_unref"),
+            lookup::<FeatureGetIdentifier>(c"webkit_feature_get_identifier"),
+            lookup::<SetFeatureEnabled>(c"webkit_settings_set_feature_enabled"),
+        )
+        else {
+            return;
+        };
+
+        let features = get_all_features();
+        if features.is_null() {
+            return;
+        }
+        for i in 0..list_get_length(features) {
+            let feature = list_get(features, i);
+            let identifier = get_identifier(feature);
+            if !identifier.is_null()
+                && CStr::from_ptr(identifier).to_bytes() == b"PreferPageRenderingUpdatesNear60FPSEnabled"
+            {
+                set_feature_enabled(settings_ptr.cast(), feature, 0);
+                tracing::info!("disabled WebKit 60fps rendering cap");
+            }
+        }
+        list_unref(features);
+    }
+}
+
 fn main() {
     // NVIDIA's Wayland EGL driver enables explicit sync (wp_linux_drm_syncobj)
     // on the window's wl_surface; when GTK or the embedded mpv layer then
@@ -874,6 +939,9 @@ fn main() {
             app.manage(torrent_manager_arc.clone());
 
             let main_window = app.get_webview_window("main").unwrap();
+
+            #[cfg(target_os = "linux")]
+            let _ = main_window.with_webview(|webview| disable_webkit_60fps_cap(&webview.inner()));
 
             // Set macOS-specific window properties for inset traffic lights
             #[cfg(target_os = "macos")]

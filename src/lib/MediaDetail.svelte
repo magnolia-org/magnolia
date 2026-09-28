@@ -499,6 +499,7 @@
 
   import { getRatingColor } from "./utils/colorUtils.js";
   import { formatTime } from "./utils/timeUtils.js";
+  import { scrollHoverGuard } from "./utils/scrollHoverGuard.js";
 
   function showError(message, title = "Error") {
     errorMessage = message;
@@ -1389,6 +1390,7 @@
 <div class="detail-overlay" style="animation: fadeIn 0.3s ease;">
   <div
     class="detail-container"
+    use:scrollHoverGuard
     style="--backdrop-color: {backdropColor}; --prominent-color: {prominentColor}; --text-color: {textColor}"
   >
     <button
@@ -1710,6 +1712,8 @@
                                     <img
                                       src={getImageUrl(episode.still_path, "w300")}
                                       alt={episode.name}
+                                      loading="lazy"
+                                      decoding="async"
                                     />
                                   {:else}
                                     <div class="episode-placeholder">
@@ -1808,6 +1812,8 @@
                         <img
                           src={getImageUrl(person.profile_path, "w185")}
                           alt={person.name}
+                          loading="lazy"
+                          decoding="async"
                         />
                       {:else}
                         <div class="cast-placeholder">
@@ -1836,6 +1842,8 @@
                           <img
                             src={getImageUrl(person.profile_path, "w185")}
                             alt={person.name}
+                            loading="lazy"
+                            decoding="async"
                           />
                         {:else}
                           <div class="crew-placeholder">
@@ -1975,6 +1983,7 @@
                       src={getImageUrl(rec.poster_path, "w342")}
                       alt={rec.title || rec.name}
                       loading="lazy"
+                      decoding="async"
                     />
                   {:else}
                     <div class="media-poster rec-placeholder">

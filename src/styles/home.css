@@ -176,14 +176,12 @@
     border-radius: var(--border-radius-lg);
     position: relative;
     cursor: pointer;
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     border: 1px solid rgba(255, 255, 255, 0.12);
     box-shadow:
         var(--shadow-highlight),
         var(--shadow-depth);
     overflow: hidden;
-    -webkit-backdrop-filter: blur(5px);
-    backdrop-filter: blur(5px);
 }
 
 .media-card::before {
@@ -240,7 +238,7 @@
     position: absolute;
     top: 0;
     left: 0;
-    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1), transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
     border-radius: var(--border-radius-lg);
 }
 
@@ -261,7 +259,7 @@
     gap: var(--spacing-sm);
     opacity: 0;
     transform: translateY(8px);
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1), transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .media-info .media-title {
@@ -290,7 +288,7 @@
     gap: var(--spacing-sm);
     opacity: 0;
     transform: translateY(8px);
-    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) 0.1s;
+    transition: opacity 0.2s cubic-bezier(0.4, 0, 0.2, 1) 0.1s, transform 0.2s cubic-bezier(0.4, 0, 0.2, 1) 0.1s;
     align-items: center;
     justify-content: flex-start;
 }
@@ -306,13 +304,11 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     flex-shrink: 0;
     box-shadow: var(--shadow-highlight), var(--shadow-depth);
     border: 1px solid rgba(255, 255, 255, 0.2);
     font-size: 18px;
-    -webkit-backdrop-filter: blur(10px);
-    backdrop-filter: blur(10px);
     padding: 0;
 }
 
