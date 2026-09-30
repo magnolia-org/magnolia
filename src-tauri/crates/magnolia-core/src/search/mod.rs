@@ -182,6 +182,9 @@ pub struct TorrentSearchRequest {
     /// tracker extension ids, empty for auto, none for the saved preference
     #[serde(default)]
     pub trackers: Option<Vec<String>>,
+    /// tmdb's original_language, which tells japanese anime from western cartoons
+    #[serde(default)]
+    pub original_language: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -232,6 +235,17 @@ async fn search_tracker_extensions(
     all_results
 }
 
+/// tmdb calls every cartoon "animation" (genre 16), but anime trackers only carry japanese
+/// animation; south park or arcane searched there turns up nothing useful. without a known
+/// language the genre alone decides, as before.
+pub fn looks_like_anime(genre_ids: &[u32], original_language: Option<&str>) -> bool {
+    genre_ids.contains(&16) && original_language.map_or(true, |lang| lang == "ja")
+}
+
+/// anime trackers returning fewer results than this also get the general trackers searched,
+/// so one stray hit (a dvd rip of the movie) can't hide every real episode release.
+const MIN_ANIME_RESULTS: usize = 5;
+
 fn dedupe_by_info_hash(results: &mut Vec<SearchResult>) {
     let mut seen = HashSet::new();
     results.retain(|r| match magnet::extract_info_hash(&r.magnet_link) {
@@ -246,8 +260,11 @@ impl Core {
     pub async fn search_torrents(&self, req: TorrentSearchRequest) -> TorrentSearchResponse {
         let is_movie = req.media_type == "movie";
         let is_anime = match req.tmdb_id {
-            Some(id) => self.is_anime(id, Some(&req.media_type), &req.genre_ids).await,
-            None => req.genre_ids.contains(&16),
+            Some(id) => {
+                self.is_anime(id, Some(&req.media_type), &req.genre_ids, req.original_language.as_deref())
+                    .await
+            }
+            None => looks_like_anime(&req.genre_ids, req.original_language.as_deref()),
         };
         let media_type = if is_anime { "anime" } else if is_movie { "movie" } else { "tv" };
 
@@ -292,15 +309,20 @@ impl Core {
         let mut results =
             search_tracker_extensions(selected, &normalized_query, media_type, req.imdb_id.clone(), season, episode).await;
 
-        if is_auto && is_anime && results.is_empty() {
-            log::info!("anime search returned no results, falling back to regular trackers");
+        if is_auto && is_anime && results.len() < MIN_ANIME_RESULTS {
+            log::info!(
+                "anime search returned {} results, adding regular trackers",
+                results.len()
+            );
             let fallback: Vec<LoadedExtension> = all_trackers
                 .iter()
                 .filter(|e| e.manifest.is_anime == Some(false))
                 .cloned()
                 .collect();
-            results =
-                search_tracker_extensions(fallback, &normalized_query, media_type, req.imdb_id.clone(), season, episode).await;
+            results.extend(
+                search_tracker_extensions(fallback, &normalized_query, media_type, req.imdb_id.clone(), season, episode)
+                    .await,
+            );
         }
 
         let before = results.len();
@@ -323,5 +345,33 @@ impl Core {
             media_type: media_type.to_string(),
             results,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_anime;
+
+    #[test]
+    fn western_animation_is_not_anime() {
+        // south park, the simpsons, arcane: animation, but not for anime trackers
+        assert!(!looks_like_anime(&[16, 35], Some("en")));
+        assert!(!looks_like_anime(&[16, 10759], Some("fr")));
+    }
+
+    #[test]
+    fn japanese_animation_is_anime() {
+        assert!(looks_like_anime(&[16, 10759, 10765], Some("ja")));
+    }
+
+    #[test]
+    fn unknown_language_falls_back_to_genre() {
+        assert!(looks_like_anime(&[16], None));
+        assert!(!looks_like_anime(&[18], None));
+    }
+
+    #[test]
+    fn live_action_is_never_anime() {
+        assert!(!looks_like_anime(&[18, 80], Some("ja")));
     }
 }

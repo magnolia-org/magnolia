@@ -144,9 +144,15 @@ pub async fn check_is_anime(
     tmdb_id: u32,
     media_type: Option<String>,
     genre_ids: Option<Vec<u32>>,
+    original_language: Option<String>,
 ) -> Result<bool, String> {
     Ok(core
-        .is_anime(tmdb_id, media_type.as_deref(), &genre_ids.unwrap_or_default())
+        .is_anime(
+            tmdb_id,
+            media_type.as_deref(),
+            &genre_ids.unwrap_or_default(),
+            original_language.as_deref(),
+        )
         .await)
 }
 

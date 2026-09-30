@@ -102,13 +102,14 @@ import { invoke } from "@tauri-apps/api/core";
       (item) => item.id === media.id && item.media_type === media.media_type,
     );
 
-  // the backend checks the anime list and falls back to the animation genre
+  // the backend checks the anime list, then japanese animation by genre and language
   async function checkIsAnime(forDetails) {
     try {
       const result = await invoke('check_is_anime', {
         tmdbId: forDetails.id,
         mediaType: media.media_type,
         genreIds: (forDetails.genres || []).map(genre => genre.id),
+        originalLanguage: forDetails.original_language || null,
       });
       if (details === forDetails) detectedIsAnime = result;
     } catch (e) {
@@ -749,6 +750,7 @@ import { invoke } from "@tauri-apps/api/core";
         episode: episodeNum,
         imdbId,
         trackers,
+        originalLanguage: details.original_language || null,
       },
     });
   }

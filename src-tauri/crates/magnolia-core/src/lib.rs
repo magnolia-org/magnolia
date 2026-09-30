@@ -78,12 +78,18 @@ impl Core {
         &self.data_dir
     }
 
-    /// the anime list only covers tv ids, so anything else falls back to the
-    /// animation genre (tmdb genre 16).
-    pub async fn is_anime(&self, tmdb_id: u32, media_type: Option<&str>, genre_ids: &[u32]) -> bool {
+    /// the anime list only covers tv ids, so anything else falls back to
+    /// `search::looks_like_anime` on its genres and original language.
+    pub async fn is_anime(
+        &self,
+        tmdb_id: u32,
+        media_type: Option<&str>,
+        genre_ids: &[u32],
+        original_language: Option<&str>,
+    ) -> bool {
         if media_type != Some("movie") && self.anime_list.is_anime(tmdb_id).await {
             return true;
         }
-        genre_ids.contains(&16)
+        search::looks_like_anime(genre_ids, original_language)
     }
 }
