@@ -153,12 +153,13 @@
     width: 160px;
     height: 240px;
     flex-shrink: 0;
-    border-radius: var(--border-radius-lg);
+    border-radius: 12px;
 }
 
 .skeleton-card.wide {
-    width: 320px;
-    height: 180px;
+    width: 336px;
+    height: 189px;
+    border-radius: 14px;
 }
 
 .carousel-error {
@@ -174,316 +175,370 @@
     font-size: 18px;
 }
 
-/* wide 16:9 tiles for my list and recently watched */
-.wide-card {
-    width: 320px;
-    aspect-ratio: 16 / 9;
-    flex-shrink: 0;
+/* tiles: poster (2:3) and wide (16:9) cards share one look. --card-accent is the art's colour */
+.tile {
+    --tile-accent: var(--card-accent, var(--accent-color));
+    --tile-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
     position: relative;
-    border-radius: var(--border-radius-lg);
+    flex-shrink: 0;
     overflow: hidden;
     cursor: pointer;
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    box-shadow: var(--shadow-highlight), var(--shadow-depth);
-    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    isolation: isolate;
+    border-radius: 14px;
+    background: #151515;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.06),
+        inset 0 0 0 1px rgba(255, 255, 255, 0.07),
+        0 10px 30px -12px rgba(0, 0, 0, 0.7);
+    transition: transform 0.35s var(--tile-ease), box-shadow 0.35s var(--tile-ease);
 }
 
-.wide-card:hover {
-    transform: translateY(-4px) scale(1.02);
-    border-color: color-mix(in srgb, var(--card-accent, var(--accent-color)) 45%, rgba(255, 255, 255, 0.2));
+.tile.poster {
+    width: 160px;
+    aspect-ratio: 2 / 3;
+    border-radius: 12px;
+}
+
+.tile.poster.fluid {
+    width: 100%;
+}
+
+.tile.wide {
+    width: 336px;
+    aspect-ratio: 16 / 9;
     box-shadow:
-        8px 8px 32px rgba(0, 0, 0, 0.6),
-        0 0 24px color-mix(in srgb, var(--card-accent, var(--accent-color)) 25%, transparent);
+        inset 0 1px 0 rgba(255, 255, 255, 0.06),
+        inset 0 0 0 1px color-mix(in srgb, var(--tile-accent) 22%, rgba(255, 255, 255, 0.06)),
+        0 12px 32px -14px color-mix(in srgb, var(--tile-accent) 35%, rgba(0, 0, 0, 0.7));
+}
+
+.tile:hover {
+    transform: translateY(-4px);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.1),
+        inset 0 0 0 1px color-mix(in srgb, var(--tile-accent) 60%, rgba(255, 255, 255, 0.15)),
+        0 18px 40px -14px rgba(0, 0, 0, 0.8),
+        0 10px 36px -12px color-mix(in srgb, var(--tile-accent) 45%, transparent);
     z-index: 2;
 }
 
-.wide-card-image {
+.tile-art {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    z-index: -1;
+}
+
+.tile-image {
     position: absolute;
     inset: 0;
     width: 100%;
     height: 100%;
     object-fit: cover;
-    transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1), filter 0.3s ease;
+    transition: transform 0.6s var(--tile-ease), filter 0.35s ease;
 }
 
-.wide-card-image.poster-fallback {
-    object-position: center 25%;
+.tile:hover .tile-image {
+    transform: scale(1.05);
 }
 
-.wide-card-placeholder {
+.tile-placeholder {
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: 32px;
     color: var(--text-tertiary);
+    background: linear-gradient(160deg, #1d1d1d, #111);
 }
 
-.wide-card:hover .wide-card-image {
-    transform: scale(1.06);
-    filter: brightness(0.75);
-}
-
-.wide-card-shade {
+/* wide tiles keep their details on the art, so the lower left is always darkened */
+.tile-shade {
     position: absolute;
     inset: 0;
+    pointer-events: none;
+    transition: opacity 0.35s ease;
     background:
-        linear-gradient(to top, rgba(0, 0, 0, 0.92) 0%, rgba(0, 0, 0, 0.55) 35%, transparent 65%),
-        linear-gradient(to top, color-mix(in srgb, var(--card-accent, var(--accent-color)) 25%, transparent), transparent 50%);
+        linear-gradient(to top, rgba(8, 8, 8, 0.95) 0%, rgba(8, 8, 8, 0.72) 30%, rgba(8, 8, 8, 0.25) 55%, rgba(8, 8, 8, 0) 72%),
+        radial-gradient(120% 90% at 0% 100%, rgba(8, 8, 8, 0.55) 0%, rgba(8, 8, 8, 0) 60%),
+        linear-gradient(to top, color-mix(in srgb, var(--tile-accent) 40%, transparent) 0%, color-mix(in srgb, var(--tile-accent) 12%, transparent) 40%, transparent 70%);
+}
+
+/* posters already show their title, so the details only come up on hover */
+.tile.poster .tile-shade {
+    opacity: 0;
+    background:
+        linear-gradient(to top, rgba(8, 8, 8, 0.96) 0%, rgba(8, 8, 8, 0.75) 38%, rgba(8, 8, 8, 0) 70%),
+        linear-gradient(to top, color-mix(in srgb, var(--tile-accent) 28%, transparent) 0%, transparent 50%);
+}
+
+.tile.poster:hover .tile-shade {
+    opacity: 1;
+}
+
+.tile.finished .tile-image {
+    filter: saturate(0.6) brightness(0.8);
+}
+
+.wide-poster {
+    position: absolute;
+    top: 12px;
+    right: 14px;
+    bottom: 12px;
+    height: calc(100% - 24px);
+    aspect-ratio: 2 / 3;
+    object-fit: cover;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.tile-image.poster-blur {
+    filter: blur(22px) saturate(1.4) brightness(0.55);
+    transform: scale(1.3);
+}
+
+.tile:hover .tile-image.poster-blur {
+    transform: scale(1.35);
+}
+
+.tile-badge {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    z-index: 3;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 9px 4px 7px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #d1fae5;
+    background: rgba(16, 185, 129, 0.28);
+    border: 1px solid rgba(52, 211, 153, 0.35);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
     pointer-events: none;
 }
 
-.wide-card .progress-badge {
-    top: 10px;
-    left: 10px;
-    right: auto;
+.tile-badge i {
+    font-size: 13px;
 }
 
-.wide-card-corner {
+.tile-corner {
     position: absolute;
     top: 10px;
     right: 10px;
     z-index: 3;
     opacity: 0;
     transform: translateY(-4px);
-    transition: opacity 0.2s ease, transform 0.2s ease;
+    transition: opacity 0.25s ease, transform 0.25s var(--tile-ease);
 }
 
-.wide-card:hover .wide-card-corner {
+.tile:hover .tile-corner {
     opacity: 1;
     transform: translateY(0);
 }
 
-.action-btn.small {
+.tile-icon {
     width: 30px;
     height: 30px;
-    font-size: 16px;
-    background: rgba(0, 0, 0, 0.55);
-    -webkit-backdrop-filter: blur(8px);
-    backdrop-filter: blur(8px);
-}
-
-.wide-card-play {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 52px;
-    height: 52px;
-    margin: -38px 0 0 -26px;
+    padding: 0;
     border-radius: 50%;
-    border: 1px solid rgba(255, 255, 255, 0.35);
-    background: rgba(255, 255, 255, 0.2);
-    color: white;
-    font-size: 26px;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 0;
+    font-size: 17px;
+    color: #fff;
     cursor: pointer;
-    z-index: 3;
-    opacity: 0;
-    transform: scale(0.85);
-    transition: opacity 0.2s ease, transform 0.2s ease, background 0.2s ease;
+    background: rgba(10, 10, 10, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.18);
     -webkit-backdrop-filter: blur(10px);
     backdrop-filter: blur(10px);
+    transition: background 0.2s ease, transform 0.2s ease, border-color 0.2s ease, color 0.2s ease;
 }
 
-.wide-card:hover .wide-card-play,
-.wide-card-play.loading {
-    opacity: 1;
-    transform: scale(1);
-}
-
-.wide-card-play:hover {
-    background: rgba(255, 255, 255, 0.32);
+.tile-icon:hover {
+    background: rgba(255, 255, 255, 0.22);
     transform: scale(1.08);
 }
 
-.wide-card-play:disabled {
+.tile-icon.active {
+    color: #0b0b0b;
+    background: var(--tile-accent);
+    border-color: transparent;
+}
+
+/* the play button takes the art's colour, lightened in colorUtils so a dark icon stays readable */
+.tile-play {
+    position: absolute;
+    right: 14px;
+    bottom: 14px;
+    z-index: 3;
+    width: 40px;
+    height: 40px;
+    padding: 0 0 0 2px;
+    border-radius: 50%;
+    border: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    color: #0b0b0b;
+    background: var(--tile-accent);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.35),
+        0 6px 18px color-mix(in srgb, var(--tile-accent) 40%, rgba(0, 0, 0, 0.5));
+    cursor: pointer;
+    opacity: 0;
+    transform: translateY(6px) scale(0.9);
+    transition: opacity 0.25s ease, transform 0.3s var(--tile-ease), filter 0.2s ease;
+}
+
+.tile:hover .tile-play,
+.tile-play.loading {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+}
+
+.tile-play:hover {
+    filter: brightness(1.12);
+    transform: scale(1.08);
+}
+
+.tile-play:disabled {
     pointer-events: none;
 }
 
-.wide-card-text {
+.tile.poster .tile-play {
+    right: 10px;
+    bottom: 10px;
+    width: 34px;
+    height: 34px;
+    font-size: 19px;
+}
+
+.tile-text {
     position: absolute;
-    left: 14px;
-    right: 14px;
+    left: 16px;
+    right: 16px;
     bottom: 14px;
     z-index: 2;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    align-items: flex-start;
+    gap: 7px;
     pointer-events: none;
+    transition: padding-right 0.3s var(--tile-ease), opacity 0.3s ease, transform 0.3s var(--tile-ease);
 }
 
-.wide-card-title {
-    font-size: 15px;
-    font-weight: 600;
+/* keeps the details clear of the play button when it appears */
+.tile.wide:hover .tile-text {
+    padding-right: 52px;
+}
+
+.tile.poster .tile-text {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    gap: 5px;
+    padding-right: 42px;
+    opacity: 0;
+    transform: translateY(6px);
+}
+
+.tile.poster:hover .tile-text {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.tile-logo {
+    display: block;
+    max-width: 62%;
+    max-height: 46px;
+    object-fit: contain;
+    object-position: left bottom;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5)) drop-shadow(0 2px 12px rgba(0, 0, 0, 0.6));
+    animation: tile-logo-in 0.35s ease both;
+}
+
+.tile-logo.invert {
+    filter: brightness(0) invert(1) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5)) drop-shadow(0 2px 12px rgba(0, 0, 0, 0.6));
+}
+
+@keyframes tile-logo-in {
+    from { opacity: 0; transform: translateY(3px); }
+    to { opacity: 1; transform: none; }
+}
+
+.tile-title {
+    max-width: 100%;
+    margin: 0;
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
     color: #fff;
-    line-height: 1.25;
+    line-height: 1.2;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    text-shadow: 0 1px 8px rgba(0, 0, 0, 0.6);
+    text-shadow: 0 1px 10px rgba(0, 0, 0, 0.6);
+    transition: opacity 0.2s ease;
 }
 
-.wide-card-meta {
-    display: flex;
-    align-items: center;
-    gap: var(--spacing-sm);
-    font-size: 12px;
-    color: var(--text-secondary);
-}
-
-.wide-card-meta .rating-badge {
-    opacity: 1;
-    transform: none;
-    margin-left: 0;
-    height: 18px;
-    font-size: 11px;
-    padding: 2px 6px;
-}
-
-.wide-card-progress {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    height: 4px;
-    background: rgba(255, 255, 255, 0.18);
-    z-index: 3;
-}
-
-.wide-card-progress span {
-    display: block;
-    height: 100%;
-    background: var(--card-accent, var(--accent-color));
-    box-shadow: 0 0 8px var(--card-accent, var(--accent-color));
-    border-radius: 0 2px 2px 0;
-}
-
-.media-card {
-    width: 160px;
-    height: 240px;
-    flex-shrink: 0;
-    background: rgba(255, 255, 255, 0.06);
-    border-radius: var(--border-radius-lg);
-    position: relative;
-    cursor: pointer;
-    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    box-shadow:
-        var(--shadow-highlight),
-        var(--shadow-depth);
-    overflow: hidden;
-}
-
-.media-card::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(135deg,
-            color-mix(in srgb, var(--card-accent, var(--accent-color)) 15%, transparent),
-            color-mix(in srgb, var(--card-accent, var(--accent-color)) 5%, transparent));
-    opacity: 0;
-    transition: opacity 0.3s ease;
-    z-index: 1;
-    border-radius: var(--border-radius-lg);
-}
-
-.media-card:hover {
-    transform: translateY(-4px) scale(1.02);
-    box-shadow:
-        -8px -8px 16px rgba(255, 255, 255, 0.04),
-        8px 8px 32px rgba(0, 0, 0, 0.6),
-        0 0 20px color-mix(in srgb, var(--card-accent, var(--accent-color)) 20%, transparent);
-    border-color: color-mix(in srgb, var(--card-accent, var(--accent-color)) 40%, rgba(255, 255, 255, 0.2));
-    z-index: 2;
-}
-
-.media-card:hover::before {
-    opacity: 1;
-}
-
-.media-card:hover .media-poster {
-    opacity: 0.4;
-    transform: scale(1.05);
-}
-
-.media-card:hover .media-info {
-    opacity: 1;
-    transform: translateY(0);
-}
-
-.media-card:hover .media-actions {
-    opacity: 1;
-    transform: translateY(0);
-}
-
-.media-card:hover .rating-badge {
-    opacity: 1;
-    transform: scale(1);
-}
-
-.media-poster {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    position: absolute;
-    top: 0;
-    left: 0;
-    transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1), transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-    border-radius: var(--border-radius-lg);
-}
-
-.media-content {
-    padding: var(--spacing-lg);
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    justify-content: flex-end;
-    gap: var(--spacing-md);
-    position: relative;
-    z-index: 2;
-}
-
-.media-info {
-    display: flex;
-    flex-direction: column;
-    gap: var(--spacing-sm);
-    opacity: 0;
-    transform: translateY(8px);
-    transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1), transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.media-info .media-title {
-    font-size: 14px;
+.tile.poster .tile-title {
+    font-size: 13px;
     font-weight: 600;
-    color: var(--text-primary);
-    line-height: 1.3;
+    white-space: normal;
     display: -webkit-box;
     -webkit-line-clamp: 2;
     line-clamp: 2;
     -webkit-box-orient: vertical;
-    overflow: hidden;
 }
 
-.media-info .media-meta {
-    font-size: 11px;
-    color: var(--text-secondary);
-    display: flex;
-    gap: var(--spacing-sm);
-    align-items: center;
-    flex-wrap: wrap;
-}
-
-.media-actions {
-    display: flex;
-    gap: var(--spacing-sm);
+/* while the logo lookup runs the text stays hidden, so a logo arriving doesn't flash it */
+.tile-title.pending {
     opacity: 0;
-    transform: translateY(8px);
-    transition: opacity 0.2s cubic-bezier(0.4, 0, 0.2, 1) 0.1s, transform 0.2s cubic-bezier(0.4, 0, 0.2, 1) 0.1s;
+}
+
+.tile-meta {
+    display: flex;
     align-items: center;
-    justify-content: flex-start;
+    gap: 10px;
+    font-size: 12px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.72);
+    font-variant-numeric: tabular-nums;
+}
+
+.tile.poster .tile-meta {
+    font-size: 11px;
+    gap: 8px;
+}
+
+.tile-rating {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.tile-rating i {
+    font-size: 12px;
+}
+
+.tile-progress {
+    width: 100%;
+    height: 3px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.tile-progress span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--tile-accent);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--tile-accent) 80%, transparent);
 }
 
 .action-btn {

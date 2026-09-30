@@ -2,11 +2,11 @@
 import { onMount, onDestroy, createEventDispatcher } from 'svelte';
 import { invoke } from '@tauri-apps/api/core';
 import { scrollHoverGuard } from './utils/scrollHoverGuard.js';
-import { getImageUrl } from './tmdb.js';
+import { getImageUrl, getCorsImageUrl } from './tmdb.js';
 import { fetchBrowseList } from './browseLists.js';
 import { myListStore } from './stores/listStore.js';
 import { watchProgressStore } from './stores/watchProgressStore.js';
-import { getRatingColor } from './utils/colorUtils.js';
+import { getRatingColor, extractArtAccent } from './utils/colorUtils.js';
 
 const dispatch = createEventDispatcher();
 
@@ -34,6 +34,21 @@ let loadMoreObserver;
 let scrollHost;
 
 $: myListItems = new Set($myListStore.map(item => `${item.id}-${item.media_type}`));
+$: loadCardColors(items);
+
+// same per-title accent as the home rows; titles without colourful art keep the app accent
+function loadCardColors(list) {
+  for (const item of list) {
+    const key = itemKey(item);
+    if (key in cardColors || !item.poster_path) continue;
+    cardColors[key] = null;
+    extractArtAccent(getCorsImageUrl(item.poster_path, 'w92'), null).then((color) => {
+      if (!color) return;
+      cardColors[key] = color;
+      cardColors = cardColors;
+    });
+  }
+}
 $: isTagList = category === 'discover_by_genre' || category === 'discover_by_keyword' || category === 'person';
 $: if (scrollHost && infiniteScrollSentinel && !customItems && page < totalPages) {
   setupInfiniteScroll();
@@ -255,7 +270,7 @@ function formatDate(dateString) {
     {#if loading && items.length === 0}
       <div class="view-all-grid" aria-hidden="true">
         {#each Array(18) as _}
-          <div class="grid-card rec-skeleton-pulse"></div>
+          <div class="tile poster fluid rec-skeleton-pulse"></div>
         {/each}
       </div>
     {:else if error}
@@ -263,56 +278,43 @@ function formatDate(dateString) {
     {:else}
       <div class="view-all-grid">
         {#each items as item (itemKey(item))}
+          {@const itemKey = `${item.id}-${item.media_type}`}
+          {@const inList = myListItems.has(itemKey)}
           <!-- svelte-ignore a11y-click-events-have-key-events -->
           <!-- svelte-ignore a11y-no-static-element-interactions -->
-          <div
-            class="grid-card"
-            on:click={() => openDetail(item)}
-          >
-            {#if item.poster_path}
-              <img src={getImageUrl(item.poster_path, 'w342')} alt={item.title || item.name} loading="lazy" decoding="async" />
-            {:else}
-              <div class="no-poster">
-                <i class="ri-film-line"></i>
-              </div>
-            {/if}
-            
-            {#if item.vote_average > 0}
-              <div class="grid-card-rating">
-                <span class="rating-badge" style="background: {getRatingColor(item.vote_average)}">
-                  {item.vote_average.toFixed(1)}
-                </span>
-              </div>
-            {/if}
-            
-            <div class="grid-card-overlay">
-              <div class="grid-card-info">
-                <h3>{item.title || item.name}</h3>
-                <div class="grid-card-meta">
-                  <span class="year">{formatDate(item.release_date || item.first_air_date)}</span>
-                  {#if item.vote_average > 0}
-                    <span class="rating-badge" style="background: {getRatingColor(item.vote_average)}">
-                      {item.vote_average.toFixed(1)}
-                    </span>
-                  {/if}
-                </div>
-              </div>
-              
-              <div class="grid-card-actions">
-                <button class="action-btn" class:loading={playingItemKey === `${item.id}-${item.media_type}`} title="Play" disabled={playingItemKey !== null} on:click={(e) => handleQuickPlay(e, item)}>
-                  {#if playingItemKey === `${item.id}-${item.media_type}`}
-                    <i class="ri-loader-4-line spin"></i>
-                  {:else}
-                    <i class="ri-play-fill"></i>
-                  {/if}
-                </button>
-                <button 
-                  class="action-btn" 
-                  title={myListItems.has(`${item.id}-${item.media_type}`) ? 'Remove from List' : 'Add to List'}
-                  on:click={(e) => toggleMyList(e, item)}
-                >
-                  <i class="{myListItems.has(`${item.id}-${item.media_type}`) ? 'ri-check-line' : 'ri-add-line'}"></i>
-                </button>
+          <div class="tile poster fluid" style:--card-accent={cardColors[itemKey] || null} on:click={() => openDetail(item)}>
+            <div class="tile-art">
+              {#if item.poster_path}
+                <img class="tile-image" src={getImageUrl(item.poster_path, 'w342')} alt={item.title || item.name} loading="lazy" decoding="async" />
+              {:else}
+                <div class="tile-image tile-placeholder"><i class="ri-film-line"></i></div>
+              {/if}
+            </div>
+            <div class="tile-shade"></div>
+
+            <div class="tile-corner">
+              <button class="tile-icon" class:active={inList} title={inList ? 'Remove from List' : 'Add to List'} on:click={(e) => toggleMyList(e, item)}>
+                <i class={inList ? 'ri-check-line' : 'ri-add-line'}></i>
+              </button>
+            </div>
+
+            <button class="tile-play" class:loading={playingItemKey === itemKey} title="Play" disabled={playingItemKey !== null} on:click={(e) => handleQuickPlay(e, item)}>
+              {#if playingItemKey === itemKey}
+                <i class="ri-loader-4-line spin"></i>
+              {:else}
+                <i class="ri-play-fill"></i>
+              {/if}
+            </button>
+
+            <div class="tile-text">
+              <h3 class="tile-title">{item.title || item.name}</h3>
+              <div class="tile-meta">
+                {#if item.release_date || item.first_air_date}
+                  <span>{formatDate(item.release_date || item.first_air_date)}</span>
+                {/if}
+                {#if item.vote_average > 0}
+                  <span class="tile-rating"><i class="ri-star-fill" style="color: {getRatingColor(item.vote_average)}"></i>{item.vote_average.toFixed(1)}</span>
+                {/if}
               </div>
             </div>
           </div>

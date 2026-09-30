@@ -4,8 +4,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { getImageUrl, getCorsImageUrl } from './tmdb.js';
 import { fetchBrowseList } from './browseLists.js';
 import { myListStore } from './stores/listStore.js';
-import { getRatingColor } from './utils/colorUtils.js';
+import { getRatingColor, extractArtAccent } from './utils/colorUtils.js';
 import Scroller from './Scroller.svelte';
+import { getTitleLogo } from './titleLogos.js';
 
 const dispatch = createEventDispatcher();
 
@@ -27,6 +28,8 @@ let error = null;
 let cardColors = {};
 let playingItemKey = null;
 let colorFlushFrame = null;
+// title logos for the wide tiles, keyed like cardColors; null once we know there is none
+let logos = {};
 
 $: wide = variant === 'wide';
 
@@ -40,6 +43,20 @@ function colorSource(item) {
 }
 
 $: myListItems = new Set($myListStore.map(item => `${item.id}-${item.media_type}`));
+
+$: if (wide) loadLogos(items);
+
+function loadLogos(list) {
+  for (const item of list) {
+    const key = getItemKey(item);
+    if (key in logos) continue;
+    logos[key] = undefined;
+    getTitleLogo({ ...item, media_type: item.media_type || fallbackMediaType }).then((logo) => {
+      logos[key] = logo;
+      logos = logos;
+    });
+  }
+}
 
 $: if (customItems) {
   items = customItems;
@@ -103,63 +120,11 @@ function flushCardColors() {
 }
 
 async function extractDominantColor(itemKey, imageUrl) {
-  try {
-    const img = new Image();
-    img.crossOrigin = 'Anonymous';
-    img.src = imageUrl;
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = reject;
-      // webkit may not re-fire onload for cached images; resolve immediately if already complete
-      if (img.complete) {
-        if (img.naturalWidth > 0) resolve();
-        else reject(new Error('Image failed to load'));
-      }
-    });
-
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    canvas.width = img.width;
-    canvas.height = img.height;
-    ctx.drawImage(img, 0, 0);
-
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-    let r = 0, g = 0, b = 0, count = 0;
-
-    // sample pixels and average them, skipping very dark or light ones
-    for (let i = 0; i < imageData.length; i += 4 * 4) {
-      const red = imageData[i];
-      const green = imageData[i + 1];
-      const blue = imageData[i + 2];
-      const brightness = (red + green + blue) / 3;
-
-      if (brightness > 40 && brightness < 180) {
-        r += red;
-        g += green;
-        b += blue;
-        count++;
-      }
-    }
-
-    if (count > 0) {
-      r = Math.floor(r / count);
-      g = Math.floor(g / count);
-      b = Math.floor(b / count);
-      const max = Math.max(r, g, b);
-      const min = Math.min(r, g, b);
-      const saturation = max === 0 ? 0 : (max - min) / max;
-      const boost = 1.5;
-      r = Math.min(255, Math.floor(r + (r - min) * boost * saturation));
-      g = Math.min(255, Math.floor(g + (g - min) * boost * saturation));
-      b = Math.min(255, Math.floor(b + (b - min) * boost * saturation));
-      cardColors[itemKey] = `rgb(${r}, ${g}, ${b})`;
-    } else {
-      cardColors[itemKey] = accentColor;
-    }
-    flushCardColors();
-  } catch (err) {
-    // leave it unset so the section accent shows and a later list update can retry
-  }
+  const color = await extractArtAccent(imageUrl, accentColor);
+  // a failed load leaves it unset so the section accent shows and a later list update can retry
+  if (!color) return;
+  cardColors[itemKey] = color;
+  flushCardColors();
 }
 
 function openDetail(item) {
@@ -256,7 +221,7 @@ function getProgressInfo(item) {
   const remaining = timestamp > 60 && duration > timestamp ? `${formatDuration(duration - timestamp)} left` : null;
 
   if ((item.media_type === 'tv' || item.first_air_date) && season && episode) {
-    const label = `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
+    const label = `S${season} · E${episode}`;
     return remaining ? `${label} · ${remaining}` : label;
   }
 
@@ -322,33 +287,37 @@ function handleViewAll() {
           {@const progressPercent = isRecentlyWatched && !item.finished ? getProgressPercentage(item) : 0}
           <!-- svelte-ignore a11y-click-events-have-key-events -->
           <!-- svelte-ignore a11y-no-static-element-interactions -->
-          <div class="wide-card" style="--card-accent: {cardColors[itemKey] || accentColor}" on:click={() => openDetail(item)}>
-            {#if item.backdrop_path}
-              <img class="wide-card-image" src={getImageUrl(item.backdrop_path, 'w780')} alt="" loading="lazy" decoding="async" />
-            {:else if item.poster_path}
-              <img class="wide-card-image poster-fallback" src={getImageUrl(item.poster_path, 'w342')} alt="" loading="lazy" decoding="async" />
-            {:else}
-              <div class="wide-card-image wide-card-placeholder"><i class="ri-film-line"></i></div>
-            {/if}
-            <div class="wide-card-shade"></div>
+          <div class="tile wide" class:finished={isRecentlyWatched && item.finished} style="--card-accent: {cardColors[itemKey] || accentColor}" on:click={() => openDetail(item)}>
+            <div class="tile-art">
+              {#if item.backdrop_path}
+                <img class="tile-image" src={getImageUrl(item.backdrop_path, 'w780')} alt="" loading="lazy" decoding="async" />
+              {:else if item.poster_path}
+                <!-- no backdrop: a blurred poster fills the frame and the poster itself sits on the right -->
+                <img class="tile-image poster-blur" src={getImageUrl(item.poster_path, 'w185')} alt="" loading="lazy" decoding="async" />
+                <img class="wide-poster" src={getImageUrl(item.poster_path, 'w342')} alt="" loading="lazy" decoding="async" />
+              {:else}
+                <div class="tile-image tile-placeholder"><i class="ri-film-line"></i></div>
+              {/if}
+            </div>
+            <div class="tile-shade"></div>
 
             {#if isRecentlyWatched && item.finished}
-              <div class="progress-badge watched-badge"><i class="ri-checkbox-circle-fill"></i> Watched</div>
+              <div class="tile-badge"><i class="ri-check-line"></i> Watched</div>
             {/if}
 
-            <div class="wide-card-corner">
+            <div class="tile-corner">
               {#if isRecentlyWatched}
-                <button class="action-btn small" title="Remove from Recently Watched" on:click={(e) => handleRemoveFromHistory(e, item)}>
+                <button class="tile-icon" title="Remove from Recently Watched" on:click={(e) => handleRemoveFromHistory(e, item)}>
                   <i class="ri-close-line"></i>
                 </button>
               {:else}
-                <button class="action-btn small" title={inList ? 'Remove from List' : 'Add to List'} on:click={(e) => toggleMyList(e, item)}>
+                <button class="tile-icon" class:active={inList} title={inList ? 'Remove from List' : 'Add to List'} on:click={(e) => toggleMyList(e, item)}>
                   <i class={inList ? 'ri-check-line' : 'ri-add-line'}></i>
                 </button>
               {/if}
             </div>
 
-            <button class="wide-card-play" class:loading={playingItemKey === itemKey} title={isRecentlyWatched && !item.finished ? 'Resume' : 'Play'} disabled={playingItemKey !== null} on:click={(e) => handleQuickPlay(e, item)}>
+            <button class="tile-play" class:loading={playingItemKey === itemKey} title={isRecentlyWatched && !item.finished ? 'Resume' : 'Play'} disabled={playingItemKey !== null} on:click={(e) => handleQuickPlay(e, item)}>
               {#if playingItemKey === itemKey}
                 <i class="ri-loader-4-line spin"></i>
               {:else}
@@ -356,9 +325,13 @@ function handleViewAll() {
               {/if}
             </button>
 
-            <div class="wide-card-text">
-              <h3 class="wide-card-title">{item.title || item.name || 'Unknown'}</h3>
-              <div class="wide-card-meta">
+            <div class="tile-text">
+              {#if logos[itemKey]}
+                <img class="tile-logo" class:invert={logos[itemKey].invert} src={logos[itemKey].url} alt={item.title || item.name} decoding="async" />
+              {:else}
+                <h3 class="tile-title" class:pending={logos[itemKey] === undefined}>{item.title || item.name || 'Unknown'}</h3>
+              {/if}
+              <div class="tile-meta">
                 {#if progressInfo}
                   <span>{progressInfo}</span>
                 {:else}
@@ -366,46 +339,51 @@ function handleViewAll() {
                     <span>{formatYear(item.release_date || item.first_air_date)}</span>
                   {/if}
                   {#if item.vote_average}
-                    <span class="rating-badge" style="background: {getRatingColor(item.vote_average)}">{formatRating(item.vote_average)}</span>
+                    <span class="tile-rating"><i class="ri-star-fill" style="color: {getRatingColor(item.vote_average)}"></i>{formatRating(item.vote_average)}</span>
                   {/if}
                 {/if}
               </div>
+              {#if progressPercent > 0}
+                <div class="tile-progress"><span style:width="{progressPercent}%"></span></div>
+              {/if}
             </div>
-
-            {#if progressPercent > 0}
-              <div class="wide-card-progress"><span style:width="{progressPercent}%"></span></div>
-            {/if}
           </div>
         {:else}
           <!-- svelte-ignore a11y-click-events-have-key-events -->
           <!-- svelte-ignore a11y-no-static-element-interactions -->
-          <div class="media-card" style="--card-accent: {cardColors[itemKey] || accentColor}" on:click={() => openDetail(item)}>
-            {#if item.poster_path}
-              <img class="media-poster" src={getImageUrl(item.poster_path, 'w342')} alt={item.title || item.name} loading="lazy" decoding="async" />
-            {:else}
-              <div class="media-poster rec-placeholder"><i class="ri-film-line"></i></div>
-            {/if}
-            <div class="media-content">
-              <div class="media-info">
-                <h3 class="media-title">{item.title || item.name || 'Unknown'}</h3>
-                <div class="media-meta">
-                  <span>{formatYear(item.release_date || item.first_air_date) || 'N/A'}</span>
-                  <span class="rating-badge" style="background: {getRatingColor(item.vote_average)}">
-                    {formatRating(item.vote_average)}
-                  </span>
-                </div>
-              </div>
-              <div class="media-actions">
-                <button class="action-btn" class:loading={playingItemKey === itemKey} title="Play" disabled={playingItemKey !== null} on:click={(e) => handleQuickPlay(e, item)}>
-                  {#if playingItemKey === itemKey}
-                    <i class="ri-loader-4-line spin"></i>
-                  {:else}
-                    <i class="ri-play-fill"></i>
-                  {/if}
-                </button>
-                <button class="action-btn" title={inList ? 'Remove from List' : 'Add to List'} on:click={(e) => toggleMyList(e, item)}>
-                  <i class={inList ? 'ri-check-line' : 'ri-add-line'}></i>
-                </button>
+          <div class="tile poster" style="--card-accent: {cardColors[itemKey] || accentColor}" on:click={() => openDetail(item)}>
+            <div class="tile-art">
+              {#if item.poster_path}
+                <img class="tile-image" src={getImageUrl(item.poster_path, 'w342')} alt={item.title || item.name} loading="lazy" decoding="async" />
+              {:else}
+                <div class="tile-image tile-placeholder"><i class="ri-film-line"></i></div>
+              {/if}
+            </div>
+            <div class="tile-shade"></div>
+
+            <div class="tile-corner">
+              <button class="tile-icon" class:active={inList} title={inList ? 'Remove from List' : 'Add to List'} on:click={(e) => toggleMyList(e, item)}>
+                <i class={inList ? 'ri-check-line' : 'ri-add-line'}></i>
+              </button>
+            </div>
+
+            <button class="tile-play" class:loading={playingItemKey === itemKey} title="Play" disabled={playingItemKey !== null} on:click={(e) => handleQuickPlay(e, item)}>
+              {#if playingItemKey === itemKey}
+                <i class="ri-loader-4-line spin"></i>
+              {:else}
+                <i class="ri-play-fill"></i>
+              {/if}
+            </button>
+
+            <div class="tile-text">
+              <h3 class="tile-title">{item.title || item.name || 'Unknown'}</h3>
+              <div class="tile-meta">
+                {#if formatYear(item.release_date || item.first_air_date)}
+                  <span>{formatYear(item.release_date || item.first_air_date)}</span>
+                {/if}
+                {#if item.vote_average}
+                  <span class="tile-rating"><i class="ri-star-fill" style="color: {getRatingColor(item.vote_average)}"></i>{formatRating(item.vote_average)}</span>
+                {/if}
               </div>
             </div>
           </div>

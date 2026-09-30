@@ -1278,8 +1278,8 @@ import { invoke } from "@tauri-apps/api/core";
 
               <div class="detail-meta">
                 {#if details.vote_average !== undefined && details.vote_average !== null}
-                <div class="rating-box" style="background: {getRatingColor(details.vote_average)}">
-                  {details.vote_average.toFixed(1)}
+                <div class="rating-box" style="--rating-color: {getRatingColor(details.vote_average)}" title="TMDB rating">
+                  <i class="ri-star-fill"></i><span class="rating-value">{details.vote_average.toFixed(1)}</span><span class="rating-scale">/10</span>
                 </div>
                 {/if}
                 {#if details.content_ratings?.results?.length || details.release_dates?.results?.length}

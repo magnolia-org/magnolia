@@ -254,24 +254,6 @@ pre {
   line-height: 1;
 }
 
-/* Progress Bar for media cards */
-.media-card .progress-bar {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 4px;
-  background: rgba(255, 255, 255, 0.2);
-  z-index: 3;
-  pointer-events: none;
-}
-
-.media-card .progress-fill {
-  height: 100%;
-  background: var(--card-accent, #10b981);
-  transition: width 0.3s ease;
-}
-
 /* Blur Overlay */
 .blur-overlay {
   opacity: 0.2;
@@ -553,18 +535,54 @@ html.macos .settings-wrapper {
   margin-bottom: var(--spacing-sm);
 }
 
+/* quiet glass pill with a star in the rating's colour, like the tile ratings */
 .rating-box {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 45px;
-  padding: 6px 12px;
-  border-radius: var(--border-radius-md);
-  font-size: 16px;
-  font-weight: 700;
-  color: #000;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
-  line-height: 1;
+    --rating-color: #6bdb8f;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px 5px 8px;
+    border-radius: 999px;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1;
+    color: #fff;
+    font-variant-numeric: tabular-nums;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+}
+
+.rating-box i {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 13px;
+    height: 13px;
+    font-size: 13px;
+    line-height: 1;
+    color: var(--rating-color);
+}
+
+/* the star glyph draws a little low in its box; this lines it up with the digits */
+.rating-box i::before {
+    display: block;
+    line-height: 13px;
+    transform: translateY(-1px);
+}
+
+.rating-box .rating-value,
+.rating-box .rating-scale {
+    display: inline-block;
+    line-height: 1;
+}
+
+.rating-box .rating-scale {
+    font-size: 10px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.45);
+    margin-left: -3px;
 }
 
 .detail-genres {

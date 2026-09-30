@@ -456,8 +456,8 @@ function getGenres(item) {
               <h1 class="detail-title">{currentItem.title || currentItem.name}</h1>
 
             <div class="detail-meta">
-              <div class="rating-box" style="background: {getRatingColor(currentItem.vote_average)}">
-                {formatRating(currentItem.vote_average)}
+              <div class="rating-box" style="--rating-color: {getRatingColor(currentItem.vote_average)}" title="TMDB rating">
+                <i class="ri-star-fill"></i><span class="rating-value">{formatRating(currentItem.vote_average)}</span><span class="rating-scale">/10</span>
               </div>
               <span>{formatDate(currentItem.release_date || currentItem.first_air_date)}</span>
             </div>
