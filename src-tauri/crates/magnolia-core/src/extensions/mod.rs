@@ -13,8 +13,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tauri::State;
 use tokio::sync::RwLock;
 
 const PREINSTALLED: &[(&str, &str)] = &[
@@ -464,6 +462,128 @@ async fn parse_manifest_blocking(source: String) -> Result<(String, ExtensionMan
     .map_err(|e| e.to_string())?
 }
 
+// install, subtitles and debrid
+
+impl ExtensionManager {
+    pub async fn install_from_path(&self, path: &str) -> Result<ExtensionInfo, String> {
+        let source = fs::read_to_string(path).map_err(|e| format!("failed to read {}: {}", path, e))?;
+        let (source, manifest) = parse_manifest_blocking(source).await?;
+        self.install(source, manifest, format!("file:{}", path)).await
+    }
+
+    pub async fn install_from_url(&self, url: &str) -> Result<ExtensionInfo, String> {
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err("URL must start with http:// or https://".to_string());
+        }
+        let response = reqwest::get(url)
+            .await
+            .map_err(|e| format!("download failed: {}", e))?;
+        if !response.status().is_success() {
+            return Err(format!("download failed: HTTP {}", response.status()));
+        }
+        let source = response
+            .text()
+            .await
+            .map_err(|e| format!("failed to read response: {}", e))?;
+        if source.len() > 1_048_576 {
+            return Err("extension script too large (max 1 MB)".to_string());
+        }
+        let (source, manifest) = parse_manifest_blocking(source).await?;
+        self.install(source, manifest, format!("url:{}", url)).await
+    }
+
+    /// Run subtitle extensions for the given media. With `auto_only`, only
+    /// extensions whose manifest declares `can_auto_fetch: true` run (used when
+    /// playback starts); otherwise only manual ones run (the "Fetch Subtitles"
+    /// button in the player).
+    pub async fn fetch_subtitles(
+        &self,
+        tmdb_id: String,
+        media_type: String,
+        season: Option<u32>,
+        episode: Option<u32>,
+        auto_only: bool,
+    ) -> Vec<Subtitle> {
+        let extensions: Vec<LoadedExtension> = self
+            .enabled_subtitle_extensions()
+            .await
+            .into_iter()
+            .filter(|e| e.manifest.can_auto_fetch.unwrap_or(false) == auto_only)
+            .collect();
+
+        let mut handles = Vec::new();
+        for ext in extensions {
+            let ctx = runtime::SubtitleFetchContext {
+                tmdb_id: tmdb_id.clone(),
+                media_type: media_type.clone(),
+                season,
+                episode,
+            };
+            handles.push(tokio::task::spawn_blocking(move || {
+                runtime::run_subtitle_fetch(&ext.id, &ext.source, &ext.manifest, &ext.field_values, &ctx)
+                    .map_err(|e| (ext.id.clone(), e))
+            }));
+        }
+
+        let mut all = Vec::new();
+        for handle in handles {
+            match handle.await {
+                Ok(Ok(subs)) => all.extend(subs),
+                Ok(Err((id, e))) => log::warn!("subtitle extension {} failed: {}", id, e),
+                Err(e) => log::warn!("subtitle extension task panicked: {}", e),
+            }
+        }
+        all
+    }
+
+    async fn require_debrid(&self, ext_id: &str) -> Result<LoadedExtension, String> {
+        let ext = self
+            .get(ext_id)
+            .await
+            .ok_or_else(|| format!("streaming client '{}' is not installed", ext_id))?;
+        if ext.manifest.ext_type != "debrid" {
+            return Err(format!("'{}' is not a debrid extension", ext_id));
+        }
+        if !ext.enabled {
+            return Err(format!("streaming client '{}' is disabled", ext.manifest.name));
+        }
+        Ok(ext)
+    }
+
+    /// Ask a debrid extension for the files in a magnet's torrent. Magnolia runs
+    /// its own automatic/manual file selection over the returned list — the
+    /// extension does not pick a file itself.
+    pub async fn list_debrid_files(
+        &self,
+        ext_id: &str,
+        ctx: runtime::DebridListContext,
+    ) -> Result<Vec<runtime::DebridFile>, String> {
+        let ext = self.require_debrid(ext_id).await?;
+        tokio::task::spawn_blocking(move || {
+            runtime::run_debrid_list_files(&ext.source, &ext.manifest, &ext.field_values, &ctx)
+        })
+        .await
+        .map_err(|e| format!("debrid list_files task panicked: {}", e))?
+    }
+
+    /// Resolve the file Magnolia already selected (`ctx.file_id`, from
+    /// `list_debrid_files`) to a directly-playable HTTP stream URL. Used when the
+    /// user picks a debrid service as their streaming client instead of the
+    /// built-in torrent pipeline.
+    pub async fn resolve_debrid_stream(
+        &self,
+        ext_id: &str,
+        ctx: runtime::DebridResolveContext,
+    ) -> Result<String, String> {
+        let ext = self.require_debrid(ext_id).await?;
+        tokio::task::spawn_blocking(move || {
+            runtime::run_debrid_resolve(&ext.source, &ext.manifest, &ext.field_values, &ctx)
+        })
+        .await
+        .map_err(|e| format!("debrid resolve task panicked: {}", e))?
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,195 +695,4 @@ mod tests {
             assert!(r.magnet_link.starts_with("magnet:"));
         }
     }
-}
-
-// ── Tauri commands ───────────────────────────────────────────────────────────
-
-#[tauri::command]
-pub async fn list_extensions(
-    manager: State<'_, Arc<ExtensionManager>>,
-) -> Result<Vec<ExtensionInfo>, String> {
-    Ok(manager.list().await)
-}
-
-#[tauri::command]
-pub async fn install_extension_from_path(
-    manager: State<'_, Arc<ExtensionManager>>,
-    path: String,
-) -> Result<ExtensionInfo, String> {
-    let source =
-        fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {}", path, e))?;
-    let (source, manifest) = parse_manifest_blocking(source).await?;
-    manager.install(source, manifest, format!("file:{}", path)).await
-}
-
-#[tauri::command]
-pub async fn install_extension_from_url(
-    manager: State<'_, Arc<ExtensionManager>>,
-    url: String,
-) -> Result<ExtensionInfo, String> {
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err("URL must start with http:// or https://".to_string());
-    }
-    let response = reqwest::get(&url)
-        .await
-        .map_err(|e| format!("download failed: {}", e))?;
-    if !response.status().is_success() {
-        return Err(format!("download failed: HTTP {}", response.status()));
-    }
-    let source = response
-        .text()
-        .await
-        .map_err(|e| format!("failed to read response: {}", e))?;
-    if source.len() > 1_048_576 {
-        return Err("extension script too large (max 1 MB)".to_string());
-    }
-    let (source, manifest) = parse_manifest_blocking(source).await?;
-    manager.install(source, manifest, format!("url:{}", url)).await
-}
-
-#[tauri::command]
-pub async fn remove_extension(
-    manager: State<'_, Arc<ExtensionManager>>,
-    id: String,
-) -> Result<(), String> {
-    manager.remove(&id).await
-}
-
-#[tauri::command]
-pub async fn set_extension_enabled(
-    manager: State<'_, Arc<ExtensionManager>>,
-    id: String,
-    enabled: bool,
-) -> Result<(), String> {
-    manager.set_enabled(&id, enabled).await
-}
-
-#[tauri::command]
-pub async fn set_extension_field_values(
-    manager: State<'_, Arc<ExtensionManager>>,
-    id: String,
-    values: HashMap<String, String>,
-) -> Result<(), String> {
-    manager.set_field_values(&id, values).await
-}
-
-/// Run subtitle extensions for the given media. With `auto_only`, only
-/// extensions whose manifest declares `can_auto_fetch: true` run (used when
-/// playback starts); otherwise only manual ones run (the "Fetch Subtitles"
-/// button in the player).
-#[tauri::command]
-pub async fn fetch_extension_subtitles(
-    manager: State<'_, Arc<ExtensionManager>>,
-    tmdb_id: String,
-    media_type: String,
-    season: Option<u32>,
-    episode: Option<u32>,
-    auto_only: bool,
-) -> Result<Vec<Subtitle>, String> {
-    let extensions: Vec<LoadedExtension> = manager
-        .enabled_subtitle_extensions()
-        .await
-        .into_iter()
-        .filter(|e| e.manifest.can_auto_fetch.unwrap_or(false) == auto_only)
-        .collect();
-
-    let mut handles = Vec::new();
-    for ext in extensions {
-        let ctx = runtime::SubtitleFetchContext {
-            tmdb_id: tmdb_id.clone(),
-            media_type: media_type.clone(),
-            season,
-            episode,
-        };
-        handles.push(tokio::task::spawn_blocking(move || {
-            runtime::run_subtitle_fetch(&ext.id, &ext.source, &ext.manifest, &ext.field_values, &ctx)
-                .map_err(|e| (ext.id.clone(), e))
-        }));
-    }
-
-    let mut all = Vec::new();
-    for handle in handles {
-        match handle.await {
-            Ok(Ok(subs)) => all.extend(subs),
-            Ok(Err((id, e))) => log::warn!("subtitle extension {} failed: {}", id, e),
-            Err(e) => log::warn!("subtitle extension task panicked: {}", e),
-        }
-    }
-    Ok(all)
-}
-
-async fn require_debrid(
-    manager: &ExtensionManager,
-    ext_id: &str,
-) -> Result<LoadedExtension, String> {
-    let ext = manager
-        .get(ext_id)
-        .await
-        .ok_or_else(|| format!("streaming client '{}' is not installed", ext_id))?;
-    if ext.manifest.ext_type != "debrid" {
-        return Err(format!("'{}' is not a debrid extension", ext_id));
-    }
-    if !ext.enabled {
-        return Err(format!("streaming client '{}' is disabled", ext.manifest.name));
-    }
-    Ok(ext)
-}
-
-/// Ask a debrid extension for the files in a magnet's torrent. Magnolia runs
-/// its own automatic/manual file selection over the returned list — the
-/// extension does not pick a file itself.
-#[tauri::command]
-pub async fn list_debrid_files(
-    manager: State<'_, Arc<ExtensionManager>>,
-    ext_id: String,
-    magnet: String,
-    season: Option<u32>,
-    episode: Option<u32>,
-    media_type: Option<String>,
-) -> Result<Vec<runtime::DebridFile>, String> {
-    let ext = require_debrid(&manager, &ext_id).await?;
-    let ctx = runtime::DebridListContext {
-        magnet,
-        season,
-        episode,
-        media_type,
-    };
-    tokio::task::spawn_blocking(move || {
-        runtime::run_debrid_list_files(&ext.source, &ext.manifest, &ext.field_values, &ctx)
-    })
-    .await
-    .map_err(|e| format!("debrid list_files task panicked: {}", e))?
-}
-
-/// Resolve the file Magnolia already selected (`file_id`, from
-/// `list_debrid_files`) to a directly-playable HTTP stream URL. Used when the
-/// user picks a debrid service as their streaming client instead of the
-/// built-in torrent pipeline.
-#[tauri::command]
-pub async fn resolve_debrid_stream(
-    manager: State<'_, Arc<ExtensionManager>>,
-    ext_id: String,
-    magnet: String,
-    file_id: Option<i64>,
-    file_name: Option<String>,
-    season: Option<u32>,
-    episode: Option<u32>,
-    media_type: Option<String>,
-) -> Result<String, String> {
-    let ext = require_debrid(&manager, &ext_id).await?;
-    let ctx = runtime::DebridResolveContext {
-        magnet,
-        file_id,
-        file_name,
-        season,
-        episode,
-        media_type,
-    };
-
-    tokio::task::spawn_blocking(move || {
-        runtime::run_debrid_resolve(&ext.source, &ext.manifest, &ext.field_values, &ctx)
-    })
-    .await
-    .map_err(|e| format!("debrid resolve task panicked: {}", e))?
 }

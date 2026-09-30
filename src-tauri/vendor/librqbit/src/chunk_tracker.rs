@@ -261,6 +261,22 @@ impl ChunkTracker {
         }
     }
 
+    // magnolia: lets peers sharing a streamed piece skip chunks another peer already delivered.
+    pub(crate) fn is_chunk_downloaded(&self, chunk: &ChunkInfo) -> bool {
+        self.chunk_status
+            .get(self.lengths.chunk_range(chunk.piece_index))
+            .and_then(|range| range.get(chunk.chunk_index as usize).map(|bit| *bit))
+            .unwrap_or(false)
+    }
+
+    // magnolia: put an unfinished piece back in the queue without forgetting its written chunks,
+    // so whoever picks it up next only fetches what is missing.
+    pub(crate) fn requeue_piece_keeping_chunks(&mut self, index: ValidPieceIndex) {
+        if !self.is_piece_have(index) {
+            self.queue_pieces.set(index.get() as usize, true);
+        }
+    }
+
     pub fn is_chunk_ready_to_upload(&self, chunk: &ChunkInfo) -> bool {
         self.have
             .as_slice()

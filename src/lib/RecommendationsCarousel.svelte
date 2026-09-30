@@ -1,12 +1,13 @@
 <script>
-import { onMount } from 'svelte';
+import { onDestroy } from 'svelte';
 import { invoke } from '@tauri-apps/api/core';
 import { getMovieRecommendations, getTVRecommendations, getImageUrl, getCorsImageUrl } from './tmdb.js';
 import { getRatingColor } from './utils/colorUtils.js';
 import { myListStore } from './stores/listStore.js';
 import { watchProgressStore } from './stores/watchProgressStore.js';
+import { watchHistoryStore } from './stores/watchHistoryStore.js';
+import { fetchBrowseList, isEnglishFriendly, isReleased } from './browseLists.js';
 
-let allRecommendations = [];
 let displayedRecommendations = [];
 let currentIndex = 0;
 let loading = true;
@@ -37,23 +38,33 @@ function imageLoadAction(node, imgId) {
   return { destroy() {} };
 }
 
+const AUTO_ADVANCE_SECONDS = 9;
+const MAX_SEEDS = 8;
+
+let source = null; // 'personal' or 'trending'
+let reasons = new Map();
+let pool = [];
+let loadToken = 0;
+let loadTimer = null;
+let lastSignature = null;
+
 $: myList = $myListStore;
 $: myListItems = new Set(myList.map(item => `${item.id}-${item.media_type}`));
 
 $: currentItem = displayedRecommendations[currentIndex];
+$: currentReason = currentItem ? reasons.get(`${currentItem.id}-${currentItem.media_type}`) : null;
 
-// Update backdrop with crossfade when currentItem changes
+// update backdrop with crossfade when currentItem changes
 $: if (currentItem?.backdrop_path) {
   const newUrl = getImageUrl(currentItem.backdrop_path, 'w1280');
-  // Check if this URL is already the latest in the array
+  // check if this url is already the latest in the array
   const latestImg = backdropImages[backdropImages.length - 1];
   if (!latestImg || latestImg.url !== newUrl) {
-    // Mark all existing images as not visible (fading out)
+    // mark all existing images as not visible (fading out)
     backdropImages = backdropImages.map(img => ({ ...img, visible: false }));
-    // Add new image
     backdropIdCounter++;
     backdropImages = [...backdropImages, { url: newUrl, id: backdropIdCounter, visible: false, loaded: false }];
-    // Clean up old images after transition (keep max 2)
+    // clean up old images after transition (keep max 2)
     setTimeout(() => {
       if (backdropImages.length > 2) {
         backdropImages = backdropImages.slice(-2);
@@ -63,66 +74,134 @@ $: if (currentItem?.backdrop_path) {
   extractColors(currentItem.backdrop_path);
 }
 
-$: if (myList) {
-  loadRecommendations();
+// recent history and my list alternate so both shape the picks
+$: seeds = buildSeeds(myList, $watchHistoryStore);
+$: seedSignature = seeds.map(seed => seed.key).join(',');
+
+// only reload while nothing personal is showing, so adding the current pick to my list doesn't reshuffle
+$: if (seedSignature !== lastSignature) {
+  lastSignature = seedSignature;
+  if (source !== 'personal') scheduleLoad();
 }
 
-onMount(() => {
-  loadRecommendations();
-});
+onDestroy(() => clearTimeout(loadTimer));
 
+function buildSeeds(list, history) {
+  const seen = new Set();
+  const result = [];
+  const longest = Math.max(list.length, history.length);
+  for (let i = 0; i < longest && result.length < MAX_SEEDS; i++) {
+    for (const [item, from] of [[history[i], 'history'], [list[i], 'list']]) {
+      if (!item || result.length >= MAX_SEEDS) continue;
+      const key = `${item.id}-${item.media_type}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push({ key, item, from });
+    }
+  }
+  return result;
+}
+
+function scheduleLoad() {
+  clearTimeout(loadTimer);
+  // the stores fill in one after another at startup, so wait for them to settle
+  loadTimer = setTimeout(loadRecommendations, 300);
+}
 
 async function loadRecommendations() {
-  if (myList.length === 0) {
-    allRecommendations = [];
-    displayedRecommendations = [];
-    loading = false;
-    return;
+  const token = ++loadToken;
+  loading = displayedRecommendations.length === 0;
+
+  const personal = seeds.length > 0 ? await loadPersonal(seeds) : [];
+  if (token !== loadToken) return;
+
+  if (personal.length > 0) {
+    source = 'personal';
+    pool = personal;
+    shuffleRecommendations();
+  } else {
+    const trending = await loadTrending();
+    if (token !== loadToken) return;
+    source = 'trending';
+    pool = trending;
+    displayedRecommendations = trending.slice(0, 10);
+    currentIndex = 0;
   }
+  loading = false;
+}
 
-  loading = true;
-  const recsMap = new Map();
-  const myListIds = new Set(myList.map(item => `${item.id}-${item.media_type}`));
+async function loadPersonal(seedList) {
+  const excluded = new Set([
+    ...myList.map(item => `${item.id}-${item.media_type}`),
+    ...$watchHistoryStore.map(item => `${item.id}-${item.media_type}`),
+  ]);
+  const scored = new Map();
+  const nextReasons = new Map();
 
-  const fetchPromises = myList.slice(0, 5).map(async (item) => {
+  await Promise.all(seedList.map(async (seed, seedIndex) => {
     try {
-      const isMovie = item.media_type === 'movie';
-      const recommendationsResponse = isMovie 
-        ? await getMovieRecommendations(item.id) 
+      const { item } = seed;
+      const response = item.media_type === 'movie'
+        ? await getMovieRecommendations(item.id)
         : await getTVRecommendations(item.id);
+      const seedWeight = 1 - seedIndex * 0.08;
 
-      const results = recommendationsResponse?.results || [];
+      (response?.results || []).forEach((rec, rank) => {
+        const mediaType = rec.media_type || item.media_type;
+        const key = `${rec.id}-${mediaType}`;
+        if (excluded.has(key)) return;
+        if (!rec.backdrop_path || !rec.overview || (rec.vote_count || 0) < 50 || !isReleased(rec)) return;
+        // stay in english unless the seed itself is in the same language, like a korean drama in my list
+        if (!isEnglishFriendly(rec) && rec.original_language !== item.original_language) return;
 
-      results.forEach(rec => {
-        const key = `${rec.id}-${item.media_type}`;
-        if (myListIds.has(key)) return;
-        
-        if (!rec.media_type) {
-          rec.media_type = item.media_type;
+        const score = seedWeight / Math.sqrt(rank + 1);
+        const entry = scored.get(key) || { item: { ...rec, media_type: mediaType }, score: 0, best: 0 };
+        entry.score += score;
+        if (score > entry.best) {
+          entry.best = score;
+          const seedTitle = item.title || item.name;
+          nextReasons.set(key, seed.from === 'history' ? `Because you watched ${seedTitle}` : `Because ${seedTitle} is in your list`);
         }
-        
-        if (!recsMap.has(key) || recsMap.get(key).vote_average < rec.vote_average) {
-          recsMap.set(key, rec);
-        }
+        scored.set(key, entry);
       });
     } catch (err) {
       console.error('Error fetching recommendations:', err);
     }
-  });
+  }));
 
-  await Promise.all(fetchPromises);
+  // titles several seeds agree on rise to the top, nudged by how well they are rated
+  const ranked = [...scored.values()]
+    .map(entry => ({ ...entry, score: entry.score * (0.6 + 0.4 * Math.min(entry.item.vote_average || 0, 9) / 9) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 30);
 
-  allRecommendations = Array.from(recsMap.values())
-    .filter(rec => rec.vote_average > 0)
-    .sort((a, b) => b.vote_average - a.vote_average);
-
-  shuffleRecommendations();
-  loading = false;
+  reasons = nextReasons;
+  return ranked;
 }
 
+async function loadTrending() {
+  try {
+    const { results } = await fetchBrowseList({ category: 'trending' });
+    const picks = results.filter(item => item.backdrop_path && item.overview);
+    reasons = new Map(picks.map(item => [`${item.id}-${item.media_type}`, 'Trending Today']));
+    return picks;
+  } catch (err) {
+    console.error('Error fetching trending:', err);
+    return [];
+  }
+}
+
+// weighted sample without replacement, so strong picks show up more often but not always
 function shuffleRecommendations() {
-  const shuffled = [...allRecommendations].sort(() => Math.random() - 0.5);
-  displayedRecommendations = shuffled.slice(0, 10);
+  if (source !== 'personal') {
+    displayedRecommendations = [...pool].sort(() => Math.random() - 0.5).slice(0, 10);
+  } else {
+    displayedRecommendations = pool
+      .map(entry => ({ item: entry.item, order: Math.random() ** (1 / Math.max(entry.score, 0.01)) }))
+      .sort((a, b) => b.order - a.order)
+      .slice(0, 10)
+      .map(entry => entry.item);
+  }
   currentIndex = 0;
 }
 
@@ -207,13 +286,6 @@ async function extractColors(backdropPath) {
   }
 }
 
-function rgbToHex(r, g, b) {
-  return '#' + [r, g, b].map(x => {
-    const hex = x.toString(16);
-    return hex.length === 1 ? '0' + hex : hex;
-  }).join('');
-}
-
 function navigateRecommendation(direction) {
   if (isTransitioning) return;
   isTransitioning = true;
@@ -247,61 +319,37 @@ function openDetail() {
 }
 
 async function handleQuickPlay() {
-  if (!currentItem || playingItem) return;
+  if (!currentItem) return;
   const item = currentItem;
   const itemMediaType = item.media_type;
   const key = `${item.id}-${itemMediaType}`;
+  if (playingItem) return; // already in-flight
   const progress = $watchProgressStore[key];
-  const isMovie = itemMediaType === 'movie';
   playingItem = true;
 
-  let targetSeason = 0;
-  let targetEpisode = 0;
-  if (!isMovie) {
-    if (progress?.currentSeason && progress?.currentEpisode) {
-      targetSeason = progress.currentSeason;
-      targetEpisode = progress.currentEpisode;
-    } else {
-      targetSeason = 1;
-      targetEpisode = 1;
-    }
-  }
-
+  // the backend picks the episode to continue and readies its saved torrent;
+  // with nothing saved (or a finished episode) the detail view has to decide
   try {
-    const saved = await invoke('get_saved_selection', {
-      showId: Number(item.id),
-      season: targetSeason,
-      episode: targetEpisode
-    });
-
-    if (saved && saved.magnet_link) {
-      const handleId = await invoke('add_torrent', { magnetOrUrl: saved.magnet_link });
+    const plan = await invoke('plan_quick_play', { mediaId: Number(item.id), mediaType: itemMediaType });
+    if (plan) {
       const mediaTitle = item.title || item.name || '';
-      const playerTitle = isMovie
-        ? mediaTitle
-        : `${mediaTitle} - S${targetSeason}E${targetEpisode}`;
-      let initialTimestamp = 0;
-      if (isMovie && progress?.currentTimestamp) {
-        initialTimestamp = progress.currentTimestamp;
-      } else if (!isMovie && progress?.currentSeason === targetSeason && progress?.currentEpisode === targetEpisode) {
-        initialTimestamp = progress.currentTimestamp || 0;
-      }
-      playingItem = false;
+      const isMovie = itemMediaType === 'movie';
       window.dispatchEvent(new CustomEvent('openVideoPlayer', {
         detail: {
           src: null,
-          title: playerTitle,
+          title: isMovie ? mediaTitle : `${mediaTitle} - S${plan.season}E${plan.episode}`,
           metadata: item,
-          handleId,
-          fileIndex: saved.file_index,
-          magnetLink: saved.magnet_link,
-          initialTimestamp,
+          handleId: plan.handle_id,
+          fileIndex: plan.file_index,
+          magnetLink: plan.magnet_link,
+          initialTimestamp: plan.initial_timestamp,
           mediaId: item.id,
           mediaType: itemMediaType,
-          seasonNum: isMovie ? null : targetSeason,
-          episodeNum: isMovie ? null : targetEpisode,
+          seasonNum: plan.season,
+          episodeNum: plan.episode,
         }
       }));
+      playingItem = false;
       return;
     }
   } catch (err) {
@@ -314,15 +362,9 @@ async function handleQuickPlay() {
   }));
 }
 
-function isInMyList(item) {
-  const inList = myListItems.has(`${item.id}-${item.media_type}`);
-  return inList;
-}
-
 function toggleMyList(event) {
   event.stopPropagation();
   if (currentItem) {
-    console.log('🎬 Recommendations: Toggle for:', currentItem.title || currentItem.name);
     myListStore.toggleItem(currentItem);
   }
 }
@@ -335,15 +377,6 @@ function formatDate(dateStr) {
   if (!dateStr) return 'N/A';
   return new Date(dateStr).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 }
-
-function formatRuntime(minutes) {
-  if (!minutes) return '';
-  const hours = Math.floor(minutes / 60);
-  const mins = minutes % 60;
-  return `${hours}h ${mins}m`;
-}
-
-/* Rating color logic moved to src/lib/utils/colorUtils.js */
 
 function getGenres(item) {
   if (item.genre_ids && item.genre_ids.length > 0) {
@@ -361,15 +394,7 @@ function getGenres(item) {
 }
 </script>
 
-{#if myList.length === 0}
-  <div class="recommendations-empty">
-    <div class="empty-content">
-      <i class="ri-heart-line"></i>
-      <h2>Start Building Your Collection</h2>
-      <p>Add movies and shows to My List to get personalized recommendations</p>
-    </div>
-  </div>
-{:else if loading}
+{#if loading}
   <div class="recommendations-featured recommendations-skeleton" aria-hidden="true">
     <div class="featured-content">
       <div class="featured-header">
@@ -392,7 +417,7 @@ function getGenres(item) {
       </div>
     </div>
   </div>
-{:else if !loading && displayedRecommendations.length > 0 && currentItem}
+{:else if displayedRecommendations.length > 0 && currentItem}
   <div class="recommendations-featured" style="--backdrop-color: {backdropColor}; --prominent-color: {prominentColor}; --text-color: {textColor}">
     <div class="featured-backdrop">
       {#each backdropImages as img (img.id)}
@@ -422,6 +447,12 @@ function getGenres(item) {
 
         <div class="detail-info-wrapper" style="animation: {slideDirection === 'right' ? 'fadeSlide3dRight' : 'fadeSlide3dLeft'} 0.5s ease; transform-style: preserve-3d;">
           <div class="detail-info">
+              {#if currentReason}
+                <span class="featured-reason">
+                  <i class={source === 'personal' ? 'ri-sparkling-2-line' : 'ri-fire-line'}></i>
+                  {currentReason}
+                </span>
+              {/if}
               <h1 class="detail-title">{currentItem.title || currentItem.name}</h1>
 
             <div class="detail-meta">
@@ -480,7 +511,11 @@ function getGenres(item) {
               disabled={isTransitioning}
               aria-label="Go to recommendation {index + 1}"
             >
-              <span class="indicator-bar"></span>
+              <span class="indicator-bar">
+                {#if index === currentIndex}
+                  <span class="indicator-fill" style:animation-duration="{AUTO_ADVANCE_SECONDS}s" on:animationend={() => navigateRecommendation('next')}></span>
+                {/if}
+              </span>
             </button>
           {/each}
         </div>

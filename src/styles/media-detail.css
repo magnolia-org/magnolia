@@ -631,14 +631,14 @@
 .cast-crew-container {
     display: flex;
     flex-direction: column;
-    gap: var(--spacing-3xl);
+    gap: var(--spacing-2xl);
 }
 
 .section-subtitle {
     font-size: 20px;
     font-weight: 700;
     color: var(--text-primary);
-    margin-bottom: var(--spacing-xl);
+    margin-bottom: var(--spacing-sm);
 }
 
 .cast-section, .crew-section {
@@ -646,13 +646,17 @@
     flex-direction: column;
 }
 
-.cast-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-    gap: var(--spacing-xl);
-}
-
 .cast-card {
+    appearance: none;
+    width: 150px;
+    flex-shrink: 0;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
     background: rgba(255, 255, 255, 0.06);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--border-radius-lg);
@@ -662,12 +666,13 @@
 
 .cast-card:hover {
     background: rgba(255, 255, 255, 0.1);
-    border-color: rgba(255, 255, 255, 0.2);
-    transform: translateY(-2px);
+    border-color: color-mix(in srgb, var(--prominent-color, var(--accent-color)) 45%, rgba(255, 255, 255, 0.2));
+    transform: translateY(-4px);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 
 .cast-card img {
+    display: block;
     width: 100%;
     aspect-ratio: 2/3;
     object-fit: cover;
@@ -685,14 +690,15 @@
 }
 
 .cast-card .cast-info {
-    padding: var(--spacing-lg);
+    flex: 1;
+    padding: var(--spacing-md) var(--spacing-lg) var(--spacing-lg);
     display: flex;
     flex-direction: column;
     gap: 4px;
 }
 
 .cast-card .cast-info h4 {
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 600;
     color: var(--text-primary);
     margin: 0;
@@ -700,10 +706,19 @@
 }
 
 .cast-card .cast-info p {
-    font-size: 13px;
+    font-size: 12px;
     color: var(--text-secondary);
     margin: 0;
     line-height: 1.4;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.cast-card .cast-info .crew-job {
+    font-weight: 500;
 }
 
 .cast-card .cast-info .episode-count {
@@ -712,71 +727,9 @@
     font-weight: 500;
 }
 
-.crew-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-    gap: var(--spacing-xl);
-}
-
-.crew-card {
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: var(--border-radius-lg);
-    overflow: hidden;
-    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.25s cubic-bezier(0.4, 0, 0.2, 1), background 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.crew-card:hover {
-    background: rgba(255, 255, 255, 0.1);
-    border-color: rgba(255, 255, 255, 0.2);
-    transform: translateY(-2px);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-}
-
-.crew-card img {
-    width: 100%;
-    aspect-ratio: 2/3;
-    object-fit: cover;
-}
-
-.crew-card .crew-placeholder {
-    width: 100%;
-    aspect-ratio: 2/3;
-    background: rgba(255, 255, 255, 0.05);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 40px;
-    color: rgba(255, 255, 255, 0.15);
-}
-
-.crew-card .crew-info {
-    padding: var(--spacing-lg);
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-}
-
-.crew-card .crew-info h4 {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text-primary);
-    margin: 0;
-    line-height: 1.3;
-}
-
-.crew-card .crew-info .crew-job {
-    font-size: 13px;
-    color: var(--text-secondary);
-    margin: 0;
-    line-height: 1.4;
-    font-weight: 500;
-}
-
-.crew-card .crew-info .episode-count {
-    font-size: 11px;
-    color: var(--text-tertiary);
-    font-weight: 500;
+.cast-section .scroller-track,
+.crew-section .scroller-track {
+    align-items: stretch;
 }
 
 .detail-additional {
@@ -1458,31 +1411,19 @@ button.heatmap-cell {
     border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-.recommendations-section .section-title {
+.recommendations-section .carousel-section {
+    margin: 0;
+    padding: 0;
+}
+
+.recommendations-section .carousel-section .section-header {
+    padding: 0;
+}
+
+.recommendations-section .carousel-section .section-title {
     font-size: 24px;
     font-weight: 700;
-    margin-bottom: var(--spacing-xl);
     color: var(--text-primary);
-}
-
-.recommendations-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-    gap: var(--spacing-xl);
-    max-width: 100%;
-}
-
-/* Recommendation cards use media-card from home.css — overrides for grid context */
-.recommendations-grid .media-card {
-    appearance: none;
-    -webkit-appearance: none;
-    width: 100%;
-    height: auto;
-    aspect-ratio: 2/3;
-    flex-shrink: unset;
-    font: inherit;
-    color: inherit;
-    text-align: left;
 }
 
 .rec-placeholder {

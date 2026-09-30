@@ -116,7 +116,35 @@ use super::{
 struct InflightPiece {
     peer: PeerHandle,
     started: Instant,
+    // magnolia: extra peers fetching chunks of a piece a stream is blocked on, so it isn't
+    // limited to one peer's speed. chunks from the owner and every helper are accepted.
+    helpers: Vec<PeerHandle>,
 }
+
+impl InflightPiece {
+    fn is_downloading(&self, peer: PeerHandle) -> bool {
+        self.peer == peer || self.helpers.contains(&peer)
+    }
+
+    fn has_helper_room(&self) -> bool {
+        let extra = (self.started.elapsed().as_millis() / EXTRA_HELPER_EVERY.as_millis()) as usize;
+        self.helpers.len() < (MAX_PIECE_HELPERS + extra).min(MAX_PIECE_HELPERS_ESCALATED)
+    }
+}
+
+// magnolia: how many extra peers may join one streamed piece, and the fewest missing chunks
+// that make joining worth it.
+const MAX_PIECE_HELPERS: usize = 2;
+const MIN_MISSING_CHUNKS_TO_HELP: usize = 8;
+
+// magnolia: a blocked piece that is still unfinished admits one more helper every interval, up
+// to the cap, so a piece stuck with slow peers soon gets faster ones too.
+const EXTRA_HELPER_EVERY: Duration = Duration::from_millis(750);
+const MAX_PIECE_HELPERS_ESCALATED: usize = 6;
+
+// magnolia: while streaming, each peer keeps about this many seconds of requests queued. a
+// seek otherwise waits behind up to 128 chunks (2 mb) per peer of data nobody needs anymore.
+const STREAMING_QUEUE_SECS: f64 = 1.0;
 
 fn make_piece_bitfield(lengths: &Lengths) -> BF {
     BF::from_boxed_slice(vec![0; lengths.piece_bitfield_bytes()].into_boxed_slice())
@@ -1128,16 +1156,41 @@ impl PeerHandler {
             PeerState::Connecting(_) => {}
             PeerState::Live(live) => {
                 let mut g = self.state.lock_write("mark_chunk_requests_canceled");
-                for req in live.inflight_requests {
-                    trace!(
-                        "peer dead, marking chunk request cancelled, index={}, chunk={}",
-                        req.piece_index.get(),
-                        req.chunk_index
-                    );
-                    g.get_chunks_mut()?
-                        .mark_piece_broken_if_not_have(req.piece_index);
-                    self.state.new_pieces_notify.notify_waiters();
+                // magnolia: release every piece this peer owned or helped with. previously an owned
+                // piece stayed in inflight_pieces, so a stream blocked on it waited for a slow-peer
+                // steal, and a dead helper would wipe chunks the owner had already written.
+                let mut pieces: HashSet<ValidPieceIndex> =
+                    live.inflight_requests.iter().map(|r| r.piece_index).collect();
+                pieces.extend(
+                    g.inflight_pieces
+                        .iter()
+                        .filter(|(_, p)| p.is_downloading(handle))
+                        .map(|(id, _)| *id),
+                );
+                for piece in pieces {
+                    trace!("peer dead, releasing piece={}", piece.get());
+                    let requeue = match g.inflight_pieces.get_mut(&piece) {
+                        // another peer owns it, so its written chunks stay valid
+                        Some(p) if p.peer != handle => {
+                            p.helpers.retain(|h| *h != handle);
+                            false
+                        }
+                        // a helper takes over and keeps the chunks written so far
+                        Some(p) if !p.helpers.is_empty() => {
+                            p.peer = p.helpers.remove(0);
+                            false
+                        }
+                        Some(_) => {
+                            g.inflight_pieces.remove(&piece);
+                            true
+                        }
+                        None => true,
+                    };
+                    if requeue {
+                        g.get_chunks_mut()?.mark_piece_broken_if_not_have(piece);
+                    }
                 }
+                self.state.new_pieces_notify.notify_waiters();
             }
             PeerState::NotNeeded => {
                 // Restore it as std::mem::take() replaced it above.
@@ -1266,6 +1319,7 @@ impl PeerHandler {
                     InflightPiece {
                         peer: self.addr,
                         started: Instant::now(),
+                        helpers: Vec::new(),
                     },
                 );
                 g.get_chunks_mut()?.reserve_needed_piece(n);
@@ -1287,8 +1341,9 @@ impl PeerHandler {
             let (idx, elapsed, piece_req) = g
                 .inflight_pieces
                 .iter_mut()
-                // don't steal from myself
-                .filter(|(_, r)| r.peer != self.addr)
+                // don't steal from myself. magnolia: nor a piece I'm already helping with, which
+                // would only restart it from the first chunk
+                .filter(|(_, r)| !r.is_downloading(self.addr))
                 .map(|(p, r)| (p, r.started.elapsed(), r))
                 .max_by_key(|(_, e, _)| *e)?;
 
@@ -1303,6 +1358,7 @@ impl PeerHandler {
                     let old = piece_req.peer;
                     piece_req.peer = self.addr;
                     piece_req.started = Instant::now();
+                    piece_req.helpers.retain(|h| *h != self.addr);
                     (*idx, old)
                 } else {
                     debug!(?idx, ?piece_req, "attempted to steal but peer was writing");
@@ -1317,6 +1373,163 @@ impl PeerHandler {
         self.state.peers.on_steal(from_peer, self.addr, stolen_idx);
 
         Some(stolen_idx)
+    }
+
+    /// magnolia: join a piece a stream is blocked on while another peer is downloading it.
+    /// Returns the piece and this peer's helper slot, which spreads helpers across the piece.
+    fn try_help_critical_piece(&self) -> Option<(ValidPieceIndex, usize)> {
+        let critical = self.state.streams.critical_pieces(&self.state.lengths);
+        if critical.is_empty() {
+            return None;
+        }
+
+        self.state
+            .peers
+            .with_live_mut(self.addr, "try_help_critical_piece", |live| {
+                if self.locked.read().i_am_choked {
+                    return None;
+                }
+                let mut g = self.state.lock_write("try_help_critical_piece");
+
+                let candidates: Vec<ValidPieceIndex> = {
+                    let chunks = g.get_chunks().ok()?;
+                    critical
+                        .into_iter()
+                        .filter(|pid| {
+                            live.bitfield.get(pid.get() as usize).map(|v| *v) == Some(true)
+                                && !chunks.is_piece_have(*pid)
+                                && self
+                                    .state
+                                    .lengths
+                                    .iter_chunk_infos(*pid)
+                                    .filter(|c| !chunks.is_chunk_downloaded(c))
+                                    .count()
+                                    >= MIN_MISSING_CHUNKS_TO_HELP
+                        })
+                        .collect()
+                };
+
+                for pid in candidates {
+                    if let Some(piece) = g.inflight_pieces.get_mut(&pid) {
+                        if piece.is_downloading(self.addr) || !piece.has_helper_room() {
+                            continue;
+                        }
+                        let slot = piece.helpers.len();
+                        piece.helpers.push(self.addr);
+                        debug!(piece = pid.get(), slot, "helping critical streamed piece");
+                        return Some((pid, slot));
+                    }
+                }
+                None
+            })
+            .flatten()
+    }
+
+    /// magnolia: whether a piece a stream is blocked on has room for this peer, so it should leave
+    /// the piece it is on, which is not one of them.
+    fn should_switch_to_critical(&self, current: ValidPieceIndex) -> bool {
+        let critical = self.state.streams.critical_pieces(&self.state.lengths);
+        if critical.is_empty() || critical.contains(&current) {
+            return false;
+        }
+        self.state
+            .peers
+            .with_live(self.addr, |live| {
+                let g = self.state.lock_read("should_switch_to_critical");
+                let Ok(chunks) = g.get_chunks() else {
+                    return false;
+                };
+                critical.iter().any(|pid| {
+                    let missing = || {
+                        self.state
+                            .lengths
+                            .iter_chunk_infos(*pid)
+                            .filter(|c| !chunks.is_chunk_downloaded(c))
+                            .count()
+                    };
+                    live.bitfield.get(pid.get() as usize).map(|v| *v) == Some(true)
+                        && !chunks.is_piece_have(*pid)
+                        && match g.inflight_pieces.get(pid) {
+                            None => true,
+                            Some(p) => {
+                                !p.is_downloading(self.addr)
+                                    && p.has_helper_room()
+                                    && missing() >= MIN_MISSING_CHUNKS_TO_HELP
+                            }
+                        }
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    /// magnolia: hand a piece back so another peer can finish it later. chunks already written are
+    /// kept, and requests still in flight for it are ignored when they land.
+    fn release_piece(&self, piece: ValidPieceIndex) {
+        {
+            let mut g = self.state.lock_write("release_piece");
+            let requeue = match g.inflight_pieces.get_mut(&piece) {
+                Some(p) if p.peer == self.addr && !p.helpers.is_empty() => {
+                    p.peer = p.helpers.remove(0);
+                    false
+                }
+                Some(p) if p.peer == self.addr => true,
+                Some(p) => {
+                    p.helpers.retain(|h| *h != self.addr);
+                    false
+                }
+                None => false,
+            };
+            if requeue {
+                g.inflight_pieces.remove(&piece);
+                if let Ok(chunks) = g.get_chunks_mut() {
+                    chunks.requeue_piece_keeping_chunks(piece);
+                }
+            }
+        }
+        self.state.new_pieces_notify.notify_waiters();
+    }
+
+    /// magnolia: about STREAMING_QUEUE_SECS of this peer's measured speed, in chunks.
+    fn streaming_request_cap(&self) -> usize {
+        let chunk = librqbit_core::constants::CHUNK_SIZE as f64;
+        match self.counters.average_piece_download_time() {
+            Some(t) if t.as_secs_f64() > 0.0 => {
+                let rate = self.state.lengths.default_piece_length() as f64 / t.as_secs_f64();
+                ((rate * STREAMING_QUEUE_SECS / chunk) as usize).clamp(8, 128)
+            }
+            _ => 32,
+        }
+    }
+
+    /// magnolia: requests this peer is waiting on for pieces it is still working on. requests for
+    /// pieces it left or lost are not counted, as a peer that honoured a cancel never answers them.
+    fn queued_requests(&self) -> usize {
+        self.state
+            .peers
+            .with_live(self.addr, |live| {
+                let g = self.state.lock_read("queued_requests");
+                live.inflight_requests
+                    .iter()
+                    .filter(|r| {
+                        g.inflight_pieces
+                            .get(&r.piece_index)
+                            .is_some_and(|p| p.is_downloading(self.addr))
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// magnolia: whether to request a chunk of a piece this peer is working on. Some(false) skips
+    /// a chunk another peer already delivered, None stops once the piece is done or taken away.
+    fn should_request_chunk(&self, piece: ValidPieceIndex, chunk: &ChunkInfo) -> Option<bool> {
+        let g = self.state.lock_read("should_request_chunk");
+        match g.inflight_pieces.get(&piece) {
+            Some(p) if p.is_downloading(self.addr) => {}
+            _ => return None,
+        }
+        let chunks = g.get_chunks().ok()?;
+        Some(!chunks.is_chunk_downloaded(chunk))
     }
 
     fn on_download_request(&self, request: Request) -> anyhow::Result<()> {
@@ -1486,11 +1699,20 @@ impl PeerHandler {
             // to download early pieces.
             // Then try get the next one in queue.
             // Afterwards means we are close to completion, try stealing more aggressively.
+            // magnolia: before reserving a fresh piece, help one a stream is blocked on.
             let new_piece_notify = self.state.new_pieces_notify.notified();
             let next = match self
                 .try_steal_old_slow_piece(10.)
-                .map_or_else(|| self.reserve_next_needed_piece(), |v| Ok(Some(v)))?
-                .or_else(|| self.try_steal_old_slow_piece(3.))
+                .map(|p| (p, None))
+                .or_else(|| {
+                    self.try_help_critical_piece()
+                        .map(|(p, slot)| (p, Some(slot)))
+                })
+                .map_or_else(
+                    || self.reserve_next_needed_piece().map(|p| p.map(|p| (p, None))),
+                    |v| Ok(Some(v)),
+                )?
+                .or_else(|| self.try_steal_old_slow_piece(3.).map(|p| (p, None)))
             {
                 Some(next) => next,
                 None => {
@@ -1509,12 +1731,55 @@ impl PeerHandler {
                 }
             };
 
-            for chunk in self.state.lengths.iter_chunk_infos(next) {
+            let (next, helper_slot) = next;
+            let chunks: Vec<ChunkInfo> = self.state.lengths.iter_chunk_infos(next).collect();
+            // helpers start partway into the piece, each in the largest stretch nobody started on,
+            // so peers sharing it fetch different chunks first
+            const HELPER_START: [f64; MAX_PIECE_HELPERS_ESCALATED] = [0.5, 0.25, 0.75, 0.125, 0.625, 0.375];
+            let start = helper_slot.map_or(0, |slot| {
+                (chunks.len() as f64 * HELPER_START[slot.min(HELPER_START.len() - 1)]) as usize
+            });
+
+            for i in 0..chunks.len() {
+                let chunk = chunks[(start + i) % chunks.len()];
                 let request = Request {
                     index: next.get(),
                     begin: chunk.offset,
                     length: chunk.size,
                 };
+
+                // take the request slot first so the check below sees the latest chunk state
+                let permit = loop {
+                    match aframe!(tokio::time::timeout(
+                        Duration::from_secs(5),
+                        aframe!(self.requests_sem.acquire())
+                    ))
+                    .await
+                    {
+                        Ok(acq) => break acq?,
+                        Err(_) => continue,
+                    };
+                };
+
+                // magnolia: move to a piece playback is blocked on, e.g. right after a seek
+                if self.should_switch_to_critical(next) {
+                    debug!(piece = next.get(), "leaving piece for one a stream is blocked on");
+                    self.release_piece(next);
+                    break;
+                }
+
+                match self.should_request_chunk(next, &chunk) {
+                    Some(true) => {}
+                    Some(false) => continue,
+                    None => break,
+                }
+
+                if self.state.streams.is_streaming() {
+                    let cap = self.streaming_request_cap();
+                    while self.queued_requests() >= cap {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }
 
                 match self
                     .state
@@ -1530,7 +1795,9 @@ impl PeerHandler {
                         // Example:
                         // someone stole a piece from us, and then died, the piece became "needed" again, and we reserved it
                         // all before the piece request was processed by us.
-                        warn!("we already requested {:?} previously", chunk);
+                        // magnolia: routine now that peers leave and rejoin streamed pieces; the
+                        // earlier request is still outstanding and is accepted when it lands
+                        debug!("we already requested {:?} previously", chunk);
                         continue;
                     }
                     // peer died
@@ -1549,17 +1816,7 @@ impl PeerHandler {
                         .await?;
                 }
 
-                loop {
-                    match aframe!(tokio::time::timeout(
-                        Duration::from_secs(5),
-                        aframe!(self.requests_sem.acquire())
-                    ))
-                    .await
-                    {
-                        Ok(acq) => break acq?.forget(),
-                        Err(_) => continue,
-                    };
-                }
+                permit.forget();
 
                 if self
                     .tx
@@ -1663,7 +1920,7 @@ impl PeerHandler {
                     .map(|l| l.read());
 
                 match g.inflight_pieces.get(&chunk_info.piece_index) {
-                    Some(InflightPiece { peer, .. }) if *peer == addr => {}
+                    Some(inflight) if inflight.is_downloading(addr) => {}
                     Some(InflightPiece { peer, .. }) => {
                         debug!(
                             "in-flight piece {} was stolen by {}, ignoring",

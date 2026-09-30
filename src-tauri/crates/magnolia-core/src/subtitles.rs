@@ -42,7 +42,6 @@ pub struct Subtitle {
     pub release_name: Option<String>,
 }
 
-#[tauri::command]
 pub async fn fetch_subtitles(
     tmdb_id: String,
     media_type: String,
@@ -144,7 +143,6 @@ fn extension_from_name(name: &str) -> Option<&'static str> {
     }
 }
 
-#[tauri::command]
 pub async fn download_subtitle(url: String) -> Result<String, String> {
     let bytes = reqwest::get(&url)
         .await

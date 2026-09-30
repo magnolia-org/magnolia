@@ -30,6 +30,9 @@ pub struct Settings {
     /// installed debrid extension.
     #[serde(default = "default_streaming_client")]
     pub streaming_client: String,
+    /// tracker extension ids to search, empty for auto
+    #[serde(default)]
+    pub tracker_preference: Vec<String>,
 }
 
 fn default_streaming_client() -> String {
@@ -54,6 +57,7 @@ impl Default for Settings {
             subtitle_language: String::new(),
             force_stereo_audio: false,
             streaming_client: default_streaming_client(),
+            tracker_preference: Vec::new(),
         }
     }
 }
@@ -120,5 +124,11 @@ impl SettingsManager {
     pub async fn get(&self) -> Settings {
         let data = self.data.read().await;
         data.clone()
+    }
+
+    pub async fn set_tracker_preference(&self, trackers: Vec<String>) {
+        let mut settings = self.get().await;
+        settings.tracker_preference = trackers;
+        self.save(settings).await;
     }
 }

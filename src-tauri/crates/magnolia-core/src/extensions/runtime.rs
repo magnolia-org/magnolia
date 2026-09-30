@@ -400,6 +400,7 @@ pub fn run_tracker_search(
             title: raw.title,
             magnet_link: raw.magnet_link,
             provider: provider.clone(),
+            ..Default::default()
         });
     }
     Ok(results)

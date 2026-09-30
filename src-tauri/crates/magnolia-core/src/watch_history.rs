@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,6 +24,71 @@ pub struct WatchHistoryItem {
     pub last_season_number: Option<u32>,
     #[serde(default)]
     pub last_season_episode_count: Option<u32>,
+}
+
+impl WatchHistoryItem {
+    /// builds a history entry from tmdb details (or a stored history item) and
+    /// the position just recorded for it.
+    pub fn from_media(
+        media_id: u32,
+        media_type: &str,
+        media: &Value,
+        position: Option<(Option<u32>, Option<u32>, f64)>,
+        watched_at: i64,
+    ) -> Self {
+        let text = |key: &str| {
+            media
+                .get(key)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let number = |key: &str| media.get(key).and_then(|v| v.as_u64()).map(|n| n as u32);
+
+        let seasons: Vec<&Value> = media
+            .get("seasons")
+            .and_then(|v| v.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter(|s| s.get("season_number").and_then(|n| n.as_u64()).unwrap_or(0) > 0)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let last_season = seasons.last();
+        let season_count = (!seasons.is_empty()).then_some(seasons.len() as u32);
+
+        let (current_season, current_episode, timestamp) = position.unwrap_or((None, None, 0.0));
+
+        Self {
+            id: media_id,
+            media_type: media_type.to_string(),
+            title: text("title").or_else(|| text("name")).unwrap_or_else(|| "Unknown".to_string()),
+            poster_path: text("poster_path"),
+            backdrop_path: text("backdrop_path"),
+            release_date: text("release_date").or_else(|| text("first_air_date")),
+            vote_average: media
+                .get("vote_average")
+                .and_then(|v| v.as_f64())
+                .filter(|v| *v != 0.0)
+                .map(|v| v as f32),
+            watched_at,
+            current_season: current_season.filter(|s| *s > 0),
+            current_episode: current_episode.filter(|e| *e > 0),
+            current_timestamp: (timestamp > 0.0).then_some(timestamp),
+            number_of_seasons: number("number_of_seasons").or(season_count),
+            // a stored history item carries these directly instead of a season list
+            last_season_number: last_season
+                .and_then(|s| s.get("season_number"))
+                .and_then(|n| n.as_u64())
+                .map(|n| n as u32)
+                .or_else(|| number("last_season_number")),
+            last_season_episode_count: last_season
+                .and_then(|s| s.get("episode_count"))
+                .and_then(|n| n.as_u64())
+                .map(|n| n as u32)
+                .or_else(|| number("last_season_episode_count")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -1,63 +1,72 @@
-.modal-overlay {
+/* shared by the error and confirm dialogs */
+.alert-overlay {
   position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background: rgba(0, 0, 0, 0.7);
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 10000;
-  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
 }
 
-.modal-content {
-  background: var(--bg-secondary);
-  border-radius: var(--border-radius-lg);
-  max-width: 500px;
-  width: 90%;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+.alert-card {
+  --alert-tone: #ef4444;
+  width: min(440px, calc(100vw - 32px));
+  padding: 28px 28px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  background:
+    radial-gradient(120% 60% at 0% 0%, color-mix(in srgb, var(--alert-tone) 12%, transparent), transparent 70%),
+    #141414;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  overflow: hidden;
+  border-radius: var(--border-radius-xl);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  outline: none;
 }
 
-.modal-header {
-  padding: var(--spacing-xl);
-  background: rgba(239, 68, 68, 0.1);
-  border-bottom: 1px solid rgba(239, 68, 68, 0.2);
+.alert-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
   display: flex;
   align-items: center;
-  gap: var(--spacing-md);
+  justify-content: center;
+  margin-bottom: var(--spacing-lg);
+  font-size: 22px;
+  color: var(--alert-tone);
+  background: color-mix(in srgb, var(--alert-tone) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--alert-tone) 30%, transparent);
 }
 
-.error-icon {
-  font-size: 28px;
-  color: #ef4444;
-}
-
-.modal-header h3 {
-  margin: 0;
+.alert-title {
+  margin: 0 0 var(--spacing-sm);
   font-size: 18px;
   font-weight: 600;
   color: var(--text-primary);
+  letter-spacing: -0.01em;
 }
 
-.modal-body {
-  padding: var(--spacing-xl);
-}
-
-.modal-body p {
+.alert-message {
   margin: 0;
-  color: var(--text-secondary);
-  line-height: 1.6;
   font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
 }
 
-.modal-footer {
-  padding: var(--spacing-lg) var(--spacing-xl);
-  background: rgba(0, 0, 0, 0.2);
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
+.alert-actions {
+  align-self: stretch;
   display: flex;
   justify-content: flex-end;
+  gap: var(--spacing-md);
+  margin-top: var(--spacing-2xl);
+}
+
+.alert-actions .btn-standard {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }

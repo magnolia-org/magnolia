@@ -2,17 +2,17 @@
 import { onMount, onDestroy, createEventDispatcher } from 'svelte';
 import { invoke } from '@tauri-apps/api/core';
 import { scrollHoverGuard } from './utils/scrollHoverGuard.js';
-import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopRatedTV, getNowPlaying, discoverMovies, discoverTV, getImageUrl } from './tmdb.js';
+import { getImageUrl } from './tmdb.js';
+import { fetchBrowseList } from './browseLists.js';
 import { myListStore } from './stores/listStore.js';
 import { watchProgressStore } from './stores/watchProgressStore.js';
-import { isEntryWatched } from './utils/watchState.js';
 import { getRatingColor } from './utils/colorUtils.js';
 
 const dispatch = createEventDispatcher();
 
 export let title = '';
-export let type = 'movie';
-export let category = 'popular';
+export let type = 'all';
+export let category = null;
 export let genre = null;
 export let filterId = null;
 export let customItems = null;
@@ -34,7 +34,7 @@ let loadMoreObserver;
 let scrollHost;
 
 $: myListItems = new Set($myListStore.map(item => `${item.id}-${item.media_type}`));
-$: isTagList = category === 'discover_by_genre' || category === 'discover_by_keyword';
+$: isTagList = category === 'discover_by_genre' || category === 'discover_by_keyword' || category === 'person';
 $: if (scrollHost && infiniteScrollSentinel && !customItems && page < totalPages) {
   setupInfiniteScroll();
 } else if (loadMoreObserver && (!infiniteScrollSentinel || customItems || page >= totalPages)) {
@@ -90,7 +90,7 @@ onDestroy(() => {
 async function loadItems() {
   loading = true;
   error = null;
-  
+
   try {
     if (customItems) {
       items = customItems;
@@ -98,78 +98,25 @@ async function loadItems() {
       return;
     }
 
-    let response;
-    if (category === 'trending') {
-      response = await getTrending(type === 'all' ? 'all' : type, 'day', page);
-    } else if (category === 'discover_by_genre' || category === 'discover_by_keyword') {
-      const discoverParams = {
-        page,
-        sort_by: 'popularity.desc'
-      };
-      if (category === 'discover_by_genre') {
-        discoverParams.with_genres = String(filterId ?? genre ?? '');
-      } else {
-        discoverParams.with_keywords = String(filterId ?? '');
-      }
-
-      if (type === 'movie') {
-        response = await discoverMovies(discoverParams);
-      } else if (type === 'tv') {
-        response = await discoverTV(discoverParams);
-      } else {
-        const [movieResponse, tvResponse] = await Promise.all([
-          discoverMovies(discoverParams),
-          discoverTV(discoverParams)
-        ]);
-
-        const movieResults = (movieResponse?.results || []).map((item) => ({ ...item, media_type: 'movie' }));
-        const tvResults = (tvResponse?.results || []).map((item) => ({ ...item, media_type: 'tv' }));
-        response = {
-          results: [...movieResults, ...tvResults].sort((a, b) => (b.popularity || 0) - (a.popularity || 0)),
-          total_pages: Math.max(movieResponse?.total_pages || 1, tvResponse?.total_pages || 1),
-        };
-      }
-    } else if (category === 'popular') {
-      if (genre) {
-        const params = { with_genres: String(genre), page, sort_by: 'popularity.desc' };
-        response = type === 'movie' ? await discoverMovies(params) : await discoverTV(params);
-      } else {
-        response = type === 'movie' ? await getPopularMovies(page) : await getPopularTV(page);
-      }
-    } else if (category === 'top_rated') {
-      response = type === 'movie' ? await getTopRatedMovies(page) : await getTopRatedTV(page);
-    } else if (category === 'now_playing') {
-      response = await getNowPlaying(page);
+    const response = await fetchBrowseList({ category, type, filterId: filterId ?? genre, page });
+    if (page === 1) {
+      items = response.results;
+    } else {
+      const existingKeys = new Set(items.map(itemKey));
+      items = [...items, ...response.results.filter(item => !existingKeys.has(itemKey(item)))];
     }
-
-    if (response?.results) {
-      // Ensure media_type is set for all items
-      const resultsWithType = response.results.map(item => {
-        if (!item.media_type) {
-          item.media_type = type === 'tv' ? 'tv' : 'movie';
-        }
-        return item;
-      });
-      
-      if (page === 1) {
-        items = resultsWithType;
-      } else {
-        const existingIds = new Set(items.map(item => item.id));
-        const newItems = resultsWithType.filter(item => !existingIds.has(item.id));
-        items = [...items, ...newItems];
-      }
-
-      resultsWithType.forEach((item) => {
-        // no-op: color extraction removed
-      });
-
-      totalPages = response.total_pages || 1;
-    }
+    totalPages = response.total_pages || 1;
   } catch (err) {
     error = err.message;
   }
-  
+
   loading = false;
+  // filtered pages can come back short and leave the sentinel on screen, which never fires again
+  if (!error && page < totalPages) requestAnimationFrame(setupInfiniteScroll);
+}
+
+function itemKey(item) {
+  return `${item.id}-${item.media_type}`;
 }
 
 function setupInfiniteScroll() {
@@ -216,60 +163,33 @@ async function handleQuickPlay(event, item) {
 
   const itemMediaType = item.media_type || (type === 'tv' ? 'tv' : 'movie');
   const key = `${item.id}-${itemMediaType}`;
-  if (playingItemKey === key) return;
+  if (playingItemKey === key) return; // already in-flight
   const progress = $watchProgressStore[key];
-  const isMovie = itemMediaType === 'movie';
   playingItemKey = key;
 
-  let targetSeason = 0;
-  let targetEpisode = 0;
-  if (!isMovie) {
-    if (progress?.currentSeason && progress?.currentEpisode) {
-      targetSeason = progress.currentSeason;
-      targetEpisode = progress.currentEpisode;
-    } else {
-      targetSeason = 1;
-      targetEpisode = 1;
-    }
-  }
-
+  // the backend picks the episode to continue and readies its saved torrent;
+  // with nothing saved (or a finished episode) the detail view has to decide
   try {
-    const saved = await invoke('get_saved_selection', {
-      showId: Number(item.id),
-      season: targetSeason,
-      episode: targetEpisode
-    });
-
-    if (saved && saved.magnet_link) {
-      const handleId = await invoke('add_torrent', { magnetOrUrl: saved.magnet_link });
+    const plan = await invoke('plan_quick_play', { mediaId: Number(item.id), mediaType: itemMediaType });
+    if (plan) {
       const mediaTitle = item.title || item.name || '';
-      const playerTitle = isMovie
-        ? mediaTitle
-        : `${mediaTitle} - S${targetSeason}E${targetEpisode}`;
-      let initialTimestamp = 0;
-      if (isEntryWatched(progress)) {
-        // finished, so start over
-      } else if (isMovie && progress?.currentTimestamp) {
-        initialTimestamp = progress.currentTimestamp;
-      } else if (!isMovie && progress?.currentSeason === targetSeason && progress?.currentEpisode === targetEpisode) {
-        initialTimestamp = progress.currentTimestamp || 0;
-      }
-      playingItemKey = null;
+      const isMovie = itemMediaType === 'movie';
       window.dispatchEvent(new CustomEvent('openVideoPlayer', {
         detail: {
           src: null,
-          title: playerTitle,
+          title: isMovie ? mediaTitle : `${mediaTitle} - S${plan.season}E${plan.episode}`,
           metadata: item,
-          handleId,
-          fileIndex: saved.file_index,
-          magnetLink: saved.magnet_link,
-          initialTimestamp,
+          handleId: plan.handle_id,
+          fileIndex: plan.file_index,
+          magnetLink: plan.magnet_link,
+          initialTimestamp: plan.initial_timestamp,
           mediaId: item.id,
           mediaType: itemMediaType,
-          seasonNum: isMovie ? null : targetSeason,
-          episodeNum: isMovie ? null : targetEpisode,
+          seasonNum: plan.season,
+          episodeNum: plan.episode,
         }
       }));
+      playingItemKey = null;
       return;
     }
   } catch (err) {
@@ -281,9 +201,6 @@ async function handleQuickPlay(event, item) {
     detail: { ...item, autoPlay: true, resumeProgress: progress }
   }));
 }
-
-function handleCardEnter(_item) {}
-function handleCardLeave(_item) {}
 
 function isInMyList(item) {
   return myListItems.has(`${item.id}-${item.media_type}`);
@@ -336,19 +253,21 @@ function formatDate(dateString) {
     </div>
 
     {#if loading && items.length === 0}
-      <div class="loading">Loading...</div>
+      <div class="view-all-grid" aria-hidden="true">
+        {#each Array(18) as _}
+          <div class="grid-card rec-skeleton-pulse"></div>
+        {/each}
+      </div>
     {:else if error}
       <div class="error">Error: {error}</div>
     {:else}
       <div class="view-all-grid">
-        {#each items as item (item.id)}
+        {#each items as item (itemKey(item))}
           <!-- svelte-ignore a11y-click-events-have-key-events -->
           <!-- svelte-ignore a11y-no-static-element-interactions -->
           <div
             class="grid-card"
             on:click={() => openDetail(item)}
-            on:mouseenter={() => handleCardEnter(item)}
-            on:mouseleave={() => handleCardLeave(item)}
           >
             {#if item.poster_path}
               <img src={getImageUrl(item.poster_path, 'w342')} alt={item.title || item.name} loading="lazy" decoding="async" />

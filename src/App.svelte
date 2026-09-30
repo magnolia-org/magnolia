@@ -13,16 +13,17 @@
   import ExtensionManager from "./lib/ExtensionManager.svelte";
   import Updater from "./lib/Updater.svelte";
   import WindowResizeHandles from "./lib/WindowResizeHandles.svelte";
+  import ConfirmModal from "./lib/ConfirmModal.svelte";
   import { myListStore } from "./lib/stores/listStore.js";
   import { watchHistoryStore } from "./lib/stores/watchHistoryStore.js";
   import { watchProgressStore } from "./lib/stores/watchProgressStore.js";
-  import { sortWatchHistory } from "./lib/utils/watchState.js";
   import { modalStore, closeModal } from "./lib/stores/modalStore.js";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { invoke } from "@tauri-apps/api/core";
   import { setupLogging } from "./lib/consoleLogger.js";
   import { isLinux } from "./lib/utils/platform.js";
   import { scrollHoverGuard } from "./lib/utils/scrollHoverGuard.js";
+  import { HOME_ROWS } from "./lib/browseLists.js";
   
   // Initialize console logging to disk
   setupLogging();
@@ -37,6 +38,7 @@
   let showTorrentDebug = false;
   let savedScrollPosition = 0;
   let hideRecommendations = false;
+  let confirmClearHistory = false;
 
   // Video Player State
   let showVideoPlayer = false;
@@ -46,7 +48,7 @@
   let onboardingVisible = false;
 
   $: myList = $myListStore;
-  $: watchHistory = sortWatchHistory($watchHistoryStore, $watchProgressStore);
+  $: watchHistory = $watchHistoryStore;
   $: watchProgress = $watchProgressStore;
   $: activeModal = $modalStore.activeModal;
 
@@ -303,6 +305,21 @@
     <AboutModal on:close={closeModal} />
   {/if}
 
+  {#if confirmClearHistory}
+    <!-- only the recently watched row is cleared; saved progress stays so titles still resume -->
+    <ConfirmModal
+      title="Clear Recently Watched?"
+      message="Every title will be removed from Recently Watched. Your progress is kept, so opening a title again still resumes where you left off."
+      confirmLabel="Clear"
+      icon="ri-delete-bin-line"
+      on:cancel={() => (confirmClearHistory = false)}
+      on:confirm={() => {
+        confirmClearHistory = false;
+        watchHistoryStore.clear();
+      }}
+    />
+  {/if}
+
   <div class="titlebar-wrapper" class:hidden={showVideoPlayer && (pipMode || !videoControlsVisible)}>
     <TitleBar 
       bind:searchActive 
@@ -318,15 +335,18 @@
     <div class="content-scroll" id="main-content" class:blur={searchActive || settingsActive} use:scrollHoverGuard>
       {#if viewAllData}
         <div style:display={selectedMedia ? 'none' : 'block'} style:pointer-events={selectedMedia ? 'none' : 'auto'}>
-          <ViewAll {...viewAllData} on:close={() => {
-            viewAllData = null;
-            requestAnimationFrame(() => {
-              const scrollContainer = document.getElementById('main-content');
-              if (scrollContainer) {
-                scrollContainer.scrollTop = savedScrollPosition;
-              }
-            });
-          }} />
+          <!-- a new list replaces the page outright, so the old one's items and paging never leak in -->
+          {#key viewAllData}
+            <ViewAll {...viewAllData} on:close={() => {
+              viewAllData = null;
+              requestAnimationFrame(() => {
+                const scrollContainer = document.getElementById('main-content');
+                if (scrollContainer) {
+                  scrollContainer.scrollTop = savedScrollPosition;
+                }
+              });
+            }} />
+          {/key}
         </div>
       {/if}
       {#if selectedMedia}
@@ -342,15 +362,13 @@
               title="Recently Watched"
               customItems={watchHistory}
               accentColor="#10b981"
+              variant="wide"
               showClearButton={true}
               hideViewAll={true}
               isRecentlyWatched={true}
               watchProgress={$watchProgressStore}
-              on:clear={() => watchHistoryStore.clear()}
-              on:removeItem={(e) => {
-                watchHistoryStore.removeItem(e.detail.id, e.detail.media_type);
-                watchProgressStore.removeProgress(e.detail.id, e.detail.media_type);
-              }}
+              on:clear={() => (confirmClearHistory = true)}
+              on:removeItem={(e) => watchHistoryStore.removeItem(e.detail.id, e.detail.media_type)}
             />
           {/if}
 
@@ -359,43 +377,19 @@
               title="My List"
               customItems={myList}
               accentColor="#eab308"
+              variant="wide"
+              watchProgress={$watchProgressStore}
             />
           {/if}
 
-          <MediaCarousel
-            title="Trending Movies"
-            type="movie"
-            category="trending"
-            accentColor="#f43f5e"
-          />
-
-          <MediaCarousel
-            title="Popular Movies"
-            type="movie"
-            category="popular"
-            accentColor="#ec4899"
-          />
-
-          <MediaCarousel
-            title="Top Rated Movies"
-            type="movie"
-            category="top_rated"
-            accentColor="#8b5cf6"
-          />
-
-          <MediaCarousel
-            title="Trending TV Shows"
-            type="tv"
-            category="trending"
-            accentColor="#3b82f6"
-          />
-
-          <MediaCarousel
-            title="Popular TV Shows"
-            type="tv"
-            category="popular"
-            accentColor="#06b6d4"
-          />
+          {#each HOME_ROWS as row (row.category)}
+            <MediaCarousel
+              title={row.title}
+              category={row.category}
+              accentColor={row.accentColor}
+              watchProgress={$watchProgressStore}
+            />
+          {/each}
         </div>
       {/if}
     </div>

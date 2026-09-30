@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::net::SocketAddr;
-use tauri::State;
 use tokio::sync::RwLock;
 use axum::{
     Router,
@@ -17,6 +16,10 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio_util::sync::CancellationToken;
+use futures_util::StreamExt;
+
+use crate::files::is_video_file;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TorrentFile {
@@ -93,9 +96,12 @@ pub struct StreamStatus {
 }
 
 #[derive(Clone)]
-pub struct AppState {
-    pub session: Arc<Session>,
-    pub download_dir: PathBuf,
+struct HttpState {
+    session: Arc<Session>,
+    download_dir: PathBuf,
+    fonts_dir: PathBuf,
+    // the newest request per (session, file); mpv opens a new request on every seek
+    active_streams: Arc<std::sync::Mutex<HashMap<(usize, usize), CancellationToken>>>,
 }
 
 // Trackers added to every torrent on top of whatever the magnet/torrent carries.
@@ -167,6 +173,8 @@ fn spawn_prefetch(
                     }
                 };
                 let len = stream.len();
+                // only prioritise the bytes this read needs, not a whole playback window
+                stream.set_lookahead(if tail { TAIL_PREFETCH_BYTES } else { HEAD_PREFETCH_BYTES });
                 let target = if tail {
                     let start = len.saturating_sub(TAIL_PREFETCH_BYTES);
                     stream.seek(std::io::SeekFrom::Start(start)).await?;
@@ -229,8 +237,7 @@ fn video_files_from_info(info: &librqbit::TorrentMetaV1Info<librqbit::ByteBufOwn
         .enumerate()
         .filter_map(|(index, detail)| {
             let filename_str = detail.filename.to_string().ok()?;
-            let lower = filename_str.to_lowercase();
-            if lower.ends_with(".mkv") || lower.ends_with(".mp4") || lower.ends_with(".avi") || lower.ends_with(".mov") {
+            if is_video_file(&filename_str) {
                 let pathbuf = detail.filename.to_pathbuf().ok()?;
                 let name = pathbuf
                     .file_name()
@@ -254,7 +261,7 @@ fn video_files_from_info(info: &librqbit::TorrentMetaV1Info<librqbit::ByteBufOwn
 async fn stream_file(
     Path((session_id, file_id)): Path<(usize, usize)>,
     headers: HeaderMap,
-    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::State(state): axum::extract::State<HttpState>,
 ) -> impl IntoResponse {
     use std::io::SeekFrom;
     use tokio_util::io::ReaderStream;
@@ -292,6 +299,19 @@ async fn stream_file(
 
     let content_length = end - start + 1;
 
+    // mpv drops the old request when it seeks, but the old body can linger until the socket
+    // closes, and every open stream gets an equal share of piece priority. ending it right away
+    // gives the whole swarm to the new position.
+    let cancel = CancellationToken::new();
+    if let Some(previous) = state
+        .active_streams
+        .lock()
+        .unwrap()
+        .insert((session_id, file_id), cancel.clone())
+    {
+        previous.cancel();
+    }
+
     // Pre-fetch relative filename for the disk fallback (before stream() consumes the Arc).
     let rel_path_for_fallback = handle.with_metadata(|meta| {
         meta.file_infos.get(file_id).map(|fi| fi.relative_filename.clone())
@@ -310,7 +330,10 @@ async fn stream_file(
             }
             // 256 KiB chunks: each poll_read goes through piece-lookup + storage
             // locks, so the default 4 KiB buffer throttles throughput to mpv.
-            Body::from_stream(ReaderStream::with_capacity(stream.take(content_length), 256 * 1024))
+            Body::from_stream(
+                ReaderStream::with_capacity(stream.take(content_length), 256 * 1024)
+                    .take_until(cancel.cancelled_owned()),
+            )
         }
         Err(stream_err) => {
             // Fall back to direct disk I/O for fully-downloaded torrents.
@@ -331,7 +354,10 @@ async fn stream_file(
                             return (StatusCode::INTERNAL_SERVER_ERROR, format!("seek failed: {}", e)).into_response();
                         }
                     }
-                    Body::from_stream(ReaderStream::with_capacity(f.take(content_length), 256 * 1024))
+                    Body::from_stream(
+                        ReaderStream::with_capacity(f.take(content_length), 256 * 1024)
+                            .take_until(cancel.cancelled_owned()),
+                    )
                 }
                 Err(e) => {
                     tracing::error!("stream() failed ({}), disk fallback also failed for {:?}: {}", stream_err, file_path, e);
@@ -394,7 +420,7 @@ fn clear_stale_dht_state_if_port_unavailable() {
 }
 
 impl TorrentManager {
-    pub async fn new(download_dir: PathBuf) -> Result<Self> {
+    pub async fn new(download_dir: PathBuf, fonts_dir: PathBuf) -> Result<Self> {
         println!("initializing TorrentManager with download_dir: {:?}", download_dir);
         
         if let Err(e) = std::fs::create_dir_all(&download_dir) {
@@ -482,9 +508,11 @@ impl TorrentManager {
         let http_addr = listener.local_addr()?;
         println!("HTTP server will run on: {}", http_addr);
         
-        let state = AppState {
+        let state = HttpState {
             session: session.clone(),
             download_dir: download_dir.clone(),
+            fonts_dir,
+            active_streams: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
 
         let app = Router::new()
@@ -697,9 +725,8 @@ impl TorrentManager {
                             .relative_filename
                             .to_string_lossy()
                             .to_string();
-                        let lower = filename.to_lowercase();
-                        
-                        if lower.ends_with(".mkv") || lower.ends_with(".mp4") || lower.ends_with(".avi") || lower.ends_with(".mov") {
+
+                        if is_video_file(&filename) {
                             Some(TorrentFile {
                                 index,
                                 name: file_info
@@ -922,14 +949,17 @@ impl TorrentManager {
             .unwrap_or("unknown")
             .to_string();
 
-        let is_streamable = handle.clone().stream(file_index).is_ok();
         let has_buffer = stats.progress_bytes > 2 * 1024 * 1024 || stats.finished;
         // Wait for the head/tail prefetch: those are the exact ranges mpv's
         // demuxer reads when opening the file, so handing off any earlier just
         // moves the wait into an opaque "Starting player" stall.
         let prefetch_complete = entry.prefetch.as_ref().map(|p| p.is_complete()).unwrap_or(true);
         // A finished torrent can always be served via HTTP even if stream() fails.
-        let is_ready = has_buffer && ((is_streamable && prefetch_complete) || stats.finished);
+        // stream() registers a stream and reconnects idle peers, so it only runs once
+        // the cheap checks pass now that the player polls several times a second.
+        let is_ready = has_buffer
+            && (stats.finished
+                || (prefetch_complete && handle.clone().stream(file_index).is_ok()));
 
         let stream_info = if is_ready {
             Some(StreamInfo {
@@ -1264,23 +1294,19 @@ impl TorrentManager {
     }
 }
 
-// HTTP handler to serve fonts from app data directory
+// HTTP handler to serve fonts from the data directory
 async fn serve_font(
     Path(filename): Path<String>,
+    axum::extract::State(state): axum::extract::State<HttpState>,
 ) -> impl IntoResponse {
-    // Get fonts directory from app data
-    // Note: In Axum handlers we can't easily access AppHandle, so we'll construct the path manually
-    // The fonts are stored in AppData/Roaming/com.chair.magnolia/fonts/
-    
-    let app_data = match dirs::data_dir() {
-        Some(dir) => dir.join("com.chair.magnolia").join("fonts"),
-        None => return (StatusCode::INTERNAL_SERVER_ERROR, "Could not find app data directory").into_response(),
-    };
-    
-    let font_path = app_data.join(&filename);
+    // path params arrive percent-decoded, so "..%2F" would otherwise escape the fonts directory
+    if filename.contains(['/', '\\']) || filename.contains("..") {
+        return (StatusCode::FORBIDDEN, "Access denied").into_response();
+    }
+    let font_path = state.fonts_dir.join(&filename);
     
     // Security: ensure the path is within fonts directory
-    if !font_path.starts_with(&app_data) {
+    if !font_path.starts_with(&state.fonts_dir) {
         return (StatusCode::FORBIDDEN, "Access denied").into_response();
     }
     
@@ -1309,134 +1335,4 @@ async fn serve_font(
     headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
     
     (StatusCode::OK, headers, font_data).into_response()
-}
-
-// Tauri commands
-#[tauri::command]
-pub async fn add_torrent(
-    manager: State<'_, Arc<TorrentManager>>,
-    magnet_or_url: String,
-) -> Result<usize, String> {
-    manager
-        .add_torrent(magnet_or_url)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn get_torrent_info(
-    manager: State<'_, Arc<TorrentManager>>,
-    handle_id: usize,
-) -> Result<TorrentInfo, String> {
-    manager
-        .get_torrent_info(handle_id)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn list_torrents(
-    manager: State<'_, Arc<TorrentManager>>,
-) -> Result<Vec<TorrentInfo>, String> {
-    manager.list_torrents().await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn prepare_stream(
-    manager: State<'_, Arc<TorrentManager>>,
-    handle_id: usize,
-    file_index: usize,
-) -> Result<(), String> {
-    manager
-        .prepare_stream(handle_id, file_index)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn get_stream_status(
-    manager: State<'_, Arc<TorrentManager>>,
-    handle_id: usize,
-    file_index: usize,
-) -> Result<StreamStatus, String> {
-    manager
-        .get_stream_status(handle_id, file_index)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn pause_torrent(
-    manager: State<'_, Arc<TorrentManager>>,
-    handle_id: usize,
-) -> Result<(), String> {
-    manager
-        .pause_torrent(handle_id)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn resume_torrent(
-    manager: State<'_, Arc<TorrentManager>>,
-    handle_id: usize,
-) -> Result<(), String> {
-    manager
-        .resume_torrent(handle_id)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn remove_torrent(
-    manager: State<'_, Arc<TorrentManager>>,
-    handle_id: usize,
-    delete_files: bool,
-) -> Result<(), String> {
-    manager
-        .remove_torrent(handle_id, delete_files)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn stop_stream(
-    manager: State<'_, Arc<TorrentManager>>,
-    handle_id: usize,
-    delete_files: bool,
-) -> Result<(), String> {
-    manager
-        .stop_stream(handle_id, delete_files)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn wipe_all_torrent_files(
-    manager: State<'_, Arc<TorrentManager>>,
-) -> Result<(), String> {
-    manager
-        .wipe_all_files()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn get_torrent_piece_ranges(
-    manager: State<'_, Arc<TorrentManager>>,
-    handle_id: usize,
-    file_index: usize,
-) -> Result<Vec<(f64, f64)>, String> {
-    manager
-        .get_piece_ranges(handle_id, file_index)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn get_download_dir(manager: State<'_, Arc<TorrentManager>>) -> Result<String, String> {
-    Ok(manager
-        .get_download_dir()
-        .to_string_lossy()
-        .to_string())
 }

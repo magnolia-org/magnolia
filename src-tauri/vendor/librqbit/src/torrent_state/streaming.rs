@@ -23,11 +23,19 @@ use super::{ManagedTorrentHandle, TorrentMetadata};
 
 type StreamId = usize;
 
-// 32 mb lookahead by default.
-const PER_STREAM_BUF_DEFAULT: u64 = 32 * 1024 * 1024;
+// magnolia: 128 mb lookahead instead of 32 mb. once the window is claimed, idle peers fall
+// back to natural order from the start of the file, which after a mid-file seek fetches data
+// behind the playhead instead of ahead of it.
+const PER_STREAM_BUF_DEFAULT: u64 = 128 * 1024 * 1024;
+
+// magnolia: pieces at the front of each stream that playback is waiting on; several peers
+// may download one of these together instead of leaving it to a single peer.
+const CRITICAL_PIECES_PER_STREAM: usize = 2;
 
 struct StreamState {
     file_id: usize,
+    // magnolia: how far ahead of the position this stream prioritises pieces
+    lookahead: u64,
     file_len: u64,
     file_abs_offset: u64,
     position: u64,
@@ -41,7 +49,7 @@ impl StreamState {
 
     fn queue<'a>(&self, lengths: &'a Lengths) -> impl Iterator<Item = ValidPieceIndex> + 'a {
         let start = self.file_abs_offset + self.position;
-        let end = (start + PER_STREAM_BUF_DEFAULT).min(self.file_abs_offset + self.file_len);
+        let end = (start + self.lookahead).min(self.file_abs_offset + self.file_len);
         let dpl = lengths.default_piece_length();
         let start_id = (start / dpl as u64).try_into().unwrap();
         let end_id = end.div_ceil(dpl as u64).try_into().unwrap();
@@ -97,6 +105,22 @@ impl TorrentStreams {
         all.shuffle(&mut rand::rng());
 
         Interleave { all: all.into() }
+    }
+
+    pub(crate) fn is_streaming(&self) -> bool {
+        !self.streams.is_empty()
+    }
+
+    pub(crate) fn critical_pieces(&self, lengths: &Lengths) -> Vec<ValidPieceIndex> {
+        let mut pieces = Vec::new();
+        for stream in self.streams.iter() {
+            for piece in stream.queue(lengths).take(CRITICAL_PIECES_PER_STREAM) {
+                if !pieces.contains(&piece) {
+                    pieces.push(piece);
+                }
+            }
+        }
+        pieces
     }
 
     pub(crate) fn wake_streams_on_piece_completed(
@@ -356,6 +380,7 @@ impl ManagedTorrent {
                 waker: None,
                 file_len: fd_len,
                 file_abs_offset: fd_offset,
+                lookahead: PER_STREAM_BUF_DEFAULT,
             },
         );
 
@@ -386,5 +411,13 @@ impl FileStream {
 
     pub fn len(&self) -> u64 {
         self.file_len
+    }
+
+    /// magnolia: limit how far ahead this stream prioritises pieces. a read that only needs a
+    /// small range, like the container header, shouldn't pull a whole playback window.
+    pub fn set_lookahead(&mut self, bytes: u64) {
+        if let Some(mut s) = self.streams.streams.get_mut(&self.stream_id) {
+            s.value_mut().lookahead = bytes.max(1);
+        }
     }
 }

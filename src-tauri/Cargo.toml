@@ -9,6 +9,9 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[workspace]
+members = ["crates/magnolia-core"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -20,26 +23,14 @@ tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
 log = "0.4"
 
-librqbit = "8.1.1"
-bytes = "1"
-url = "2"
-axum = { version = "0.8", features = ["http2"] }
-tower-http = { version = "0.6", features = ["cors"] }
-tokio-util = { version = "0.7", features = ["io"] }
+magnolia-core = { path = "crates/magnolia-core" }
 
 reqwest = { version = "0.11", features = ["json", "blocking"] }
-regex = "1.10"
-rhai = { version = "1", features = ["sync", "serde"] }
-tempfile = "3"
 chrono = "0.4"
-urlencoding = "2.1"
-zip = { version = "0.6", default-features = false, features = ["deflate"] }
-dirs = "5.0"
 fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
 gag = "1.0"
 
@@ -71,8 +62,10 @@ custom-protocol = ["tauri/custom-protocol"]
 # Patch librqbit to fix Windows seek_read not returning UnexpectedEof on short reads.
 # Without this, initial_check SHA1-hashes every piece on Windows (minutes for large
 # torrents) instead of using the is_broken fast-path that macOS/Linux get for free.
-# Once https://github.com/ikatson/rqbit fixes this upstream, remove this section
-# and bump the librqbit version.
+# The vendored copy also carries streaming changes marked `magnolia:` (stream look-ahead,
+# several peers sharing a piece playback is blocked on, per-peer request caps while
+# streaming, releasing a dead peer's pieces). Keep this section when bumping librqbit and
+# port those changes over.
 [patch.crates-io]
 librqbit = { path = "vendor/librqbit" }
 

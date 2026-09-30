@@ -2,38 +2,17 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod commands;
 mod mpv;
-mod search;
-mod torrent;
-mod tracking;
-mod watch_history;
-mod watch_progress;
-mod my_list;
-mod track_preferences;
-mod settings;
 mod logger;
-mod cache_metadata;
-mod subtitles;
-mod subtitle_packs;
-mod anime_list;
 mod updater;
-mod extensions;
 
-use extensions::ExtensionManager;
+use magnolia_core::Core;
 use std::sync::{Arc, Mutex};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use tauri::{Manager, State};
-use torrent::TorrentManager;
-use tracking::TrackingManager;
-use watch_history::{WatchHistoryManager, WatchHistoryItem};
-use watch_progress::WatchProgressManager;
-use my_list::MyListManager;
-use track_preferences::TrackPreferencesManager;
-use settings::{SettingsManager, Settings};
-use anime_list::AnimeListManager;
 use logger::Logger;
-use cache_metadata::CacheMetadataManager;
 
 /// Tauri managed state — accessible by mpv event_loop and all mpv commands.
 pub struct AppState {
@@ -138,380 +117,6 @@ async fn mpv_set_option_string(
     })
     .await
     .map_err(|e| e.to_string())?
-}
-
-// ── search commands ──────────────────────────────────────────────────────────
-
-/// Run a set of tracker extensions in parallel and collect their results.
-async fn search_tracker_extensions(
-    trackers: Vec<extensions::LoadedExtension>,
-    query: String,
-    media_type: Option<String>,
-    imdb_id: Option<String>,
-    season: Option<u32>,
-    episode: Option<u32>,
-) -> Vec<search::SearchResult> {
-    let mut handles = vec![];
-
-    for ext in trackers {
-        let ctx = extensions::runtime::TrackerSearchContext {
-            query: query.clone(),
-            media_type: media_type.clone(),
-            imdb_id: imdb_id.clone(),
-            season,
-            episode,
-        };
-        // Rhai execution and its HTTP calls are blocking
-        handles.push(tokio::task::spawn_blocking(move || {
-            let result = extensions::runtime::run_tracker_search(
-                &ext.source,
-                &ext.manifest,
-                &ext.field_values,
-                &ctx,
-            );
-            (ext.id, result)
-        }));
-    }
-
-    let mut all_results = Vec::new();
-    for handle in handles {
-        match handle.await {
-            Ok((id, Ok(results))) => {
-                println!("tracker extension {} returned {} results", id, results.len());
-                all_results.extend(results);
-            }
-            Ok((id, Err(e))) => println!("tracker extension {} error: {}", id, e),
-            Err(e) => println!("tracker extension task panicked: {}", e),
-        }
-    }
-    all_results
-}
-
-#[tauri::command]
-async fn search_nyaa_filtered(
-    ext_manager: State<'_, Arc<ExtensionManager>>,
-    query: String,
-    season: Option<u32>,
-    episode: Option<u32>,
-    _is_movie: bool,
-    media_type: Option<String>, // "anime", "tv", "movie"
-    tracker_preference: Option<Vec<String>>, // extension ids, or None/[] for auto
-    imdb_id: Option<String>, // For trackers that support IMDB lookup
-) -> Result<Vec<search::SearchResult>, String> {
-    println!("search_nyaa_filtered called with tracker_preference: {:?}, imdb_id: {:?}", tracker_preference, imdb_id);
-
-    // Normalize query
-    let normalized_query = query
-        .replace("-", " ")
-        .replace(":", " ")
-        .replace("_", " ");
-
-    let is_auto_mode = match &tracker_preference {
-        Some(prefs) => prefs.is_empty(),
-        None => true,
-    };
-    let is_anime = media_type.as_deref() == Some("anime");
-
-    let all_trackers = ext_manager.enabled_trackers().await;
-
-    let selected: Vec<extensions::LoadedExtension> = if is_auto_mode {
-        // Auto mode: anime → anime trackers, everything else → general trackers
-        all_trackers
-            .iter()
-            .filter(|e| e.manifest.is_anime == Some(is_anime))
-            .cloned()
-            .collect()
-    } else {
-        let prefs = tracker_preference.unwrap_or_default();
-        all_trackers
-            .iter()
-            .filter(|e| prefs.contains(&e.id))
-            .cloned()
-            .collect()
-    };
-
-    println!(
-        "Using tracker extensions: {:?}",
-        selected.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
-    );
-
-    let mut all_results = search_tracker_extensions(
-        selected,
-        normalized_query.clone(),
-        media_type.clone(),
-        imdb_id.clone(),
-        season,
-        episode,
-    )
-    .await;
-
-    if is_auto_mode && is_anime && all_results.is_empty() {
-        println!("Anime search returned no results, falling back to regular trackers");
-        let fallback: Vec<extensions::LoadedExtension> = all_trackers
-            .iter()
-            .filter(|e| e.manifest.is_anime == Some(false))
-            .cloned()
-            .collect();
-        all_results = search_tracker_extensions(
-            fallback,
-            normalized_query.clone(),
-            media_type.clone(),
-            imdb_id.clone(),
-            season,
-            episode,
-        )
-        .await;
-    }
-
-    println!("Total results before deduplication: {}", all_results.len());
-
-    let mut seen_hashes = std::collections::HashSet::new();
-    all_results.retain(|result| {
-        if let Some(hash) = extract_info_hash(&result.magnet_link) {
-            seen_hashes.insert(hash)
-        } else {
-            true
-        }
-    });
-
-    println!("Total results after deduplication: {}", all_results.len());
-    Ok(all_results)
-}
-
-// Extract info hash from magnet link for deduplication
-fn extract_info_hash(magnet: &str) -> Option<String> {
-    // Strip the scheme so `xt=` matches even as the first parameter
-    // ("magnet:?xt=urn:btih:...").
-    let params = magnet.split_once('?').map(|(_, q)| q).unwrap_or(magnet);
-    params
-        .split('&')
-        .find(|part| part.starts_with("xt=urn:btih:"))
-        .and_then(|part| part.strip_prefix("xt=urn:btih:"))
-        .map(|hash| hash.to_lowercase())
-}
-
-#[tauri::command]
-async fn save_torrent_selection(
-    tracking: State<'_, TrackingManager>,
-    show_id: u32,
-    season: u32,
-    episode: u32,
-    magnet_link: String,
-    file_index: usize,
-) -> Result<(), String> {
-    tracking
-        .save_selection(show_id, season, episode, magnet_link, file_index)
-        .await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn save_multiple_torrent_selections(
-    tracking: State<'_, TrackingManager>,
-    show_id: u32,
-    selections: Vec<(u32, u32, String, usize)>,
-) -> Result<(), String> {
-    tracking
-        .save_multiple_selections(show_id, selections)
-        .await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn get_saved_selection(
-    tracking: State<'_, TrackingManager>,
-    #[allow(non_snake_case)] showId: u32,
-    season: u32,
-    episode: u32,
-) -> Result<Option<tracking::EpisodeTorrent>, String> {
-    Ok(tracking.get_selection(showId, season, episode).await)
-}
-
-#[tauri::command]
-async fn get_all_torrent_selections(
-    tracking: State<'_, TrackingManager>,
-    #[allow(non_snake_case)] showId: u32,
-) -> Result<Option<tracking::ShowHistory>, String> {
-    Ok(tracking.get_all_selections(showId).await)
-}
-
-#[tauri::command]
-async fn remove_saved_selection(
-    tracking: State<'_, TrackingManager>,
-    show_id: u32,
-    season: u32,
-    episode: u32,
-) -> Result<(), String> {
-    tracking.remove_selection(show_id, season, episode).await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn remove_torrent_all_assignments(
-    tracking: State<'_, TrackingManager>,
-    show_id: u32,
-    magnet_link: String,
-) -> Result<(), String> {
-    tracking.remove_all_by_magnet(show_id, magnet_link).await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn check_is_anime(
-    anime_list: State<'_, Arc<AnimeListManager>>,
-    tmdb_id: u32,
-) -> Result<bool, String> {
-    Ok(anime_list.is_anime(tmdb_id).await)
-}
-
-#[tauri::command]
-async fn refresh_anime_list(
-    anime_list: State<'_, Arc<AnimeListManager>>,
-) -> Result<(), String> {
-    anime_list.refresh().await
-}
-
-#[tauri::command]
-async fn get_http_port(manager: State<'_, Arc<TorrentManager>>) -> Result<u16, String> {
-    manager.get_http_port().await
-}
-
-#[tauri::command]
-async fn add_watch_history_item(
-    watch_history: State<'_, WatchHistoryManager>,
-    item: WatchHistoryItem,
-) -> Result<(), String> {
-    watch_history.add_item(item).await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn get_watch_history(
-    watch_history: State<'_, WatchHistoryManager>,
-) -> Result<Vec<WatchHistoryItem>, String> {
-    Ok(watch_history.get_history().await)
-}
-
-#[tauri::command]
-async fn remove_watch_history_item(
-    watch_history: State<'_, WatchHistoryManager>,
-    media_id: u32,
-    media_type: String,
-) -> Result<(), String> {
-    watch_history.remove_item(media_id, media_type).await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn clear_watch_history(
-    watch_history: State<'_, WatchHistoryManager>,
-) -> Result<(), String> {
-    watch_history.clear().await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn get_my_list(
-    my_list: State<'_, MyListManager>,
-) -> Result<Vec<serde_json::Value>, String> {
-    Ok(my_list.get_list().await)
-}
-
-#[tauri::command]
-async fn set_my_list(
-    my_list: State<'_, MyListManager>,
-    items: Vec<serde_json::Value>,
-) -> Result<(), String> {
-    my_list.set_list(items).await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn toggle_my_list_item(
-    my_list: State<'_, MyListManager>,
-    item: serde_json::Value,
-) -> Result<Vec<serde_json::Value>, String> {
-    Ok(my_list.toggle_item(item).await)
-}
-
-#[tauri::command]
-async fn get_watch_progress(
-    watch_progress: State<'_, WatchProgressManager>,
-) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
-    Ok(watch_progress.get_all().await)
-}
-
-#[tauri::command]
-async fn set_watch_progress(
-    watch_progress: State<'_, WatchProgressManager>,
-    progress: std::collections::HashMap<String, serde_json::Value>,
-) -> Result<(), String> {
-    watch_progress.set_all(progress).await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn update_watch_progress_entry(
-    watch_progress: State<'_, WatchProgressManager>,
-    key: String,
-    value: serde_json::Value,
-) -> Result<(), String> {
-    watch_progress.update_entry(key, value).await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn remove_watch_progress_entry(
-    watch_progress: State<'_, WatchProgressManager>,
-    key: String,
-) -> Result<(), String> {
-    watch_progress.remove_entry(key).await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn clear_watch_progress(
-    watch_progress: State<'_, WatchProgressManager>,
-) -> Result<(), String> {
-    watch_progress.clear().await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn save_track_preference(
-    track_prefs: State<'_, TrackPreferencesManager>,
-    magnet_link: String,
-    #[allow(non_snake_case)] audioTrackId: Option<i64>,
-    #[allow(non_snake_case)] subtitleTrackId: Option<i64>,
-    subtitle_language: Option<String>,
-    subtitle_offset: Option<f64>,
-) -> Result<(), String> {
-    track_prefs.save_preference(magnet_link, audioTrackId, subtitleTrackId, subtitle_language, subtitle_offset).await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn get_track_preference(
-    track_prefs: State<'_, TrackPreferencesManager>,
-    magnet_link: String,
-) -> Result<Option<track_preferences::TrackPreference>, String> {
-    Ok(track_prefs.get_preference(&magnet_link).await)
-}
-
-#[tauri::command]
-async fn save_settings(
-    settings_manager: State<'_, SettingsManager>,
-    settings: Settings,
-) -> Result<(), String> {
-    settings_manager.save(settings).await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn get_settings(
-    settings_manager: State<'_, SettingsManager>,
-) -> Result<Settings, String> {
-    Ok(settings_manager.get().await)
 }
 
 #[tauri::command]
@@ -769,26 +374,6 @@ fn open_external_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::extract_info_hash;
-
-    #[test]
-    fn extract_info_hash_handles_leading_scheme() {
-        // hash as the first magnet parameter (the common case)
-        assert_eq!(
-            extract_info_hash("magnet:?xt=urn:btih:ABCDEF123456&dn=Some%20Title&tr=udp%3A%2F%2Ffoo"),
-            Some("abcdef123456".to_string())
-        );
-        // hash not first
-        assert_eq!(
-            extract_info_hash("magnet:?dn=Some%20Title&xt=urn:btih:ABCDEF123456"),
-            Some("abcdef123456".to_string())
-        );
-        assert_eq!(extract_info_hash("magnet:?dn=No%20Hash"), None);
-    }
-}
-
 #[cfg(target_os = "linux")]
 fn disable_webkit_60fps_cap(webview: &webkit2gtk::WebView) {
     use std::ffi::{c_char, c_void, CStr};
@@ -893,50 +478,19 @@ fn main() {
                 std::fs::create_dir_all(&app_data_dir).expect("failed to create app data dir");
             }
 
-            let tracking_manager = TrackingManager::new(app_data_dir.clone());
-            app.manage(tracking_manager);
-
-            let watch_history_manager = WatchHistoryManager::new(app_data_dir.clone());
-            app.manage(watch_history_manager);
-
-            let my_list_manager = MyListManager::new(app_data_dir.clone());
-            app.manage(my_list_manager);
-
-            let watch_progress_manager = WatchProgressManager::new(app_data_dir.clone());
-            app.manage(watch_progress_manager);
-
-            let anime_list_manager = Arc::new(AnimeListManager::new(app_data_dir.clone()));
-            app.manage(anime_list_manager.clone());
-            let anime_refresh = anime_list_manager.clone();
-            tauri::async_runtime::spawn(async move {
-                anime_refresh.ensure_fresh().await;
-            });
-
-            let track_preferences_manager = TrackPreferencesManager::new(app_data_dir.clone());
-            app.manage(track_preferences_manager);
-
-            let settings_manager = SettingsManager::new(app_data_dir.clone());
-            app.manage(settings_manager);
-
-            let extension_manager = Arc::new(ExtensionManager::new(app_data_dir.clone()));
-            app.manage(extension_manager);
-
             let logger = Logger::new(&app_handle)
                 .expect("failed to create logger");
             app.manage(logger);
 
-            let cache_metadata_manager = CacheMetadataManager::new(&app_handle)
-                .expect("failed to create cache metadata manager");
-            app.manage(std::sync::Mutex::new(cache_metadata_manager));
+            let core = tauri::async_runtime::block_on(Core::new(app_data_dir.clone()))
+                .expect("failed to initialize magnolia core");
+            let core = Arc::new(core);
+            app.manage(core.clone());
 
-            let torrent_dir = app_data_dir.join("torrents");
-            let torrent_manager = tauri::async_runtime::block_on(async {
-                TorrentManager::new(torrent_dir)
-                    .await
-                    .expect("Failed to initialize torrent manager")
+            let anime_list = core.anime_list.clone();
+            tauri::async_runtime::spawn(async move {
+                anime_list.ensure_fresh().await;
             });
-            let torrent_manager_arc = Arc::new(torrent_manager);
-            app.manage(torrent_manager_arc.clone());
 
             let main_window = app.get_webview_window("main").unwrap();
 
@@ -1096,7 +650,7 @@ fn main() {
             }
 
             // Cleanup on app close
-            let manager_for_cleanup = torrent_manager_arc.clone();
+            let manager_for_cleanup = core.torrents.clone();
             main_window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
                     tauri::async_runtime::block_on(async {
@@ -1110,72 +664,82 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            torrent::add_torrent,
-            torrent::get_torrent_info,
-            torrent::list_torrents,
-            torrent::prepare_stream,
-            torrent::get_stream_status,
-            torrent::get_torrent_piece_ranges,
-            torrent::stop_stream,
-            torrent::wipe_all_torrent_files,
-            torrent::pause_torrent,
-            torrent::resume_torrent,
-            torrent::remove_torrent,
-            torrent::get_download_dir,
-            search_nyaa_filtered,
-            save_torrent_selection,
-            save_multiple_torrent_selections,
-            get_saved_selection,
-            get_all_torrent_selections,
-            remove_saved_selection,
-            remove_torrent_all_assignments,
-            check_is_anime,
-            refresh_anime_list,
-            get_http_port,
-            add_watch_history_item,
-            get_watch_history,
-            remove_watch_history_item,
-            clear_watch_history,
-            get_my_list,
-            set_my_list,
-            toggle_my_list_item,
-            get_watch_progress,
-            set_watch_progress,
-            update_watch_progress_entry,
-            remove_watch_progress_entry,
-            clear_watch_progress,
-            save_track_preference,
-            get_track_preference,
-            save_settings,
-            get_settings,
+            commands::torrents::add_torrent,
+            commands::torrents::get_torrent_info,
+            commands::torrents::list_torrents,
+            commands::torrents::prepare_stream,
+            commands::torrents::get_stream_status,
+            commands::torrents::get_torrent_piece_ranges,
+            commands::torrents::stop_stream,
+            commands::torrents::wipe_all_torrent_files,
+            commands::torrents::pause_torrent,
+            commands::torrents::resume_torrent,
+            commands::torrents::remove_torrent,
+            commands::torrents::get_download_dir,
+            commands::torrents::get_http_port,
+            commands::torrents::save_torrent_selection,
+            commands::torrents::save_multiple_torrent_selections,
+            commands::torrents::get_saved_selection,
+            commands::torrents::get_all_torrent_selections,
+            commands::torrents::remove_saved_selection,
+            commands::torrents::remove_torrent_all_assignments,
+            commands::torrents::get_streaming_client,
+            commands::torrents::get_torrent_files,
+            commands::torrents::auto_assign_torrent_files,
+            commands::torrents::prepare_playback,
+            commands::torrents::prepare_saved_playback,
+            commands::torrents::plan_quick_play,
+            commands::search::search_torrents,
+            commands::search::get_tracker_preference,
+            commands::search::set_tracker_preference,
+            commands::search::parse_magnet_link,
+            commands::search::parse_release_title,
+            commands::library::record_watch_progress,
+            commands::library::get_watch_history,
+            commands::library::remove_watch_history_item,
+            commands::library::clear_watch_history,
+            commands::library::get_watch_progress,
+            commands::library::set_watch_progress,
+            commands::library::remove_watch_progress_entry,
+            commands::library::clear_watch_progress,
+            commands::library::get_resume_target,
+            commands::library::get_my_list,
+            commands::library::set_my_list,
+            commands::library::toggle_my_list_item,
+            commands::library::save_track_preference,
+            commands::library::get_track_preference,
+            commands::library::save_settings,
+            commands::library::get_settings,
+            commands::library::check_is_anime,
+            commands::library::refresh_anime_list,
+            commands::library::save_cache_metadata,
+            commands::library::get_cache_metadata,
+            commands::library::get_all_cache_metadata,
+            commands::subtitles::fetch_subtitles,
+            commands::subtitles::download_subtitle,
+            commands::subtitles::import_subtitle_pack,
+            commands::subtitles::get_subtitle_pack_for_episode,
+            commands::subtitles::get_subtitle_pack_coverage,
+            commands::subtitles::remove_subtitle_pack_episode,
+            commands::subtitles::clear_subtitle_pack,
+            commands::extensions::list_extensions,
+            commands::extensions::install_extension_from_path,
+            commands::extensions::install_extension_from_url,
+            commands::extensions::remove_extension,
+            commands::extensions::set_extension_enabled,
+            commands::extensions::set_extension_field_values,
+            commands::extensions::fetch_extension_subtitles,
+            commands::extensions::list_debrid_files,
+            commands::extensions::resolve_debrid_stream,
             check_external_player,
             open_in_external_player,
             logger::log_message,
-            cache_metadata::save_cache_metadata,
-            cache_metadata::get_cache_metadata,
-            cache_metadata::get_all_cache_metadata,
             download_update,
             install_update,
             updater::get_platform_info,
             updater::enable_touch_id_sudo,
             updater::is_touch_id_sudo_enabled,
             open_external_url,
-            subtitles::fetch_subtitles,
-            subtitles::download_subtitle,
-            extensions::list_extensions,
-            extensions::install_extension_from_path,
-            extensions::install_extension_from_url,
-            extensions::remove_extension,
-            extensions::set_extension_enabled,
-            extensions::set_extension_field_values,
-            extensions::fetch_extension_subtitles,
-            extensions::list_debrid_files,
-            extensions::resolve_debrid_stream,
-            subtitle_packs::import_subtitle_pack,
-            subtitle_packs::get_subtitle_pack_for_episode,
-            subtitle_packs::get_subtitle_pack_coverage,
-            subtitle_packs::remove_subtitle_pack_episode,
-            subtitle_packs::clear_subtitle_pack,
             load_file,
             cycle_pause,
             seek_video,

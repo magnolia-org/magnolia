@@ -2,6 +2,9 @@ const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p';
 const TOKEN_ENDPOINT = 'https://magnoliatmdb.wyziemagnolia.workers.dev/tmdb-proxy';
 
+// every request asks for english titles and overviews, falling back to the original when tmdb has none
+const LANGUAGE = 'en-US';
+
 let cachedToken = null;
 
 async function getBearerToken() {
@@ -31,6 +34,22 @@ async function getHeaders() {
   };
 }
 
+export async function tmdbGet(path, params = {}) {
+  const query = new URLSearchParams({ language: LANGUAGE });
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+  }
+  const url = `${TMDB_BASE_URL}/${path}?${query}`;
+
+  let response = await fetch(url, { headers: await getHeaders() });
+  if (response.status === 401) {
+    // the proxy rotates tokens, so drop the cached one and retry once
+    cachedToken = null;
+    response = await fetch(url, { headers: await getHeaders() });
+  }
+  return response.json();
+}
+
 export function getImageUrl(path, size = 'w500') {
   if (!path) return null;
   return `${TMDB_IMAGE_BASE_URL}/${size}${path}`;
@@ -43,262 +62,128 @@ export function getCorsImageUrl(path, size = 'w500') {
   return url ? `${url}?cors=1` : null;
 }
 
-export async function getConfiguration() {
-  const headers = await getHeaders();
-  const response = await fetch(`${TMDB_BASE_URL}/configuration`, { headers });
-  return response.json();
+export function getConfiguration() {
+  return tmdbGet('configuration');
 }
 
-export async function getTrending(mediaType = 'all', timeWindow = 'day', page = 1) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/trending/${mediaType}/${timeWindow}?page=${page}`,
-    { headers }
-  );
-  return response.json();
+export function getTrending(mediaType = 'all', timeWindow = 'day', page = 1) {
+  return tmdbGet(`trending/${mediaType}/${timeWindow}`, { page });
 }
 
-export async function getPopularMovies(page = 1) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/movie/popular?page=${page}`,
-    { headers }
-  );
-  return response.json();
+export function getPopularMovies(page = 1) {
+  return tmdbGet('movie/popular', { page });
 }
 
-export async function getPopularTV(page = 1) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/tv/popular?page=${page}`,
-    { headers }
-  );
-  return response.json();
+export function getPopularTV(page = 1) {
+  return tmdbGet('tv/popular', { page });
 }
 
-export async function getTopRatedMovies(page = 1) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/movie/top_rated?page=${page}`,
-    { headers }
-  );
-  return response.json();
+export function getTopRatedMovies(page = 1) {
+  return tmdbGet('movie/top_rated', { page });
 }
 
-export async function getTopRatedTV(page = 1) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/tv/top_rated?page=${page}`,
-    { headers }
-  );
-  return response.json();
+export function getTopRatedTV(page = 1) {
+  return tmdbGet('tv/top_rated', { page });
 }
 
-export async function getNowPlaying(page = 1) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/movie/now_playing?page=${page}`,
-    { headers }
-  );
-  return response.json();
+export function getNowPlaying(page = 1) {
+  return tmdbGet('movie/now_playing', { page, region: 'US' });
 }
 
-export async function discoverMovies(params = {}) {
-  const headers = await getHeaders();
-  const queryString = new URLSearchParams(params).toString();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/discover/movie?${queryString}`,
-    { headers }
-  );
-  return response.json();
+export function discoverMovies(params = {}) {
+  return tmdbGet('discover/movie', params);
 }
 
-export async function discoverTV(params = {}) {
-  const headers = await getHeaders();
-  const queryString = new URLSearchParams(params).toString();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/discover/tv?${queryString}`,
-    { headers }
-  );
-  return response.json();
+export function discoverTV(params = {}) {
+  return tmdbGet('discover/tv', params);
 }
 
-export async function getMovieDetails(movieId) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/movie/${movieId}?append_to_response=credits,videos,images,similar`,
-    { headers }
-  );
-  return response.json();
+export function getMovieDetails(movieId) {
+  return tmdbGet(`movie/${movieId}`, {
+    append_to_response: 'credits,videos,images,similar,keywords,recommendations',
+    include_image_language: 'en,null',
+  });
 }
 
-export async function getTVDetails(tvId) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/tv/${tvId}?append_to_response=credits,videos,images,similar,aggregate_credits`,
-    { headers }
-  );
-  return response.json();
+export function getTVDetails(tvId) {
+  return tmdbGet(`tv/${tvId}`, {
+    append_to_response: 'credits,videos,images,similar,aggregate_credits,keywords,recommendations',
+    include_image_language: 'en,null',
+  });
 }
 
-export async function getSeasonDetails(tvId, seasonNumber) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/tv/${tvId}/season/${seasonNumber}`,
-    { headers }
-  );
-  return response.json();
+export function getSeasonDetails(tvId, seasonNumber) {
+  return tmdbGet(`tv/${tvId}/season/${seasonNumber}`);
 }
 
-export async function getEpisodeDetails(tvId, seasonNumber, episodeNumber) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/tv/${tvId}/season/${seasonNumber}/episode/${episodeNumber}`,
-    { headers }
-  );
-  return response.json();
+export function getEpisodeDetails(tvId, seasonNumber, episodeNumber) {
+  return tmdbGet(`tv/${tvId}/season/${seasonNumber}/episode/${episodeNumber}`);
 }
 
-export async function searchMulti(query, page = 1) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/search/multi?query=${encodeURIComponent(query)}&page=${page}`,
-    { headers }
-  );
-  return response.json();
+export function searchMulti(query, page = 1) {
+  return tmdbGet('search/multi', { query, page });
 }
 
-export async function searchMovies(query, page = 1) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/search/movie?query=${encodeURIComponent(query)}&page=${page}`,
-    { headers }
-  );
-  return response.json();
+export function searchMovies(query, page = 1) {
+  return tmdbGet('search/movie', { query, page });
 }
 
-export async function searchTV(query, page = 1) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/search/tv?query=${encodeURIComponent(query)}&page=${page}`,
-    { headers }
-  );
-  return response.json();
+export function searchTV(query, page = 1) {
+  return tmdbGet('search/tv', { query, page });
 }
 
-export async function getMovieGenres() {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/genre/movie/list`,
-    { headers }
-  );
-  return response.json();
+export function getMovieGenres() {
+  return tmdbGet('genre/movie/list');
 }
 
-export async function getTVGenres() {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/genre/tv/list`,
-    { headers }
-  );
-  return response.json();
+export function getTVGenres() {
+  return tmdbGet('genre/tv/list');
 }
 
-export async function getMovieCredits(movieId) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/movie/${movieId}/credits`,
-    { headers }
-  );
-  return response.json();
+export function getMovieCredits(movieId) {
+  return tmdbGet(`movie/${movieId}/credits`);
 }
 
-export async function getTVCredits(tvId) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/tv/${tvId}/credits`,
-    { headers }
-  );
-  return response.json();
+export function getTVCredits(tvId) {
+  return tmdbGet(`tv/${tvId}/credits`);
 }
 
-export async function getMovieRecommendations(movieId, page = 1) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/movie/${movieId}/recommendations?page=${page}`,
-    { headers }
-  );
-  return response.json();
+export function getMovieRecommendations(movieId, page = 1) {
+  return tmdbGet(`movie/${movieId}/recommendations`, { page });
 }
 
-export async function getTVRecommendations(tvId, page = 1) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/tv/${tvId}/recommendations?page=${page}`,
-    { headers }
-  );
-  return response.json();
+export function getTVRecommendations(tvId, page = 1) {
+  return tmdbGet(`tv/${tvId}/recommendations`, { page });
 }
 
-export async function getSimilarMovies(movieId, page = 1) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/movie/${movieId}/similar?page=${page}`,
-    { headers }
-  );
-  return response.json();
+export function getSimilarMovies(movieId, page = 1) {
+  return tmdbGet(`movie/${movieId}/similar`, { page });
 }
 
-export async function getSimilarTV(tvId, page = 1) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/tv/${tvId}/similar?page=${page}`,
-    { headers }
-  );
-  return response.json();
+export function getSimilarTV(tvId, page = 1) {
+  return tmdbGet(`tv/${tvId}/similar`, { page });
 }
 
-export async function getMovieExternalIds(movieId) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/movie/${movieId}/external_ids`,
-    { headers }
-  );
-  return response.json();
+export function getMovieExternalIds(movieId) {
+  return tmdbGet(`movie/${movieId}/external_ids`);
 }
 
-export async function getTVExternalIds(tvId) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/tv/${tvId}/external_ids`,
-    { headers }
-  );
-  return response.json();
+export function getTVExternalIds(tvId) {
+  return tmdbGet(`tv/${tvId}/external_ids`);
 }
 
-export async function getMovieKeywords(movieId) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/movie/${movieId}/keywords`,
-    { headers }
-  );
-  return response.json();
+export function getMovieKeywords(movieId) {
+  return tmdbGet(`movie/${movieId}/keywords`);
 }
 
-export async function getTVKeywords(tvId) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/tv/${tvId}/keywords`,
-    { headers }
-  );
-  return response.json();
+export function getTVKeywords(tvId) {
+  return tmdbGet(`tv/${tvId}/keywords`);
 }
 
-export async function getEpisodeExternalIds(tvId, seasonNumber, episodeNumber) {
-  const headers = await getHeaders();
-  const response = await fetch(
-    `${TMDB_BASE_URL}/tv/${tvId}/season/${seasonNumber}/episode/${episodeNumber}/external_ids`,
-    { headers }
-  );
-  return response.json();
+export function getEpisodeExternalIds(tvId, seasonNumber, episodeNumber) {
+  return tmdbGet(`tv/${tvId}/season/${seasonNumber}/episode/${episodeNumber}/external_ids`);
+}
+
+export function getPersonCredits(personId) {
+  return tmdbGet(`person/${personId}/combined_credits`);
 }

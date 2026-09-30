@@ -4,6 +4,7 @@ use super::ffi::{
 };
 use crate::AppState;
 use log::{debug, error, info, trace, warn};
+use magnolia_core::watch_state::{is_ending_chapter, is_skippable_chapter, CompletionTracker};
 use serde::Serialize;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_int;
@@ -280,8 +281,14 @@ fn emit_end_file_and_progress(
     last_duration: f64,
     last_buffered_pos: &mut f64,
     last_video_bitrate: &mut f64,
+    completion: &mut CompletionTracker,
 ) {
     let reason_label = end_file_reason_label(reason);
+    // a stop is the player closing or replacing the file, which says nothing about whether it was watched
+    let ended_on_its_own = reason == 0 || reason == 4;
+    if ended_on_its_own && completion.on_end(*last_time_pos, last_duration) {
+        emit_event(app_handle, "mpv-playback-completed", ());
+    }
     let ended_time_pos = if reason == 0 {
         if last_duration.is_finite() && last_duration > 0.0 {
             last_duration
@@ -441,6 +448,7 @@ pub(super) fn mpv_event_loop(
     let mut seek_from_buffered_pos: f64 = 0.0;
     let mut last_seekable_ranges: Vec<(f64, f64)> = Vec::new();
     let mut last_emitted_seekable_ranges: Vec<(f64, f64)> = Vec::new();
+    let mut completion = CompletionTracker::default();
     let media_title_name = CString::new("media-title").expect("Property name contains null byte");
     let hwdec_current_name =
         CString::new("hwdec-current").expect("Property name contains null byte");
@@ -542,6 +550,7 @@ pub(super) fn mpv_event_loop(
                     #[cfg(debug_assertions)]
                     debug!("MPV Event Loop: MPV_EVENT_START_FILE received.");
                     end_file_emitted_for_current_item = false;
+                    completion.reset();
                     eof_reached.store(false, Ordering::SeqCst);
                     freeze_buffered_pos_until_cache_refresh = false;
                     pending_seek_cache_range_check = false;
@@ -615,6 +624,9 @@ pub(super) fn mpv_event_loop(
                                     && !value_ptr.is_null()
                                 {
                                     last_time_pos = *(value_ptr as *mut f64);
+                                    if completion.on_position(last_time_pos, last_duration) {
+                                        emit_event(&app_handle, "mpv-playback-completed", ());
+                                    }
                                     if freeze_buffered_pos_until_cache_refresh {
                                         let safe_time_pos =
                                             sanitize_non_negative_f64(last_time_pos);
@@ -753,6 +765,7 @@ pub(super) fn mpv_event_loop(
                                                 last_duration,
                                                 &mut last_buffered_pos,
                                                 &mut last_video_bitrate,
+                                                &mut completion,
                                             );
                                             end_file_emitted_for_current_item = true;
                                             should_emit_progress = false;
@@ -928,7 +941,20 @@ pub(super) fn mpv_event_loop(
                                     && !value_ptr.is_null()
                                 {
                                     let node = value_ptr as *mut mpv_node;
-                                    let json_chapters = parse_node(node);
+                                    let mut json_chapters = parse_node(node);
+                                    let mut chapter_times = Vec::new();
+                                    if let Some(list) = json_chapters.as_array_mut() {
+                                        for chapter in list.iter_mut() {
+                                            let title = chapter["title"].as_str().unwrap_or("").to_string();
+                                            let time = chapter["time"].as_f64().unwrap_or(0.0);
+                                            if let Some(obj) = chapter.as_object_mut() {
+                                                obj.insert("is_ending".into(), is_ending_chapter(&title).into());
+                                                obj.insert("is_skippable".into(), is_skippable_chapter(&title).into());
+                                            }
+                                            chapter_times.push((time, title));
+                                        }
+                                    }
+                                    completion.set_chapters(chapter_times);
                                     emit_event(&app_handle, "mpv-chapters-update", json_chapters);
                                 }
                             }
@@ -970,6 +996,7 @@ pub(super) fn mpv_event_loop(
                             last_duration,
                             &mut last_buffered_pos,
                             &mut last_video_bitrate,
+                            &mut completion,
                         );
                     }
                     end_file_emitted_for_current_item = reason == 0;

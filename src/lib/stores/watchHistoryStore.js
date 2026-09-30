@@ -1,6 +1,9 @@
 import { writable } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
+// the backend adds titles while recording progress and returns them already
+// sorted for display, each flagged `finished` once the whole title is watched
 async function loadFromDisk() {
   try {
     const history = await invoke('get_watch_history');
@@ -25,6 +28,7 @@ async function loadFromDisk() {
       number_of_seasons: item.number_of_seasons ?? null,
       last_season_number: item.last_season_number ?? null,
       last_season_episode_count: item.last_season_episode_count ?? null,
+      finished: !!item.finished,
     }));
   } catch (error) {
     console.error('Error loading watch history from disk:', error);
@@ -33,47 +37,23 @@ async function loadFromDisk() {
 }
 
 function createWatchHistoryStore() {
-  const { subscribe, set, update } = writable([]);
+  const { subscribe, set } = writable([]);
 
-  // Load initial data from disk
-  loadFromDisk().then(history => set(history));
+  async function reload() {
+    set(await loadFromDisk());
+  }
+
+  reload();
+  listen('watch-state-changed', reload).catch(error => {
+    console.error('Failed to listen for watch state changes:', error);
+  });
 
   return {
     subscribe,
 
-    addItem: async (item, episodeData = null) => {
-      const historyItem = {
-        id: item.id,
-        media_type: item.media_type,
-        title: item.title || item.name || 'Unknown',
-        poster_path: item.poster_path || null,
-        backdrop_path: item.backdrop_path || null,
-        release_date: item.release_date || item.first_air_date || null,
-        vote_average: item.vote_average || null,
-        watched_at: Date.now(),
-        current_season: episodeData?.season || item.currentSeason || null,
-        current_episode: episodeData?.episode || item.currentEpisode || null,
-        current_timestamp: episodeData?.timestamp || item.currentTimestamp || null,
-        number_of_seasons: item.number_of_seasons ?? null,
-        last_season_number: item.last_season_number ?? null,
-        last_season_episode_count: item.last_season_episode_count ?? null,
-      };
-
-      try {
-        await invoke('add_watch_history_item', { item: historyItem });
-        const updatedHistory = await loadFromDisk();
-        set(updatedHistory);
-        console.log('📺 Added to watch history:', historyItem.title, episodeData);
-      } catch (error) {
-        console.error('Failed to add watch history item:', error);
-      }
-    },
-
     removeItem: async (mediaId, mediaType) => {
       try {
         await invoke('remove_watch_history_item', { mediaId, mediaType });
-        const updatedHistory = await loadFromDisk();
-        set(updatedHistory);
         console.log('🗑️ Removed from watch history:', mediaId);
       } catch (error) {
         console.error('Failed to remove watch history item:', error);
@@ -83,43 +63,14 @@ function createWatchHistoryStore() {
     clear: async () => {
       try {
         await invoke('clear_watch_history');
-        set([]);
         console.log('🗑️ Watch history cleared');
       } catch (error) {
         console.error('Failed to clear watch history:', error);
       }
     },
-    
-    reload: async () => {
-      const history = await loadFromDisk();
-      set(history);
-    }
+
+    reload,
   };
 }
 
 export const watchHistoryStore = createWatchHistoryStore();
-
-// Tracker preference utilities (keep using localStorage for these)
-export function getTrackerPreference() {
-  if (typeof window !== 'undefined') {
-    try {
-      const stored = localStorage.getItem('trackerPreference');
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        return Array.isArray(parsed) ? parsed : [];
-      }
-    } catch (e) {
-      // Migration: if it's an old string value, clear it
-      localStorage.removeItem('trackerPreference');
-    }
-  }
-  return [];
-}
-
-export function setTrackerPreference(trackers) {
-  if (typeof window !== 'undefined') {
-    const trackersArray = Array.isArray(trackers) ? trackers : [];
-    localStorage.setItem('trackerPreference', JSON.stringify(trackersArray));
-    console.log('tracker preference set to:', trackersArray);
-  }
-}

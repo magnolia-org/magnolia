@@ -6,12 +6,6 @@
     getMovieDetails,
     getTVDetails,
     getSeasonDetails,
-    getMovieCredits,
-    getTVCredits,
-    getMovieKeywords,
-    getTVKeywords,
-    getMovieRecommendations,
-    getTVRecommendations,
     getImageUrl,
     getCorsImageUrl,
     getTVExternalIds,
@@ -19,14 +13,14 @@
   } from "./tmdb.js";
   import { myListStore } from "./stores/listStore.js";
   import { watchProgressStore } from "./stores/watchProgressStore.js";
-  import { isEntryWatched } from "./utils/watchState.js";
-  import { getTrackerPreference, setTrackerPreference } from "./stores/watchHistoryStore.js";
-  import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
   import TorrentSelector from "./TorrentSelector.svelte";
   import FileSelector from "./FileSelector.svelte";
   import ErrorModal from "./ErrorModal.svelte";
   import TorrentManager from "./TorrentManager.svelte";
   import SubtitlePackManager from "./SubtitlePackManager.svelte";
+  import Scroller from "./Scroller.svelte";
+  import MediaCarousel from "./MediaCarousel.svelte";
 
   import { createEventDispatcher } from "svelte";
 
@@ -44,6 +38,7 @@
   let allSeasonsData = {};
   let selectedEpisode = null;
   let credits = null;
+  let detailsToken = 0;
   let recommendations = [];
   let keywords = [];
   let activeTab = "";
@@ -70,7 +65,9 @@
 
   let showErrorModal = false;
   let errorMessage = "";
-  let errorTitle = "Error";
+  let errorTitle = "";
+  let errorDetails = "";
+  let errorAction = null;
 
   let showTorrentManager = false;
   let showSubtitlePackManager = false;
@@ -80,44 +77,17 @@
   let isPlayLoading = false;
   let detectedIsAnime = false;
 
-  // Resolve the active streaming client. Returns the debrid extension when one
-  // is selected, or null for the built-in torrent pipeline.
-  async function getDebridClient() {
-    try {
-      const settings = await invoke("get_settings");
-      const clientId = settings.streaming_client || "builtin";
-      if (clientId === "builtin") return null;
-      const exts = await invoke("list_extensions");
-      return (
-        exts.find(
-          (e) => e.id === clientId && e.manifest.type === "debrid" && e.enabled,
-        ) || null
-      );
-    } catch (e) {
-      console.error("failed to resolve streaming client:", e);
-      return null;
-    }
-  }
-
-  // Fetch the file list for a magnet so the selection UI/auto-matcher can run.
-  // With a debrid client active the list comes from the extension (no local
-  // torrent); otherwise librqbit resolves the metadata. Returns
-  // { handleId, info } where info.files is shaped { index, name, size, path }.
+  // fetch the video files of a magnet so the selection ui/auto-matcher can run.
+  // the backend asks the debrid client when one is active (no local torrent,
+  // handleId is null), otherwise librqbit resolves the metadata.
   async function fetchTorrentMetadata(magnetLink) {
-    const debrid = await getDebridClient();
-    if (debrid) {
-      const files = await invoke("list_debrid_files", {
-        extId: debrid.id,
-        magnet: magnetLink,
-        season: pendingPlayRequest?.season ?? null,
-        episode: pendingPlayRequest?.episode ?? null,
-        mediaType: media.media_type ?? null,
-      });
-      return { handleId: null, info: { files } };
-    }
-    const handleId = await invoke("add_torrent", { magnetOrUrl: magnetLink });
-    const info = await invoke("get_torrent_info", { handleId });
-    return { handleId, info };
+    const result = await invoke("get_torrent_files", {
+      magnetLink,
+      season: pendingPlayRequest?.season ?? null,
+      episode: pendingPlayRequest?.episode ?? null,
+      mediaType: media.media_type ?? null,
+    });
+    return { handleId: result.handle_id, info: { files: result.files } };
   }
 
   $: {
@@ -132,21 +102,15 @@
       (item) => item.id === media.id && item.media_type === media.media_type,
     );
 
-  const isAnime = () => {
-    if (!details) return false;
-    // Authoritative check: TV series in the anime list
-    if (detectedIsAnime) return true;
-    // Fallback: Animation genre (genre ID 16)
-    return details.genres?.some(genre => genre.id === 16) ?? false;
-  };
-
-  async function checkIsAnime() {
-    if (!media || media.media_type !== 'tv') {
-      detectedIsAnime = false;
-      return;
-    }
+  // the backend checks the anime list and falls back to the animation genre
+  async function checkIsAnime(forDetails) {
     try {
-      detectedIsAnime = await invoke('check_is_anime', { tmdbId: media.id });
+      const result = await invoke('check_is_anime', {
+        tmdbId: forDetails.id,
+        mediaType: media.media_type,
+        genreIds: (forDetails.genres || []).map(genre => genre.id),
+      });
+      if (details === forDetails) detectedIsAnime = result;
     } catch (e) {
       detectedIsAnime = false;
     }
@@ -193,7 +157,6 @@
     selectedTorrentName = ""; // Reset torrent name for new media
     isPlayLoading = false;
     detectedIsAnime = false;
-    checkIsAnime();
   }
 
   $: if (details) {
@@ -216,6 +179,7 @@
     }
 
     loadRecommendations();
+    checkIsAnime(details);
   }
 
   $: if (selectedSeason && details) {
@@ -257,30 +221,91 @@
   });
 
   async function loadDetails() {
+    const token = ++detailsToken;
     loading = true;
     details = null;
+    credits = null;
     keywords = [];
     try {
-      if (media.media_type === "movie") {
-        details = await getMovieDetails(media.id);
-        credits = await getMovieCredits(media.id);
-        const keywordResponse = await getMovieKeywords(media.id);
-        keywords = keywordResponse?.keywords || [];
-      } else {
-        details = await getTVDetails(media.id);
-        credits = await getTVCredits(media.id);
-        const keywordResponse = await getTVKeywords(media.id);
-        keywords = keywordResponse?.results || [];
-      }
+      // credits, keywords and recommendations ride along on the details request
+      const loaded = media.media_type === "movie"
+        ? await getMovieDetails(media.id)
+        : await getTVDetails(media.id);
+      if (token !== detailsToken) return;
+
+      credits = normalizeCredits(loaded);
+      keywords = loaded?.keywords?.keywords || loaded?.keywords?.results || [];
+      details = loaded;
 
       if (details && details.backdrop_path) {
         await extractColors(getCorsImageUrl(details.backdrop_path, "w300"));
       }
     } catch (err) {
       console.error("Error loading details:", err);
+      if (token !== detailsToken) return;
       details = null;
     }
     loading = false;
+  }
+
+  // crew is shown by tier, then by how many episodes they worked on, each person once with all their jobs
+  const CREW_TIERS = [
+    ["Creator"],
+    ["Director", "Screenplay", "Writer", "Teleplay", "Story", "Novel", "Characters"],
+    ["Original Music Composer", "Music", "Director of Photography"],
+    ["Producer", "Executive Producer", "Editor"],
+  ];
+
+  function jobRank(job) {
+    const tier = CREW_TIERS.findIndex((jobs) => jobs.includes(job));
+    return tier < 0 ? CREW_TIERS.length : tier;
+  }
+
+  function normalizeCredits(data) {
+    const source = data?.aggregate_credits || data?.credits;
+    if (!source) return null;
+
+    const cast = (source.cast || []).slice(0, 30).map((person) => ({
+      ...person,
+      character: person.roles
+        ? person.roles.map((role) => role.character).filter(Boolean).slice(0, 2).join(" / ")
+        : person.character,
+      episode_count: person.total_episode_count ?? person.episode_count,
+    }));
+
+    const crewById = new Map();
+    for (const person of source.crew || []) {
+      const jobs = person.jobs ? person.jobs.map((job) => job.job) : [person.job];
+      const existing = crewById.get(person.id);
+      if (existing) {
+        existing.jobs = [...new Set([...existing.jobs, ...jobs])];
+      } else {
+        crewById.set(person.id, { ...person, jobs, episode_count: person.total_episode_count ?? person.episode_count });
+      }
+    }
+    for (const creator of data?.created_by || []) {
+      const existing = crewById.get(creator.id);
+      if (existing) existing.jobs = ["Creator", ...existing.jobs.filter((job) => job !== "Creator")];
+      else crewById.set(creator.id, { ...creator, jobs: ["Creator"] });
+    }
+
+    const crew = [...crewById.values()]
+      .map((person) => ({ ...person, jobs: [...person.jobs].sort((a, b) => jobRank(a) - jobRank(b)) }))
+      .sort((a, b) =>
+        jobRank(a.jobs[0]) - jobRank(b.jobs[0]) ||
+        (b.episode_count || 0) - (a.episode_count || 0) ||
+        (b.popularity || 0) - (a.popularity || 0))
+      .slice(0, 24);
+
+    return { cast, crew };
+  }
+
+  function openPerson(person) {
+    window.dispatchEvent(
+      new CustomEvent("viewAll", {
+        detail: { title: person.name, type: "all", category: "person", filterId: person.id },
+      }),
+    );
   }
 
   function openTagView(tag, tagType) {
@@ -330,23 +355,14 @@
     }
   }
 
-  async function loadRecommendations() {
-    try {
-      let response;
-      if (media.media_type === "movie") {
-        response = await getMovieRecommendations(media.id);
-      } else {
-        response = await getTVRecommendations(media.id);
-      }
-      recommendations = (response?.results?.slice(0, 10) || []).map((rec) => {
-        if (!rec.media_type) {
-          rec.media_type = media.media_type;
-        }
-        return rec;
-      });
-    } catch (err) {
-      console.error("Error loading recommendations:", err);
-    }
+  // tmdb's recommendations are usually on point; similar titles only fill in when there are none
+  function loadRecommendations() {
+    const usable = (list) =>
+      (list || []).filter((rec) => rec.poster_path && (rec.vote_count || 0) >= 10);
+    const picks = usable(details?.recommendations?.results);
+    recommendations = (picks.length > 0 ? picks : usable(details?.similar?.results))
+      .slice(0, 20)
+      .map((rec) => ({ ...rec, media_type: rec.media_type || media.media_type }));
   }
 
   async function extractColors(imageUrl) {
@@ -501,72 +517,69 @@
   import { formatTime } from "./utils/timeUtils.js";
   import { scrollHoverGuard } from "./utils/scrollHoverGuard.js";
 
-  function showError(message, title = "Error") {
+  // action is an optional { label, icon, run } offered next to dismiss
+  function showError(message, { title = "Something went wrong", error = null, action = null } = {}) {
     errorMessage = message;
     errorTitle = title;
+    errorDetails = formatErrorDetails(error);
+    errorAction = action;
     showErrorModal = true;
   }
 
-  // Get resume info for the play button
-  function getResumeInfo(progress) {
-    if (!details || !progress) return null;
-
-    const isMovie = media.media_type === 'movie' || !!details.title;
-
-    if (isMovie) {
-      // For movies, show timestamp if we have progress
-      if (progress.currentTimestamp && progress.currentTimestamp > 60) {
-        if (isEntryWatched(progress)) return null; // Don't show resume if finished
-
-        return {
-          label: `Resume from ${formatTime(progress.currentTimestamp)}`,
-          season: null,
-          episode: null,
-          timestamp: progress.currentTimestamp
-        };
-      }
-    } else {
-      // For TV shows, show last episode watched OR next episode if finished
-      if (progress.currentSeason && progress.currentEpisode) {
-        let season = progress.currentSeason;
-        let episode = progress.currentEpisode;
-        let timestamp = progress.currentTimestamp || 0;
-        let label = `S${season}E${episode}`;
-        
-        const currentSeasonInfo = details.seasons?.find(s => s.season_number === season);
-        // "next episode" from the player can point one past the end of a season
-        const pastSeasonEnd = currentSeasonInfo && episode > currentSeasonInfo.episode_count;
-
-        if (currentSeasonInfo && (isEntryWatched(progress) || pastSeasonEnd)) {
-            if (episode < currentSeasonInfo.episode_count) {
-                episode++;
-            } else {
-                const nextSeason = details.seasons.find(s => s.season_number === season + 1);
-                // nothing left to resume once the last episode is done
-                if (!nextSeason) return null;
-                season++;
-                episode = 1;
-            }
-            timestamp = 0;
-            label = `S${season}E${episode}`;
-        }
-        
-        const hasTimestamp = timestamp > 60;
-        return {
-          label: `${label}${hasTimestamp ? ` • ${formatTime(timestamp)}` : ''}`,
-          season: season,
-          episode: episode,
-          timestamp: timestamp
-        };
-      }
+  function formatErrorDetails(error) {
+    if (!error) return "";
+    if (typeof error === "string") return error;
+    if (error instanceof Error) return error.stack || error.message;
+    try {
+      return JSON.stringify(error, null, 2);
+    } catch {
+      return String(error);
     }
-    return null;
   }
 
-  // Reactive variable for resume info
-  $: resumeInfo = details ? getResumeInfo($watchProgressStore[`${details.id}-${media.media_type}`]) : null;
+  function seasonList() {
+    return (details?.seasons || []).map(s => ({
+      season_number: s.season_number,
+      episode_count: s.episode_count ?? 0,
+    }));
+  }
 
-  $: movieWatched = media?.media_type === 'movie' && isEntryWatched($watchProgressStore[`${media.id}-movie`]);
+  // where to continue from, decided by the backend: a movie's saved position, or
+  // the current episode (or the next one once it's watched). `progress` overrides
+  // the saved position, e.g. "next episode" handed over from the player.
+  async function getResumeInfo(progress = null) {
+    if (!details) return null;
+    const target = await invoke("get_resume_target", {
+      mediaId: details.id,
+      mediaType: media.media_type,
+      seasons: seasonList(),
+      progress,
+    });
+    if (!target) return null;
+    if (target.season == null) {
+      return { ...target, label: `Resume from ${formatTime(target.timestamp)}` };
+    }
+    const label = `S${target.season}E${target.episode}`;
+    const hasTimestamp = target.timestamp > 60;
+    return { ...target, label: `${label}${hasTimestamp ? ` • ${formatTime(target.timestamp)}` : ''}` };
+  }
+
+  let resumeInfo = null;
+  let resumeRequest = 0;
+  $: if (details) refreshResumeInfo($watchProgressStore[`${details.id}-${media.media_type}`]);
+  $: if (!details) resumeInfo = null;
+
+  async function refreshResumeInfo(_progress) {
+    const request = ++resumeRequest;
+    try {
+      const info = await getResumeInfo();
+      if (request === resumeRequest) resumeInfo = info;
+    } catch (err) {
+      console.error("failed to load resume info:", err);
+    }
+  }
+
+  $: movieWatched = media?.media_type === 'movie' && !!$watchProgressStore[`${media.id}-movie`]?.watched;
 
   // True when the last episode of the last season has been watched >85%
   $: seriesWatched = (() => {
@@ -578,7 +591,7 @@
     if (!lastSeasonData?.episodes?.length) return false;
     const lastEp = lastSeasonData.episodes[lastSeasonData.episodes.length - 1];
     const key = `${details.id}-${media.media_type}-S${lastSeason.season_number}-E${lastEp.episode_number}`;
-    return isEntryWatched($watchProgressStore[key]);
+    return !!$watchProgressStore[key]?.watched;
   })();
 
   function isSeasonWatched(seasonNum) {
@@ -586,7 +599,7 @@
     if (!seasonData?.episodes?.length) return false;
     const lastEp = seasonData.episodes[seasonData.episodes.length - 1];
     const key = `${details.id}-${media.media_type}-S${seasonNum}-E${lastEp.episode_number}`;
-    return isEntryWatched($watchProgressStore[key]);
+    return !!$watchProgressStore[key]?.watched;
   }
 
   function toggleSeason(seasonNumber) {
@@ -600,10 +613,9 @@
   async function handleAutoPlay() {
     console.log('Auto-play triggered');
 
-    // Use resumeProgress if passed from quick play, otherwise load from store
-    const progress = media.resumeProgress || watchProgressStore.getProgress(media.id, media.media_type);
+    // use resumeProgress if passed from quick play, otherwise the saved progress.
     // skips past finished episodes, and is null once the whole series is done
-    const next = getResumeInfo(progress);
+    const next = await getResumeInfo(media.resumeProgress || null);
 
     if (media.media_type === 'movie') {
       // Movie: play from beginning (timestamp resume handled by VideoPlayer)
@@ -677,62 +689,19 @@
       }
     }
 
-    const showName = details.title || details.name;
     const isMovie = media.media_type === "movie" || !!details.title;
+    currentSearchQuery = details.title || details.name;
+    originalSearchQuery = currentSearchQuery;
 
-    // Build search query - just the name, no season/episode
-    let searchQuery = showName;
-    currentSearchQuery = searchQuery;
-    originalSearchQuery = searchQuery;
+    // fetch the imdb id: tracker extensions (e.g. eztv) may use it for lookup
+    const imdbId = await fetchImdbId(isMovie);
 
-    console.log("Starting search:", searchQuery);
-
-    // Detect if this is anime based on genre
-    const mediaType = isAnime() ? "anime" : (isMovie ? "movie" : "tv");
-    console.log("Media type for search:", mediaType, "Genres:", details.genres);
-
-    // Get tracker preference
-    const storedTrackers = getTrackerPreference();
-    const trackerArray = Array.isArray(storedTrackers) && storedTrackers.length > 0 ? storedTrackers : null;
-    console.log("Tracker preference:", trackerArray);
-
-    // Fetch IMDB ID — tracker extensions (e.g. EZTV) may use it for lookup
-    let imdbId = null;
-    if (!isMovie) {
-      try {
-        const externalIds = await getTVExternalIds(details.id);
-        if (externalIds?.imdb_id) {
-          imdbId = externalIds.imdb_id;
-          currentImdbId = imdbId;
-          console.log("Got IMDB ID:", imdbId);
-        }
-      } catch (err) {
-        console.warn("Failed to get IMDB ID:", err);
-      }
-    } else if (isMovie) {
-      try {
-        const externalIds = await getMovieExternalIds(details.id);
-        if (externalIds?.imdb_id) {
-          imdbId = externalIds.imdb_id;
-          currentImdbId = imdbId;
-          console.log("Got Movie IMDB ID:", imdbId);
-        }
-      } catch (err) {
-        console.warn("Failed to get Movie IMDB ID:", err);
-      }
-    }
-
-    // Execute search with filtering on backend
+    // the backend picks the trackers (saved preference, or anime/general in
+    // auto mode), merges their results and ranks them for this episode
     try {
-      searchResults = await invoke("search_nyaa_filtered", {
-        query: searchQuery,
-        season: isMovie ? null : seasonNum,
-        episode: isMovie ? null : episodeNum,
-        isMovie: isMovie,
-        mediaType: mediaType,
-        trackerPreference: trackerArray,
-        imdbId: imdbId,
-      });
+      const response = await runSearch({ seasonNum, episodeNum, imdbId, query: null, trackers: null });
+      searchResults = response.results;
+      originalSearchQuery = currentSearchQuery = response.query;
 
       if (searchResults.length === 0) {
         console.log("No results found.");
@@ -743,6 +712,45 @@
     } finally {
       isSearching = false;
     }
+  }
+
+  function releaseYear() {
+    const year = parseInt((details.release_date || details.first_air_date || "").split("-")[0]);
+    return Number.isFinite(year) ? year : null;
+  }
+
+  async function fetchImdbId(isMovie) {
+    try {
+      const externalIds = isMovie
+        ? await getMovieExternalIds(details.id)
+        : await getTVExternalIds(details.id);
+      if (externalIds?.imdb_id) {
+        currentImdbId = externalIds.imdb_id;
+        console.log("Got IMDB ID:", currentImdbId);
+        return currentImdbId;
+      }
+    } catch (err) {
+      console.warn("Failed to get IMDB ID:", err);
+    }
+    return null;
+  }
+
+  // trackers: null uses the saved preference, [] means auto
+  async function runSearch({ seasonNum, episodeNum, imdbId, query, trackers }) {
+    return await invoke("search_torrents", {
+      request: {
+        tmdbId: details.id,
+        mediaType: media.media_type,
+        title: details.title || details.name,
+        query,
+        genreIds: (details.genres || []).map(genre => genre.id),
+        releaseYear: releaseYear(),
+        season: seasonNum,
+        episode: episodeNum,
+        imdbId,
+        trackers,
+      },
+    });
   }
 
   function reselectTorrent() {
@@ -784,7 +792,7 @@
     const { torrents, showId } = event.detail;
     
     if (!torrents || torrents.length === 0) {
-      showError("No torrents found to assign files from.");
+      showError("There are no saved torrents for this title yet. Play an episode first, then assign files from its torrent.", { title: "Nothing to assign" });
       return;
     }
     
@@ -808,15 +816,8 @@
         console.log('[cache] fetching new file list for torrent');
         const meta = await fetchTorrentMetadata(firstTorrent.magnetLink);
         handleId = meta.handleId;
-        const info = meta.info;
+        files = meta.info.files;
 
-        files = info.files.filter(f => {
-          const ext = f.name.toLowerCase();
-          return ext.endsWith('.mkv') || ext.endsWith('.mp4') || 
-                 ext.endsWith('.avi') || ext.endsWith('.mov') || 
-                 ext.endsWith('.webm') || ext.endsWith('.m4v');
-        });
-        
         // Cache the results
         torrentFileCache[firstTorrent.magnetLink] = { files, handleId };
       }
@@ -824,7 +825,7 @@
       availableFiles = files;
       
       if (availableFiles.length === 0) {
-        showError("No video files found in torrents.");
+        showError("None of the saved torrents contain video files Magnolia can play.", { title: "No video files" });
         return;
       }
       
@@ -861,7 +862,7 @@
       
     } catch (err) {
       console.error("error loading torrent for manual assignment:", err);
-      showError("Failed to load torrent files.");
+      showError("Magnolia couldn't read the files in this torrent. It may not have any seeders right now.", { title: "Couldn't load torrent", error: err });
     }
   }
 
@@ -874,156 +875,32 @@
 
     if (!pendingPlayRequest) return;
 
-    // We need to find the right file in the torrent.
-    // For now, we'll add the torrent in "list_only" mode (via add_torrent) to get file list,
-    // then try to match the episode.
-
     try {
-      // 1. Get the torrent's file list (from the debrid client when active,
-      //    otherwise librqbit metadata). add_torrent returns a handle_id;
-      //    debrid mode has no local handle (handleId is null).
+      // 1. get the torrent's video files (from the debrid client when active,
+      //    otherwise librqbit metadata). debrid mode has no local handle.
       const { handleId, info } = await fetchTorrentMetadata(torrent.magnet_link);
 
       console.log("Torrent info:", info);
 
-      // Filter to video files only
-      const videoFiles = info.files.filter(f => {
-        const ext = f.name.toLowerCase();
-        return ext.endsWith('.mkv') || ext.endsWith('.mp4') || 
-               ext.endsWith('.avi') || ext.endsWith('.mov') || 
-               ext.endsWith('.webm') || ext.endsWith('.m4v');
+      // 2. the backend finds the requested episode, remembers it and, for season
+      //    packs, every other numbered episode too
+      const matchedFile = await invoke("auto_assign_torrent_files", {
+        showId: details.id,
+        mediaType: media.media_type,
+        season: pendingPlayRequest.season,
+        episode: pendingPlayRequest.episode,
+        magnetLink: torrent.magnet_link,
+        files: info.files,
       });
 
-      // 2. Find the matching file for the requested episode
-      const s = pendingPlayRequest.season.toString().padStart(2, "0");
-      const e = pendingPlayRequest.episode.toString().padStart(2, "0");
-
-      let fileIndex = -1;
-
-      // Try specific match first
-      fileIndex = videoFiles.findIndex(
-        (f) =>
-          f.name.toUpperCase().includes(`S${s}E${e}`) ||
-          f.name.toUpperCase().includes(`${pendingPlayRequest.season}X${e}`),
-      );
-
-      // If not found, and it's a single video file torrent, use it
-      if (fileIndex === -1 && videoFiles.length === 1) {
-        fileIndex = 0;
-      }
-
-      // If still not found, maybe try just episode number if it's a season pack?
-      if (fileIndex === -1) {
-        fileIndex = videoFiles.findIndex(
-          (f) =>
-            f.name.toUpperCase().includes(`E${e}`) ||
-            f.name.toUpperCase().includes(` ${e} `),
-        );
-      }
-
-      // Check if this is a movie
-      const isMovie = media.media_type === 'movie' || !!details.title;
-      
-      if (fileIndex !== -1) {
-        console.log("Found matching file at index:", fileIndex);
-        const matchedFile = videoFiles[fileIndex];
-
-        // 3. Save selection for the requested episode
-        await invoke("save_torrent_selection", {
-          showId: details.id,
-          season: pendingPlayRequest.season,
-          episode: pendingPlayRequest.episode,
-          magnetLink: torrent.magnet_link,
-          fileIndex: matchedFile.index,
-        });
-
+      if (matchedFile) {
+        console.log("Found matching file:", matchedFile.name);
         torrentManagerRefresh++;
-
-        // 4. Auto-assign ALL other video files that have episode numbers
-        if (videoFiles.length > 1 && !isMovie) {
-          console.log("Multi-episode torrent detected, auto-assigning all episodes");
-          const batchSelections = [];
-          
-          for (const file of videoFiles) {
-            if (file.index === matchedFile.index) continue; // Skip the one we already saved
-            
-            // Try multiple patterns to extract episode info
-            const filename = file.name;
-            let season = pendingPlayRequest.season; // Default to current season
-            let episode = null;
-            
-            // Pattern: S01E05, S1E5
-            const sxeMatch = filename.match(/S(\d{1,2})E(\d{1,3})/i);
-            if (sxeMatch) {
-              season = parseInt(sxeMatch[1]);
-              episode = parseInt(sxeMatch[2]);
-            }
-            
-            // Pattern: 1x05, 01x05
-            if (!episode) {
-              const xMatch = filename.match(/(\d{1,2})x(\d{2,3})/i);
-              if (xMatch) {
-                season = parseInt(xMatch[1]);
-                episode = parseInt(xMatch[2]);
-              }
-            }
-            
-            // Pattern: Episode 5, Ep 05, E05 (without season)
-            if (!episode) {
-              const epMatch = filename.match(/(?:Episode|Ep\.?|E)[\s._-]*(\d{1,3})/i);
-              if (epMatch) {
-                episode = parseInt(epMatch[1]);
-              }
-            }
-            
-            // Pattern: - 05 - or [ 05 ] or common anime patterns like "- 05 "
-            if (!episode) {
-              const dashMatch = filename.match(/[-\[\s](\d{2,3})[-\]\s]/);
-              if (dashMatch) {
-                episode = parseInt(dashMatch[1]);
-              }
-            }
-            
-            if (episode && episode > 0) {
-              console.log(`Auto-assigning S${season}E${episode} to file: ${filename}`);
-              batchSelections.push([season, episode, torrent.magnet_link, file.index]);
-            }
-          }
-          
-          // Save all selections in one batch
-          if (batchSelections.length > 0) {
-            await invoke("save_multiple_torrent_selections", {
-              showId: details.id,
-              selections: batchSelections,
-            });
-          }
-        }
-
-        // 5. Start Stream
         startStream(torrent.magnet_link, matchedFile.index, handleId);
         showTorrentSelector = false;
       } else {
-        // For movies with a single file, auto-select it without showing selector
-        if (isMovie && videoFiles.length === 1) {
-          console.log("Movie with single file, auto-selecting");
-          const singleFile = videoFiles[0];
-          
-          await invoke("save_torrent_selection", {
-            showId: details.id,
-            season: pendingPlayRequest.season,
-            episode: pendingPlayRequest.episode,
-            magnetLink: torrent.magnet_link,
-            fileIndex: singleFile.index,
-          });
-          
-          torrentManagerRefresh++;
-          
-          startStream(torrent.magnet_link, singleFile.index, handleId);
-          showTorrentSelector = false;
-        } else {
-          // Show manual file selection for TV shows or movies with multiple files
-          showManualFileSelector(torrent, info, handleId);
-        }
+        // show manual file selection when nothing matched
+        showManualFileSelector(torrent, info, handleId);
       }
     } catch (err) {
       // Don't show error if user cancelled the operation
@@ -1033,49 +910,36 @@
         return;
       }
       console.error("Error processing selection:", err);
-      showError("Failed to load torrent metadata. Please try again.");
+      showError("The torrent's file list never arrived. It may have too few seeders, so try again or pick a different source.", { title: "Couldn't load torrent", error: err });
     }
   }
 
   async function startStream(magnetLink, fileIndex, existingHandleId = null) {
     try {
-      let handleId = existingHandleId;
-      if (handleId === null) {
-        // Built-in client needs a local torrent handle; a debrid client streams
-        // remotely from the magnet, so leave handleId null for it.
-        const debrid = await getDebridClient();
-        if (!debrid) {
-          handleId = await invoke("add_torrent", { magnetOrUrl: magnetLink });
-        }
-      }
-
-      // Don't update progress here - let VideoPlayer handle it to preserve saved timestamps
-      // The VideoPlayer will track progress during playback
+      // the backend adds the torrent for the built-in client (a debrid client
+      // streams remotely, so handleId stays null) and picks the start position.
+      // if the torrent can't be added it forgets the saved selection, so the
+      // next play asks for a new source instead of getting stuck.
+      const isMovie = media.media_type === "movie" || !!details.title;
+      const plan = await invoke("prepare_playback", {
+        request: {
+          mediaId: details.id,
+          mediaType: media.media_type,
+          season: isMovie ? null : pendingPlayRequest.season,
+          episode: isMovie ? null : pendingPlayRequest.episode,
+          magnetLink,
+          fileIndex,
+          handleId: existingHandleId,
+        },
+      });
 
       // Don't start stream here. Let VideoPlayer handle it so it can show loading screen.
-      console.log("Opening player for handle:", handleId, "file:", fileIndex);
+      console.log("Opening player for handle:", plan.handle_id, "file:", fileIndex);
 
       // Build title - hide SXXEXX for movies
-      const isMovie = media.media_type === "movie" || !!details.title;
-      const playerTitle = isMovie 
+      const playerTitle = isMovie
         ? (details.title || details.name)
         : `${details.title || details.name} - S${pendingPlayRequest.season}E${pendingPlayRequest.episode}`;
-
-      // Get saved progress for timestamp
-      const progress = watchProgressStore.getProgress(details.id, media.media_type);
-      let initialTimestamp = 0;
-
-      // a finished position starts over instead of resuming into the credits
-      if (progress && !isEntryWatched(progress)) {
-        // For TV shows, only use saved timestamp if we're playing the same episode
-        if (!isMovie &&
-            progress.currentSeason === pendingPlayRequest.season &&
-            progress.currentEpisode === pendingPlayRequest.episode) {
-          initialTimestamp = progress.currentTimestamp || 0;
-        } else if (isMovie) {
-          initialTimestamp = progress.currentTimestamp || 0;
-        }
-      }
 
       // Dispatch event to open video player
       isPlayLoading = false;
@@ -1085,39 +949,32 @@
             src: null, // VideoPlayer will fetch this
             title: playerTitle,
             metadata: details, // Pass full details for watch history
-            handleId: handleId,
-            fileIndex: fileIndex,
-            magnetLink: magnetLink,
-            initialTimestamp: initialTimestamp,
+            handleId: plan.handle_id,
+            fileIndex: plan.file_index,
+            magnetLink: plan.magnet_link,
+            initialTimestamp: plan.initial_timestamp,
             mediaId: details.id,
             mediaType: media.media_type,
-            seasonNum: isMovie ? null : pendingPlayRequest.season,
-            episodeNum: isMovie ? null : pendingPlayRequest.episode,
+            seasonNum: plan.season,
+            episodeNum: plan.episode,
           },
         }),
       );
       return true;
     } catch (err) {
       console.error("Error preparing stream:", err);
-      
-      // If we failed to add the torrent (e.g. metadata fetch failed), clear the saved selection
-      // This allows the user to pick a new torrent next time instead of getting stuck
-      if (pendingPlayRequest && pendingPlayRequest.season && pendingPlayRequest.episode) {
-        try {
-          console.log("Clearing saved selection due to error");
-          await invoke("remove_saved_selection", {
-            show_id: details.id,
-            season: pendingPlayRequest.season,
-            episode: pendingPlayRequest.episode
-          });
-          torrentManagerRefresh++;
-        } catch (removeErr) {
-          console.warn("Failed to remove saved selection:", removeErr);
-        }
-      }
-      
+      torrentManagerRefresh++;
       isPlayLoading = false;
-      showError("Failed to prepare stream. The saved torrent might be unavailable. Please try again to select a new source.");
+      const failedRequest = pendingPlayRequest;
+      showError("The saved torrent for this title couldn't be started. It may have been removed or have no seeders left.", {
+        title: "Couldn't start playback",
+        error: err,
+        action: failedRequest && {
+          label: "Choose another source",
+          icon: "ri-search-line",
+          run: () => handlePlay(failedRequest.season, failedRequest.episode, true),
+        },
+      });
       return false;
     }
   }
@@ -1156,64 +1013,25 @@
     isSearching = true;
     searchResults = [];
 
-    const showName = details.title || details.name;
     const isMovieCheck = media.media_type === "movie" || !!details.title;
     const { season: seasonNum, episode: episodeNum } = pendingPlayRequest;
 
-    // Use custom query if provided, otherwise build default
-    let searchQuery = customQuery;
-    if (!searchQuery) {
-      searchQuery = showName;
-      if (isMovieCheck) {
-        const year = (details.release_date || "").split("-")[0];
-        if (year) {
-          searchQuery = `${showName} ${year}`;
-        }
-      }
-    }
-    
-    // Update the currentSearchQuery for display
-    currentSearchQuery = searchQuery;
-
-    const mediaType = isAnime() ? "anime" : (isMovieCheck ? "movie" : "tv");
-    
     // If useImdb is true, re-fetch IMDB ID for EZTV
     let imdbIdToUse = currentImdbId;
     if (useImdb && !imdbIdToUse) {
-      try {
-        if (!isMovieCheck) {
-          const externalIds = await getTVExternalIds(details.id);
-          if (externalIds?.imdb_id) {
-            imdbIdToUse = externalIds.imdb_id;
-            currentImdbId = imdbIdToUse;
-          }
-        } else {
-          const externalIds = await getMovieExternalIds(details.id);
-          if (externalIds?.imdb_id) {
-            imdbIdToUse = externalIds.imdb_id;
-            currentImdbId = imdbIdToUse;
-          }
-        }
-      } catch (err) {
-        console.warn("Failed to re-fetch IMDB ID:", err);
-      }
+      imdbIdToUse = await fetchImdbId(isMovieCheck);
     }
-    
-    console.log("Invoking search_nyaa_filtered with:");
-    console.log("- query:", searchQuery);
-    console.log("- trackers:", trackers);
-    console.log("- imdbId:", imdbIdToUse);
-    
+
     try {
-      searchResults = await invoke("search_nyaa_filtered", {
-        query: searchQuery,
-        season: isMovieCheck ? null : seasonNum,
-        episode: isMovieCheck ? null : episodeNum,
-        isMovie: isMovieCheck,
-        mediaType: mediaType,
-        trackerPreference: trackers && trackers.length > 0 ? trackers : null,
+      const response = await runSearch({
+        seasonNum,
+        episodeNum,
         imdbId: imdbIdToUse,
+        query: customQuery || null,
+        trackers: trackers || [],
       });
+      searchResults = response.results;
+      currentSearchQuery = response.query;
 
       console.log(`Found ${searchResults.length} results`);
     } catch (err) {
@@ -1225,16 +1043,11 @@
   };
 
   function showManualFileSelector(torrent, info, handleId) {
-    // Filter to video files only
-    availableFiles = info.files.filter(f => {
-      const ext = f.name.toLowerCase();
-      return ext.endsWith('.mkv') || ext.endsWith('.mp4') || 
-             ext.endsWith('.avi') || ext.endsWith('.mov') || 
-             ext.endsWith('.webm') || ext.endsWith('.m4v');
-    });
-    
+    // the backend only lists video files
+    availableFiles = info.files;
+
     if (availableFiles.length === 0) {
-      showError("No video files found in this torrent.");
+      showError("This torrent doesn't contain any video files Magnolia can play. Pick a different source.", { title: "No video files" });
       return;
     }
     
@@ -1289,7 +1102,7 @@
       closeFileSelector();
     } catch (err) {
       console.error("error saving file selections:", err);
-      showError("Failed to save selections.");
+      showError("Your file assignments couldn't be saved.", { title: "Couldn't save", error: err });
     }
   }
 
@@ -1328,15 +1141,8 @@
         console.log('[cache] fetching new file list for torrent');
         const meta = await fetchTorrentMetadata(newTorrent.magnetLink);
         handleId = meta.handleId;
-        const info = meta.info;
+        files = meta.info.files;
 
-        files = info.files.filter(f => {
-          const ext = f.name.toLowerCase();
-          return ext.endsWith('.mkv') || ext.endsWith('.mp4') || 
-                 ext.endsWith('.avi') || ext.endsWith('.mov') || 
-                 ext.endsWith('.webm') || ext.endsWith('.m4v');
-        });
-        
         // Cache the results
         torrentFileCache[newTorrent.magnetLink] = { files, handleId };
       }
@@ -1376,7 +1182,7 @@
       
     } catch (err) {
       console.error("error switching torrent:", err);
-      showError("Failed to load files from the selected torrent.");
+      showError("Magnolia couldn't read the files in the selected torrent. It may not have any seeders right now.", { title: "Couldn't load torrent", error: err });
       selectedTorrentForManual = {
         ...selectedTorrentForManual,
         isSwitchingTorrent: false
@@ -1698,7 +1504,7 @@
                               {@const episodeKey = `${details.id}-${media.media_type}-S${season.season_number}-E${episode.episode_number}`}
                               {@const episodeProgress = $watchProgressStore[episodeKey]}
                               {@const percentage = episodeProgress && episodeProgress.duration ? (episodeProgress.currentTimestamp / episodeProgress.duration) * 100 : 0}
-                              {@const isWatched = isEntryWatched(episodeProgress)}
+                              {@const isWatched = !!episodeProgress?.watched}
                               
                               <button
                                 type="button"
@@ -1803,41 +1609,12 @@
 
           {#if activeTab === "cast" && credits}
             <div class="cast-crew-container">
-              <div class="cast-section">
-                <h3 class="section-subtitle">Cast</h3>
-                <div class="cast-grid">
-                  {#each credits.cast.slice(0, 20) as person}
-                    <div class="cast-card">
-                      {#if person.profile_path}
-                        <img
-                          src={getImageUrl(person.profile_path, "w185")}
-                          alt={person.name}
-                          loading="lazy"
-                          decoding="async"
-                        />
-                      {:else}
-                        <div class="cast-placeholder">
-                          <i class="ri-user-line"></i>
-                        </div>
-                      {/if}
-                      <div class="cast-info">
-                        <h4>{person.name}</h4>
-                        <p>{person.character}</p>
-                        {#if person.episode_count}
-                          <span class="episode-count">{person.episode_count} episodes</span>
-                        {/if}
-                      </div>
-                    </div>
-                  {/each}
-                </div>
-              </div>
-
-              {#if credits.crew && credits.crew.length > 0}
-                <div class="crew-section">
-                  <h3 class="section-subtitle">Crew</h3>
-                  <div class="crew-grid">
-                    {#each credits.crew.slice(0, 20) as person}
-                      <div class="crew-card">
+              {#if credits.cast.length > 0}
+                <div class="cast-section">
+                  <h3 class="section-subtitle">Cast</h3>
+                  <Scroller gap="var(--spacing-lg)">
+                    {#each credits.cast as person (person.id)}
+                      <button type="button" class="cast-card" on:click={() => openPerson(person)} title="See titles with {person.name}">
                         {#if person.profile_path}
                           <img
                             src={getImageUrl(person.profile_path, "w185")}
@@ -1846,20 +1623,53 @@
                             decoding="async"
                           />
                         {:else}
-                          <div class="crew-placeholder">
+                          <div class="cast-placeholder">
                             <i class="ri-user-line"></i>
                           </div>
                         {/if}
-                        <div class="crew-info">
+                        <div class="cast-info">
                           <h4>{person.name}</h4>
-                          <p class="crew-job">{person.job}</p>
+                          {#if person.character}
+                            <p>{person.character}</p>
+                          {/if}
                           {#if person.episode_count}
-                            <span class="episode-count">{person.episode_count} episodes</span>
+                            <span class="episode-count">{person.episode_count} {person.episode_count === 1 ? "episode" : "episodes"}</span>
                           {/if}
                         </div>
-                      </div>
+                      </button>
                     {/each}
-                  </div>
+                  </Scroller>
+                </div>
+              {/if}
+
+              {#if credits.crew.length > 0}
+                <div class="crew-section">
+                  <h3 class="section-subtitle">Crew</h3>
+                  <Scroller gap="var(--spacing-lg)">
+                    {#each credits.crew as person (person.id)}
+                      <button type="button" class="cast-card crew-card" on:click={() => openPerson(person)} title="See titles with {person.name}">
+                        {#if person.profile_path}
+                          <img
+                            src={getImageUrl(person.profile_path, "w185")}
+                            alt={person.name}
+                            loading="lazy"
+                            decoding="async"
+                          />
+                        {:else}
+                          <div class="cast-placeholder">
+                            <i class="ri-user-line"></i>
+                          </div>
+                        {/if}
+                        <div class="cast-info">
+                          <h4>{person.name}</h4>
+                          <p class="crew-job">{person.jobs.slice(0, 2).join(", ")}</p>
+                          {#if person.episode_count}
+                            <span class="episode-count">{person.episode_count} {person.episode_count === 1 ? "episode" : "episodes"}</span>
+                          {/if}
+                        </div>
+                      </button>
+                    {/each}
+                  </Scroller>
                 </div>
               {/if}
             </div>
@@ -1965,49 +1775,16 @@
 
         {#if recommendations.length > 0}
           <div class="recommendations-section">
-            <h2 class="section-title">More Like This</h2>
-            <div class="recommendations-grid">
-              {#each recommendations as rec}
-                <button
-                  type="button"
-                  class="media-card"
-                  style="--card-accent: var(--prominent-color)"
-                  on:click={() =>
-                    window.dispatchEvent(
-                      new CustomEvent("openMediaDetail", { detail: rec }),
-                    )}
-                >
-                  {#if rec.poster_path}
-                    <img
-                      class="media-poster"
-                      src={getImageUrl(rec.poster_path, "w342")}
-                      alt={rec.title || rec.name}
-                      loading="lazy"
-                      decoding="async"
-                    />
-                  {:else}
-                    <div class="media-poster rec-placeholder">
-                      <i class="ri-film-line"></i>
-                    </div>
-                  {/if}
-                  <div class="media-content">
-                    <div class="media-info">
-                      <h4 class="media-title">{rec.title || rec.name}</h4>
-                      <div class="media-meta">
-                        {#if rec.release_date || rec.first_air_date}
-                          <span>{(rec.release_date || rec.first_air_date).split('-')[0]}</span>
-                        {/if}
-                        {#if rec.vote_average}
-                          <span class="rating-badge" style="background: {getRatingColor(rec.vote_average)}">
-                            {rec.vote_average.toFixed(1)}
-                          </span>
-                        {/if}
-                      </div>
-                    </div>
-                  </div>
-                </button>
-              {/each}
-            </div>
+            {#key media.id}
+              <MediaCarousel
+                title="More Like This"
+                customItems={recommendations}
+                accentColor={prominentColor}
+                fallbackMediaType={media.media_type}
+                hideViewAll={true}
+                watchProgress={$watchProgressStore}
+              />
+            {/key}
           </div>
         {/if}
       </div>
@@ -2112,6 +1889,10 @@
   <ErrorModal
     message={errorMessage}
     title={errorTitle}
+    details={errorDetails}
+    actionLabel={errorAction?.label || ""}
+    actionIcon={errorAction?.icon}
+    on:action={() => errorAction?.run()}
     on:close={() => (showErrorModal = false)}
   />
 {/if}
@@ -2122,12 +1903,10 @@
     results={searchResults}
     loading={isSearching}
     selectedTorrentName={selectedTorrentName}
-    isAnime={isAnime()}
+    isAnime={detectedIsAnime}
     hasImdbId={!!currentImdbId}
-    isTVShow={media.media_type === 'tv'}
     isMovie={media.media_type === 'movie'}
-    releaseYear={details?.release_date ? parseInt(details.release_date.split('-')[0]) : null}
-    currentSeason={pendingPlayRequest?.season}
+currentSeason={pendingPlayRequest?.season}
     currentEpisode={pendingPlayRequest?.episode}
     bind:isSelectingTorrent
     on:select={onTorrentSelect}

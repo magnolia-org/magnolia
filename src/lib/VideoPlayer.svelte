@@ -7,8 +7,7 @@
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
   import { formatTime } from "./utils/timeUtils.js";
   import { watchProgressStore } from "./stores/watchProgressStore.js";
-  import { watchHistoryStore } from "./stores/watchHistoryStore.js";
-  import { getSeasonDetails, getTVDetails, getImageUrl } from "./tmdb.js";
+import { getSeasonDetails, getTVDetails, getImageUrl } from "./tmdb.js";
   import { randomSubtitlePreviewBackground } from "./subtitlePreviewBackgrounds.js";
   import { isWindows } from "./utils/platform.js";
 
@@ -50,7 +49,8 @@
   const VOLUME_STEP_SMALL = 0.1;
   const VOLUME_STEP_LARGE = 0.2;
   const CONTROLS_HIDE_TIMEOUT = 2000;
-  const REFRESH_INTERVAL = 1000;
+  // readiness is checked often so playback starts as soon as the torrent is ready
+  const STREAM_POLL_INTERVAL = 250;
   // pip window geometry (logical px, 16:9)
   const PIP_WIDTH = 480;
   const PIP_HEIGHT = 270;
@@ -345,8 +345,7 @@
   let hasSeekedToInitial = false;
   let skipSectionCheckInterval = null;
 
-  const skipFilters = ['intro', 'op', 'opening', 'recap', 're-cap', 'eyecatch'];
-  let currentSkipSection = null;
+let currentSkipSection = null;
   let showSkipButton = false;
   let skipButtonTimeout = null;
   let skipTimeRemaining = 8;
@@ -551,28 +550,11 @@
     await invoke("mpv_set_option_string", { name: "speed", value: String(rate) }).catch(() => {});
   }
 
-  // Resolve the chosen streaming client. "builtin" (or a missing/disabled
-  // extension) means the local torrent pipeline; anything else is a debrid
-  // extension that turns the magnet into a remote HTTP stream.
+  // the debrid extension chosen as streaming client, or null for the built-in
+  // torrent pipeline (also when the chosen extension is missing or disabled)
   async function resolveStreamingClient() {
-    let clientId = "builtin";
     try {
-      const settings = await invoke("get_settings");
-      clientId = settings.streaming_client || "builtin";
-    } catch (e) {
-      console.error("Failed to load streaming client setting:", e);
-    }
-    if (clientId === "builtin") return null;
-    try {
-      const exts = await invoke("list_extensions");
-      const ext = exts.find(
-        (e) => e.id === clientId && e.manifest.type === "debrid" && e.enabled,
-      );
-      if (!ext) {
-        console.warn(`streaming client '${clientId}' unavailable, falling back to built-in`);
-        return null;
-      }
-      return ext;
+      return await invoke("get_streaming_client");
     } catch (e) {
       console.error("Failed to resolve streaming client:", e);
       return null;
@@ -651,7 +633,11 @@
       return;
     }
 
+    let pollInFlight = false;
     const pollStatus = async () => {
+      // a slow backend reply must not stack up overlapping polls
+      if (pollInFlight) return;
+      pollInFlight = true;
       try {
         const status = await invoke("get_stream_status", {
           handleId: numericHandle,
@@ -689,12 +675,14 @@
       } catch (error) {
         console.error("Failed to poll stream status:", error);
         loadingStatus.status = "Error loading stream";
+      } finally {
+        pollInFlight = false;
       }
     };
 
     await pollStatus();
     if (!pollInterval) {
-      pollInterval = setInterval(pollStatus, REFRESH_INTERVAL);
+      pollInterval = setInterval(pollStatus, STREAM_POLL_INTERVAL);
     }
   }
 
@@ -900,60 +888,40 @@
       .filter((r) => r.width >= 0.15);
   }
 
-  function buildProgressData() {
-    const progressData = {
-      currentTimestamp: Math.floor(currentTime),
-      duration: Math.floor(duration)
+  // the backend owns every watch rule; this only reports where playback is.
+  // media details go along once per session so the title lands in watch history
+  async function saveProgress({ withHistory = false } = {}) {
+    if (!mediaId || !mediaType) return;
+    const update = {
+      mediaId: Number(mediaId),
+      mediaType,
+      season: seasonNum,
+      episode: episodeNum,
+      position: currentTime,
+      duration,
+      completed: markedCompleted,
+      media: withHistory ? await historyMedia() : null,
     };
-    if (seasonNum !== null && episodeNum !== null) {
-      progressData.currentSeason = seasonNum;
-      progressData.currentEpisode = episodeNum;
-    }
-    if (markedCompleted) progressData.completed = true;
-    return progressData;
+    await watchProgressStore.recordProgress(update);
   }
 
-  function saveProgress() {
-    if (!mediaId || !mediaType || !(currentTime > 0) || !(duration > 0)) return;
-    watchProgressStore.updateProgress(mediaId, mediaType, buildProgressData());
-  }
-
+  // mpv reached the credits or the end of the file, as decided by the backend
   function markCompleted() {
     if (markedCompleted) return;
     markedCompleted = true;
     saveProgress();
   }
 
-  function isEndingChapterTitle(chapterTitle) {
-    const t = chapterTitle.toLowerCase();
-    return t.includes('ending') || (t.includes('credits') && !t.includes('opening')) || t === 'end';
-  }
-
-  async function addToWatchHistory(progressData) {
-    let seriesInfo = metadata;
-    // quick play hands over the stored history item, which has no season list
-    if (mediaType === 'tv' && !metadata?.seasons) {
-      try {
-        seriesInfo = await getTVDetails(mediaId);
-      } catch (e) {
-        console.warn('failed to fetch series info for watch history:', e);
-      }
+  // quick play hands over the stored history item, which has no season list
+  async function historyMedia() {
+    if (mediaType !== 'tv' || metadata?.seasons) return metadata;
+    try {
+      const series = await getTVDetails(mediaId);
+      return { ...metadata, seasons: series.seasons, number_of_seasons: series.number_of_seasons };
+    } catch (e) {
+      console.warn('failed to fetch series info for watch history:', e);
+      return metadata;
     }
-    const tvSeasons = seriesInfo?.seasons?.filter(s => s.season_number > 0) ?? [];
-    const lastSeason = tvSeasons.at(-1);
-    watchHistoryStore.addItem({
-      id: mediaId,
-      media_type: mediaType,
-      title: metadata.title || metadata.name || 'Unknown',
-      poster_path: metadata.poster_path,
-      backdrop_path: metadata.backdrop_path,
-      release_date: metadata.release_date || metadata.first_air_date,
-      vote_average: metadata.vote_average,
-      number_of_seasons: seriesInfo?.number_of_seasons ?? (tvSeasons.length || null),
-      last_season_number: lastSeason?.season_number ?? null,
-      last_season_episode_count: lastSeason?.episode_count ?? null,
-      ...progressData
-    });
   }
 
   function handleMpvProgress(payload) {
@@ -979,12 +947,9 @@
       if (!progressTrackingInterval) {
         progressTrackingInterval = setInterval(() => {
           if (playing && !loading && currentTime > 0 && mediaId && mediaType) {
-            const progressData = buildProgressData();
-            watchProgressStore.updateProgress(mediaId, mediaType, progressData);
-            if (!watchHistoryAdded && metadata) {
-              watchHistoryAdded = true;
-              addToWatchHistory(progressData);
-            }
+            const withHistory = !watchHistoryAdded && !!metadata;
+            if (withHistory) watchHistoryAdded = true;
+            saveProgress({ withHistory });
           }
         }, 10000);
       }
@@ -1011,17 +976,10 @@
       }
     }
 
-    // reaching the credits counts as finished even if the viewer closes before the very end
-    if (currentChapter?.title && currentTime / duration >= 0.7 && isEndingChapterTitle(currentChapter.title)) {
-      markCompleted();
-    }
-
-    // Check for skippable section
+// Check for skippable section
     if (currentChapter && currentChapter.title) {
-      const chapterTitle = currentChapter.title.toLowerCase();
-      const isSkippable = skipFilters.some(filter => chapterTitle.includes(filter));
-
-      if (isSkippable && currentSkipSection?.title !== currentChapter.title && showSkipPrompts) {
+      // chapters arrive from the backend already classified
+      if (currentChapter.is_skippable && currentSkipSection?.title !== currentChapter.title && showSkipPrompts) {
         // New skippable section detected
         console.log('Skip section detected:', currentChapter.title);
         currentSkipSection = currentChapter;
@@ -1072,7 +1030,7 @@
       let shouldShowNext = false;
 
       // Check if current chapter indicates ending
-      if (currentChapter?.title && isEndingChapterTitle(currentChapter.title)) {
+      if (currentChapter?.is_ending) {
         shouldShowNext = true;
       }
 
@@ -1120,70 +1078,12 @@
     markedCompleted = true;
     saveProgress();
 
-    const nextEpisode = episodeNum + 1;
-    
-    // Check if next episode torrent is tracked
-    try {
-      const trackedTorrent = await invoke('get_saved_selection', {
-        showId: Number(mediaId),
-        season: seasonNum,
-        episode: nextEpisode
-      });
+    await openNextEpisode();
+  }
 
-      if (trackedTorrent && trackedTorrent.magnet_link) {
-        console.log('Found saved torrent for next episode:', trackedTorrent);
-        
-        // Close current player before loading next episode
-        dispatch('close');
-        
-        // Add the torrent (VideoPlayer will handle preparation)
-        const handleResult = await invoke('add_torrent', {
-          magnetOrUrl: trackedTorrent.magnet_link
-        });
-        
-        // Format title with season and episode
-        const showName = metadata?.name || metadata?.title || title;
-        const episodeTitle = `${showName} - S${seasonNum}E${nextEpisode}`;
-        
-        // Dispatch event to update video player with new episode
-        // VideoPlayer will handle stream preparation and show proper loading phases
-        window.dispatchEvent(
-          new CustomEvent('openVideoPlayer', {
-            detail: {
-              src: null, // Let VideoPlayer fetch the stream URL
-              title: episodeTitle,
-              metadata: metadata,
-              handleId: handleResult,
-              fileIndex: trackedTorrent.file_index,
-              magnetLink: trackedTorrent.magnet_link,
-              initialTimestamp: 0,
-              mediaId: mediaId,
-              mediaType: mediaType,
-              seasonNum: seasonNum,
-              episodeNum: nextEpisode,
-            },
-          }),
-        );
-      } else {
-        // No saved torrent — open media detail so the user can pick a torrent for the next episode
-        console.log('No saved torrent found, opening media detail for torrent selection');
-        dispatch('close');
-        window.dispatchEvent(new CustomEvent('openMediaDetail', {
-          detail: {
-            ...metadata,
-            id: Number(mediaId),
-            media_type: mediaType,
-            autoPlay: true,
-            resumeProgress: {
-              currentSeason: seasonNum,
-              currentEpisode: nextEpisode,
-              currentTimestamp: 0
-            }
-          }
-        }));
-      }
-    } catch (error) {
-      console.error('Error navigating to next episode:', error);
+  async function openNextEpisode() {
+    const nextEpisode = episodeNum + 1;
+    const openDetailForNext = () => {
       dispatch('close');
       window.dispatchEvent(new CustomEvent('openMediaDetail', {
         detail: {
@@ -1198,6 +1098,50 @@
           }
         }
       }));
+    };
+
+    // the backend readies the next episode's saved torrent, if one was picked
+    try {
+      const plan = await invoke('prepare_saved_playback', {
+        mediaId: Number(mediaId),
+        mediaType,
+        season: seasonNum,
+        episode: nextEpisode,
+      });
+
+      if (!plan) {
+        // no saved torrent, so let the user pick one for the next episode
+        console.log('No saved torrent found, opening media detail for torrent selection');
+        openDetailForNext();
+        return;
+      }
+
+      console.log('Found saved torrent for next episode:', plan);
+      // Close current player before loading next episode
+      dispatch('close');
+
+      const showName = metadata?.name || metadata?.title || title;
+      // VideoPlayer will handle stream preparation and show proper loading phases
+      window.dispatchEvent(
+        new CustomEvent('openVideoPlayer', {
+          detail: {
+            src: null, // Let VideoPlayer fetch the stream URL
+            title: `${showName} - S${seasonNum}E${nextEpisode}`,
+            metadata: metadata,
+            handleId: plan.handle_id,
+            fileIndex: plan.file_index,
+            magnetLink: plan.magnet_link,
+            initialTimestamp: plan.initial_timestamp,
+            mediaId: mediaId,
+            mediaType: mediaType,
+            seasonNum: seasonNum,
+            episodeNum: nextEpisode,
+          },
+        }),
+      );
+    } catch (error) {
+      console.error('Error navigating to next episode:', error);
+      openDetailForNext();
     }
   }
 
@@ -1844,86 +1788,7 @@
 
   async function goToNextEpisodeMenu() {
     if (seasonNum === null || episodeNum === null) return;
-
-    const nextEpisode = episodeNum + 1;
-    
-    // Check if next episode torrent is tracked
-    try {
-      const trackedTorrent = await invoke('get_saved_selection', {
-        showId: Number(mediaId),
-        season: seasonNum,
-        episode: nextEpisode
-      });
-
-      if (trackedTorrent && trackedTorrent.magnet_link) {
-        console.log('Found saved torrent for next episode:', trackedTorrent);
-        
-        // Close current player before loading next episode
-        dispatch('close');
-        
-        // Add the torrent (VideoPlayer will handle preparation)
-        const handleResult = await invoke('add_torrent', {
-          magnetOrUrl: trackedTorrent.magnet_link
-        });
-        
-        // Format title with season and episode
-        const showName = metadata?.name || metadata?.title || title;
-        const episodeTitle = `${showName} - S${seasonNum}E${nextEpisode}`;
-        
-        // Dispatch event to update video player with new episode
-        // VideoPlayer will handle stream preparation and show proper loading phases
-        window.dispatchEvent(
-          new CustomEvent('openVideoPlayer', {
-            detail: {
-              src: null, // Let VideoPlayer fetch the stream URL
-              title: episodeTitle,
-              metadata: metadata,
-              handleId: handleResult,
-              fileIndex: trackedTorrent.file_index,
-              magnetLink: trackedTorrent.magnet_link,
-              initialTimestamp: 0,
-              mediaId: mediaId,
-              mediaType: mediaType,
-              seasonNum: seasonNum,
-              episodeNum: nextEpisode,
-            },
-          }),
-        );
-      } else {
-        // No saved torrent — open media detail so the user can pick a torrent for the next episode
-        console.log('No saved torrent found, opening media detail for torrent selection');
-        dispatch('close');
-        window.dispatchEvent(new CustomEvent('openMediaDetail', {
-          detail: {
-            ...metadata,
-            id: Number(mediaId),
-            media_type: mediaType,
-            autoPlay: true,
-            resumeProgress: {
-              currentSeason: seasonNum,
-              currentEpisode: nextEpisode,
-              currentTimestamp: 0
-            }
-          }
-        }));
-      }
-    } catch (error) {
-      console.error('Error navigating to next episode:', error);
-      dispatch('close');
-      window.dispatchEvent(new CustomEvent('openMediaDetail', {
-        detail: {
-          ...metadata,
-          id: Number(mediaId),
-          media_type: mediaType,
-          autoPlay: true,
-          resumeProgress: {
-            currentSeason: seasonNum,
-            currentEpisode: nextEpisode,
-            currentTimestamp: 0
-          }
-        }
-      }));
-    }
+    await openNextEpisode();
   }
 
   function showShortcutIndicator(type, value, icon, seekAmount = 0, volumeDirection = null) {
@@ -2226,25 +2091,25 @@
     saveProgress();
 
     try {
-      const saved = await invoke('get_saved_selection', {
-        showId: Number(mediaId),
+      const plan = await invoke('prepare_saved_playback', {
+        mediaId: Number(mediaId),
+        mediaType,
         season: targetSeason,
         episode: targetEpisode,
       });
 
-      if (saved && saved.magnet_link) {
+      if (plan) {
         dispatch('close');
-        const handleResult = await invoke('add_torrent', { magnetOrUrl: saved.magnet_link });
-        const showName = metadata?.name || metadata?.title || title;
+        const showName= metadata?.name || metadata?.title || title;
         window.dispatchEvent(new CustomEvent('openVideoPlayer', {
           detail: {
             src: null,
             title: `${showName} - S${targetSeason}E${targetEpisode}`,
             metadata,
-            handleId: handleResult,
-            fileIndex: saved.file_index,
-            magnetLink: saved.magnet_link,
-            initialTimestamp: 0,
+            handleId: plan.handle_id,
+            fileIndex: plan.file_index,
+            magnetLink: plan.magnet_link,
+            initialTimestamp: plan.initial_timestamp,
             mediaId,
             mediaType,
             seasonNum: targetSeason,
@@ -2359,9 +2224,10 @@
 
     mpvUnlisteners.push(await listen("mpv-end-file", () => {
       playing = false;
-      // mpv also reports end-file on stream errors, so only trust it near the end
-      if (duration > 0 && currentTime / duration >= 0.8) markCompleted();
     }));
+
+    // the backend saw playback reach the credits or finish near the end
+    mpvUnlisteners.push(await listen("mpv-playback-completed", markCompleted));
 
     // Periodic skip section check
     skipSectionCheckInterval = setInterval(() => {

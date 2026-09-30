@@ -2,7 +2,7 @@
     import { createEventDispatcher, onDestroy, onMount } from "svelte";
     import { fade, scale } from "svelte/transition";
     import { cubicOut } from 'svelte/easing';
-    import { getTrackerPreference, setTrackerPreference } from "./stores/watchHistoryStore.js";
+    import { getTrackerPreference, setTrackerPreference } from "./stores/trackerPreference.js";
     import { open } from "@tauri-apps/plugin-dialog";
     import { readFile } from "@tauri-apps/plugin-fs";
     import { invoke } from "@tauri-apps/api/core";
@@ -14,9 +14,7 @@
     export let selectedTorrentName = "";
     export let isAnime = false;
     export let hasImdbId = false;
-    export let isTVShow = false;
     export let isMovie = false;
-    export let releaseYear = null;
     export let currentSeason = null;
     export let currentEpisode = null;
 
@@ -25,18 +23,17 @@
     let trackerMode = 'auto';
     let selectedTrackers = [];
     export let isSelectingTorrent = false;
-    
-    const storedPref = getTrackerPreference();
-    if (Array.isArray(storedPref) && storedPref.length > 0) {
-        trackerMode = 'manual';
-        selectedTrackers = storedPref;
-    }
 
     // Installed tracker extensions: [{ id, label, isAnime }]
     let trackerExtensions = [];
 
     async function loadTrackerExtensions() {
         try {
+            const storedPref = await getTrackerPreference();
+            if (Array.isArray(storedPref) && storedPref.length > 0) {
+                trackerMode = 'manual';
+                selectedTrackers = storedPref;
+            }
             const exts = await invoke('list_extensions');
             trackerExtensions = exts
                 .filter(e => e.enabled && e.manifest.type === 'tracker')
@@ -90,45 +87,6 @@
     $: availableEncodes = [...new Set(results.map(r => r.encode).filter(Boolean))].sort();
     $: availableAudioCodecs = [...new Set(results.map(r => r.audio_codec).filter(Boolean))].sort();
 
-    function torrentHasReleaseYear(torrent) {
-        if (!isMovie || !releaseYear) return false;
-        return torrent.title.includes(releaseYear.toString());
-    }
-    
-    function torrentMatchesCurrentEpisode(torrent) {
-        if (!currentSeason || !currentEpisode) return false;
-        
-        // Check if torrent has explicit season/episode info
-        if (torrent.season && torrent.episode) {
-            return torrent.season === currentSeason && torrent.episode === currentEpisode;
-        }
-        
-        // Check title for S01E05 or similar patterns
-        const title = torrent.title.toUpperCase();
-        const s = currentSeason.toString().padStart(2, '0');
-        const e = currentEpisode.toString().padStart(2, '0');
-        
-        if (title.includes(`S${s}E${e}`) || title.includes(`${currentSeason}X${e}`)) {
-            return true;
-        }
-        
-        // Check for batch torrents that cover this season
-        if (torrent.is_batch || title.includes('BATCH') || title.includes('SEASON')) {
-            // If torrent has season info, check if it matches
-            if (torrent.season) {
-                return torrent.season === currentSeason;
-            }
-            // Check title for season number
-            const seasonMatch = title.match(/S(\d{1,2})/i) || title.match(/SEASON[\s._-]*(\d{1,2})/i);
-            if (seasonMatch) {
-                const torrentSeason = parseInt(seasonMatch[1]);
-                return torrentSeason === currentSeason;
-            }
-        }
-        
-        return false;
-    }
-
     $: filteredResults = results
         .filter(torrent => {
             if (searchFilter && !torrent.title.toLowerCase().includes(searchFilter.toLowerCase())) {
@@ -142,54 +100,26 @@
             return true;
         })
         .sort((a, b) => {
-            // Prioritize matching torrents first if enabled
+            // ranking fields are scored by the backend search
             if (prioritizeMatching) {
-                const aMatches = torrentMatchesCurrentEpisode(a);
-                const bMatches = torrentMatchesCurrentEpisode(b);
-                if (aMatches && !bMatches) return -1;
-                if (!aMatches && bMatches) return 1;
-                
-                // For movies, prioritize torrents with release year in title
-                const aHasYear = torrentHasReleaseYear(a);
-                const bHasYear = torrentHasReleaseYear(b);
-                if (aHasYear && !bHasYear) return -1;
-                if (!aHasYear && bHasYear) return 1;
+                if (a.matches_episode !== b.matches_episode) return a.matches_episode ? -1 : 1;
+                // for movies, torrents naming the release year come first
+                if (a.has_release_year !== b.has_release_year) return a.has_release_year ? -1 : 1;
             }
             let comparison = 0;
             if (sortBy === "relevance") {
-                const maxSeeds = Math.max(...filteredResults.map(t => t.seeds));
-                const seedThreshold = maxSeeds * 0.1;
-                
-                const aSeedPenalty = a.seeds < seedThreshold ? 0.5 : 1;
-                const bSeedPenalty = b.seeds < seedThreshold ? 0.5 : 1;
-                
-                // Detect batch torrents (for TV shows, prioritize torrents with "batch", "season", or "complete" in title)
-                const isBatchA = isTVShow && /\b(batch|season|complete|s\d{2}|1080p.*(?:season|complete))\b/i.test(a.title);
-                const isBatchB = isTVShow && /\b(batch|season|complete|s\d{2}|1080p.*(?:season|complete))\b/i.test(b.title);
-                const batchBonusA = isBatchA ? 1.5 : 1;
-                const batchBonusB = isBatchB ? 1.5 : 1;
-                
-                const aPopularity = ((a.seeds * 2) + a.peers + (parseSize(a.size) / (1024**3)) * 0.1) * aSeedPenalty * batchBonusA;
-                const bPopularity = ((b.seeds * 2) + b.peers + (parseSize(b.size) / (1024**3)) * 0.1) * bSeedPenalty * batchBonusB;
-                comparison = bPopularity - aPopularity;
+                comparison = b.relevance - a.relevance;
             } else if (sortBy === "seeds") {
                 comparison = b.seeds - a.seeds;
             } else if (sortBy === "peers") {
                 comparison = b.peers - a.peers;
             } else if (sortBy === "size") {
-                comparison = parseSize(b.size) - parseSize(a.size);
+                comparison = b.size_bytes - a.size_bytes;
             } else if (sortBy === "name") {
                 comparison = a.title.localeCompare(b.title);
             }
             return sortDirection === "desc" ? comparison : -comparison;
         });
-
-    function parseSize(sizeStr) {
-        const units = { 'B': 1, 'KB': 1024, 'KiB': 1024, 'MB': 1024**2, 'MiB': 1024**2, 'GB': 1024**3, 'GiB': 1024**3, 'TB': 1024**4, 'TiB': 1024**4 };
-        const match = sizeStr.match(/^([\d.]+)\s*(\w+)$/);
-        if (!match) return 0;
-        return parseFloat(match[1]) * (units[match[2]] || 1);
-    }
 
     function selectTorrent(torrent) {
         if (loading || isSelectingTorrent) return;
@@ -301,65 +231,30 @@
     
     $: queryModified = originalSearchQuery && editableSearchQuery !== originalSearchQuery;
     
-    function isValidMagnet(link) {
-        return /^magnet:\?xt=urn:[a-z0-9]+:[a-z0-9]{32,}/i.test(link);
+    // the backend validates the link and names it from its dn parameter
+    async function parseMagnet(link) {
+        return await invoke("parse_magnet_link", { link });
     }
-    
-    function handleMagnetInput() {
+
+    async function handleMagnetInput() {
         magnetError = "";
-        if (customMagnetLink && !isValidMagnet(customMagnetLink)) {
-            magnetError = "Invalid magnet link format";
+        const link = customMagnetLink;
+        if (!link) return;
+        try {
+            await parseMagnet(link);
+        } catch (err) {
+            // ignore answers for text the user has already changed
+            if (link === customMagnetLink) magnetError = String(err);
         }
     }
-    
-    function parseTorrentMetadata(title) {
-        const seasonMatch = title.match(/S(\d{1,2})|Season\s*(\d{1,2})/i);
-        const episodeMatch = title.match(/S\d{1,2}E(\d+)|E(\d+)|Episode\s*(\d+)/i);
-        const qualityMatch = title.match(/(\d{3,4}p|4K|2160p|1080p|720p|480p)/i);
-        const encodeMatch = title.match(/(x264|x265|H\.?264|H\.?265|HEVC|AVC|VP9|AV1)/i);
-        const batchMatch = title.match(/(batch|complete|\d+-\d+|S\d+E\d+-E?\d+)/i);
-        
-        const season = seasonMatch ? parseInt(seasonMatch[1] || seasonMatch[2]) : null;
-        const episode = episodeMatch ? parseInt(episodeMatch[1] || episodeMatch[2] || episodeMatch[3]) : null;
-        const quality = qualityMatch ? qualityMatch[1].toUpperCase() : null;
-        const encode = encodeMatch ? encodeMatch[1].toUpperCase() : null;
-        let is_batch = !!batchMatch;
-        
-        // If has season but no episode, likely a batch
-        if (season && !episode) {
-            is_batch = true;
-        }
-        
-        return { season, episode, quality, encode, is_batch };
-    }
-    
-    function extractTitleFromMagnet(magnetLink) {
-        const dnMatch = magnetLink.match(/dn=([^&]+)/);
-        if (dnMatch) {
-            return decodeURIComponent(dnMatch[1].replace(/\+/g, ' '));
-        }
-        return "Custom Magnet Link";
-    }
-    
-    function submitCustomMagnet() {
+
+    async function submitCustomMagnet() {
         if (!customMagnetLink) return;
-        if (!isValidMagnet(customMagnetLink)) {
-            magnetError = "Invalid magnet link format";
-            return;
+        try {
+            dispatch("select", await parseMagnet(customMagnetLink));
+        } catch (err) {
+            magnetError = String(err);
         }
-        
-        const title = extractTitleFromMagnet(customMagnetLink);
-        const metadata = parseTorrentMetadata(title);
-        
-        dispatch("select", {
-            title: title,
-            magnet_link: customMagnetLink,
-            size: "Unknown",
-            seeds: 0,
-            peers: 0,
-            provider: "custom",
-            ...metadata,
-        });
     }
     
     async function pickTorrentFile() {
@@ -376,8 +271,8 @@
                 const fileData = await readFile(selected);
                 const base64 = btoa(String.fromCharCode(...fileData));
                 const fileName = selected.split(/[/\\]/).pop();
-                const metadata = parseTorrentMetadata(fileName);
-                
+                const metadata = await invoke("parse_release_title", { title: fileName });
+
                 dispatch("select", {
                     title: fileName,
                     torrent_file: base64,
