@@ -2132,8 +2132,9 @@ button.episode-list-item {
     font-size: 13px;
 }
 
-/* inset pill like the tile progress bars */
-.progress-bar-container {
+/* inset pill like the tile progress bars. scoped to episode stills: the player's seekbar and
+   the torrent debug panel use the same class names */
+.episode-still .progress-bar-container {
     position: absolute;
     left: 8px;
     right: 8px;
@@ -2145,7 +2146,7 @@ button.episode-list-item {
     z-index: 3;
 }
 
-.progress-bar {
+.episode-still .progress-bar {
     height: 100%;
     border-radius: inherit;
     background: color-mix(in srgb, var(--prominent-color, var(--accent-color)) 70%, white);

@@ -461,7 +461,7 @@
                 </div>
                 <div class="table-body">
                     {#each filteredResults.slice(0, visibleCount) as torrent}
-                        <div class="torrent-row" class:disabled={loading} class:matches-episode={torrentMatchesCurrentEpisode(torrent)} class:has-year={torrentHasReleaseYear(torrent)} on:click={() => selectTorrent(torrent)}>
+                        <div class="torrent-row" class:disabled={loading} class:matches-episode={torrent.matches_episode} class:has-year={torrent.has_release_year} on:click={() => selectTorrent(torrent)}>
                             <div class="col-name">
                                 <div class="torrent-title">{torrent.title}</div>
                                 {#if torrent.quality || torrent.encode || torrent.is_batch || torrent.season || torrent.episode || torrent.provider}
