@@ -108,7 +108,6 @@
       // If video player is already open, close it first to force remount
       if (showVideoPlayer) {
         showVideoPlayer = false;
-        videoPlayerProps = null;
         // Wait for next tick to ensure component is unmounted
         setTimeout(() => {
           videoPlayerProps = e.detail;
@@ -271,17 +270,17 @@
     });
   }
 
+  // props stay set on close: the player reads them live, both right after
+  // dispatching close (to open the next episode) and in its final save
   function closeVideoPlayer() {
     pipMode = false;
     showVideoPlayer = false;
-    videoPlayerProps = null;
   }
 
   function backFromVideoPlayer() {
     // Return to media detail that was shown before video player
     pipMode = false;
     showVideoPlayer = false;
-    videoPlayerProps = null;
     // selectedMedia should still be set, so it will show the detail page
   }
 
