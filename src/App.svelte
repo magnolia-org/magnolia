@@ -270,17 +270,29 @@
     });
   }
 
+  // media detail remounts when the player closes, so a spent autoplay request
+  // would start the stream again
+  function clearAutoPlay() {
+    if (!selectedMedia?.autoPlay) return;
+    const media = { ...selectedMedia };
+    delete media.autoPlay;
+    delete media.resumeProgress;
+    selectedMedia = media;
+  }
+
   // props stay set on close: the player reads them live, both right after
   // dispatching close (to open the next episode) and in its final save
   function closeVideoPlayer() {
     pipMode = false;
     showVideoPlayer = false;
+    clearAutoPlay();
   }
 
   function backFromVideoPlayer() {
     // Return to media detail that was shown before video player
     pipMode = false;
     showVideoPlayer = false;
+    clearAutoPlay();
     // selectedMedia should still be set, so it will show the detail page
   }
 
