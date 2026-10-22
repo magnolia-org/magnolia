@@ -21,7 +21,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { invoke } from "@tauri-apps/api/core";
   import { setupLogging } from "./lib/consoleLogger.js";
-  import { isLinux } from "./lib/utils/platform.js";
+  import { isLinux, isMacOS } from "./lib/utils/platform.js";
   import { scrollHoverGuard } from "./lib/utils/scrollHoverGuard.js";
   import { HOME_ROWS } from "./lib/browseLists.js";
   
@@ -53,6 +53,13 @@
   $: activeModal = $modalStore.activeModal;
 
   $: document.body.classList.toggle('video-active', showVideoPlayer);
+
+  // Hide the macOS traffic lights whenever the titlebar steps aside — the mini
+  // player and any time the video controls are hidden — so the frame stays clean.
+  $: trafficLightsHidden = showVideoPlayer && (pipMode || !videoControlsVisible);
+  $: if (isMacOS) {
+    invoke('set_traffic_lights_visible', { visible: !trafficLightsHidden }).catch(() => {});
+  }
 
   onMount(async () => {
     try {

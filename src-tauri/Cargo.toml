@@ -48,9 +48,9 @@ webkit2gtk = "2.0"
 objc2 = "0.6.1"
 objc2-app-kit = { version = "0.3.1", features = [
     "NSView", "NSWindow", "NSResponder", "NSControl",
-    "NSGraphics",
+    "NSGraphics", "NSButton",
 ] }
-objc2-foundation = { version = "0.3.1", features = ["NSString"] }
+objc2-foundation = { version = "0.3.1", features = ["NSString", "NSGeometry"] }
 objc2-quartz-core = "0.3.1"
 
 
