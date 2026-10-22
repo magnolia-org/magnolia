@@ -370,7 +370,102 @@ fn open_external_url(url: String) -> Result<(), String> {
             .spawn()
             .map_err(|e| format!("failed to open URL: {}", e))?;
     }
-    
+
+    Ok(())
+}
+
+/// The custom traffic-light inset, kept in sync with `trafficLightPosition` in
+/// tauri.macos.conf.json. Tao normally reapplies this on every content-view
+/// `drawRect:`, but our webview is a static transparent layer over mpv and
+/// rarely redraws, so we reapply it ourselves whenever the buttons reappear.
+#[cfg(target_os = "macos")]
+const TRAFFIC_LIGHT_INSET: (f64, f64) = (15.0, 26.0);
+
+/// Reposition the traffic lights to the custom inset. Mirrors tao's
+/// `inset_traffic_lights`: it grows the title-bar container view by the y
+/// inset and offsets each button's x origin. Must run on the main thread.
+#[cfg(target_os = "macos")]
+unsafe fn reapply_traffic_light_inset(ns_window: &objc2_app_kit::NSWindow) {
+    use objc2_app_kit::NSWindowButton;
+
+    let (x, y) = TRAFFIC_LIGHT_INSET;
+
+    let (Some(close), Some(miniaturize), Some(zoom)) = (
+        ns_window.standardWindowButton(NSWindowButton::CloseButton),
+        ns_window.standardWindowButton(NSWindowButton::MiniaturizeButton),
+        ns_window.standardWindowButton(NSWindowButton::ZoomButton),
+    ) else {
+        return;
+    };
+
+    // title bar container = close button's grandparent view
+    let Some(title_bar_container) = close.superview().and_then(|sv| sv.superview()) else {
+        return;
+    };
+
+    let close_rect = close.frame();
+    let title_bar_frame_height = close_rect.size.height + y;
+    let mut title_bar_rect = title_bar_container.frame();
+    title_bar_rect.size.height = title_bar_frame_height;
+    title_bar_rect.origin.y = ns_window.frame().size.height - title_bar_frame_height;
+    title_bar_container.setFrame(title_bar_rect);
+
+    let space_between = miniaturize.frame().origin.x - close_rect.origin.x;
+    for (i, button) in [close, miniaturize, zoom].into_iter().enumerate() {
+        let mut origin = button.frame().origin;
+        origin.x = x + (i as f64 * space_between);
+        button.setFrameOrigin(origin);
+    }
+}
+
+/// Show or hide the macOS traffic lights (close/minimize/zoom buttons).
+///
+/// The window uses an overlay title bar, so the native buttons float over the
+/// content. In the mini player and whenever the video controls are hidden we
+/// want a clean, chromeless frame, so the frontend hides them here. When they
+/// reappear we restore the custom inset, since AppKit resets the buttons to
+/// their default corner on show and tao doesn't repaint to fix it. No-op on
+/// other platforms.
+#[tauri::command]
+fn set_traffic_lights_visible(visible: bool, window: tauri::Window) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        // The AppKit buttons must only be touched on the main thread.
+        let window_cl = window.clone();
+        window
+            .run_on_main_thread(move || {
+                use objc2_app_kit::{NSWindow, NSWindowButton};
+
+                let ns_window_ptr = match window_cl.ns_window() {
+                    Ok(ptr) => ptr,
+                    Err(_) => return,
+                };
+                // SAFETY: ns_window() hands back the live NSWindow for this
+                // webview window; we only call it on the main thread.
+                let ns_window: &NSWindow = unsafe { &*(ns_window_ptr as *const NSWindow) };
+                for button in [
+                    NSWindowButton::CloseButton,
+                    NSWindowButton::MiniaturizeButton,
+                    NSWindowButton::ZoomButton,
+                ] {
+                    if let Some(button) = ns_window.standardWindowButton(button) {
+                        button.setHidden(!visible);
+                    }
+                }
+                // AppKit lays the buttons back at the default corner when they
+                // unhide; put them back at the configured inset.
+                if visible {
+                    unsafe { reapply_traffic_light_inset(ns_window) };
+                }
+            })
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (visible, window);
+    }
+
     Ok(())
 }
 
@@ -740,6 +835,7 @@ fn main() {
             updater::enable_touch_id_sudo,
             updater::is_touch_id_sudo_enabled,
             open_external_url,
+            set_traffic_lights_visible,
             load_file,
             cycle_pause,
             seek_video,
