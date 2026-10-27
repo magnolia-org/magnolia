@@ -60,8 +60,38 @@ impl<U: StorageFactory + Clone> StorageFactory for WriteThroughCacheStorageFacto
     }
 }
 
+// magnolia: a cached piece and the byte ranges of it that were actually written. a piece
+// evicted mid-download comes back zeroed, so reads only trust ranges recorded here.
+struct CachedPiece {
+    data: Box<[u8]>,
+    // sorted, non-overlapping, non-adjacent [start, end) ranges
+    written: Vec<(usize, usize)>,
+}
+
+impl CachedPiece {
+    fn mark_written(&mut self, start: usize, end: usize) {
+        let mut start = start;
+        let mut end = end;
+        // drop every range that overlaps or touches [start, end) and grow the new one over it
+        self.written.retain(|&(s, e)| {
+            if e < start || s > end {
+                return true;
+            }
+            start = start.min(s);
+            end = end.max(e);
+            false
+        });
+        let at = self.written.partition_point(|&(s, _)| s < start);
+        self.written.insert(at, (start, end));
+    }
+
+    fn covers(&self, start: usize, end: usize) -> bool {
+        self.written.iter().any(|&(s, e)| s <= start && end <= e)
+    }
+}
+
 pub struct WriteThroughCacheStorage<U> {
-    lru: RwLock<LruCache<ValidPieceIndex, Box<[u8]>>>,
+    lru: RwLock<LruCache<ValidPieceIndex, CachedPiece>>,
     lengths: Lengths,
     file_infos: FileInfos,
     underlying: U,
@@ -91,12 +121,15 @@ impl<U: TorrentStorage> TorrentStorage for WriteThroughCacheStorage<U> {
         }
         let (id, start) = self.locate(file_id, offset)?;
         let mut g = self.lru.write();
-        if let Some(p) = g.get(&id) {
-            let end = start + buf.len();
-            let pbuf = p.get(start..end).context("bugged length")?;
+        let end = start + buf.len();
+        if let Some(p) = g.get(&id)
+            && p.covers(start, end)
+        {
+            let pbuf = p.data.get(start..end).context("bugged length")?;
             buf.copy_from_slice(pbuf);
             return Ok(());
         }
+        drop(g);
         self.underlying.pread_exact(file_id, offset, buf)
     }
 
@@ -108,13 +141,18 @@ impl<U: TorrentStorage> TorrentStorage for WriteThroughCacheStorage<U> {
         }
         let (id, start) = self.locate(file_id, offset)?;
         let mut g = self.lru.write();
-        let pbuf = g.get_or_insert_mut(id, || {
-            vec![0; self.lengths.piece_length(id) as usize].into_boxed_slice()
+        let piece = g.get_or_insert_mut(id, || CachedPiece {
+            data: vec![0; self.lengths.piece_length(id) as usize].into_boxed_slice(),
+            written: Vec::new(),
         });
         let end = start + buf.len();
-        pbuf.get_mut(start..end)
+        piece
+            .data
+            .get_mut(start..end)
             .context("bugged range")?
             .copy_from_slice(buf);
+        piece.mark_written(start, end);
+        drop(g);
         self.underlying.pwrite_all(file_id, offset, buf)
     }
 

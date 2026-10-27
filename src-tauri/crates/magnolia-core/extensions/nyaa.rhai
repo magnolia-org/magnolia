@@ -1,7 +1,7 @@
 fn manifest() {
     #{
         name: "Nyaa",
-        version: "2.1.0",
+        version: "2.2.0",
         author: "Magnolia",
         type: "tracker",
         tracker_name: "Nyaa",
@@ -141,6 +141,9 @@ fn parse_feed(xml, trackers) {
             title: title,
             info_hash: hash,
             magnet_link: "magnet:?xt=urn:btih:" + hash + "&dn=" + url_encode(title) + trackers,
+            // the item's <link> is the .torrent download, which is instant even when the
+            // swarm won't hand out metadata (private-flagged releases)
+            torrent_url: regex_group(`<link>(https://nyaa\.si/download/\d+\.torrent)</link>`, body),
             size: regex_group(`<nyaa:size>(.*?)</nyaa:size>`, body),
             seeds: parse_int_or(regex_group(`<nyaa:seeders>(\d+)</nyaa:seeders>`, body), 0),
             peers: parse_int_or(regex_group(`<nyaa:leechers>(\d+)</nyaa:leechers>`, body), 0),

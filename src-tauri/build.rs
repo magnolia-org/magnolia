@@ -128,15 +128,14 @@ fn main() {
 
     match target_os.as_str() {
         "macos" => {
-            let soia_utils_dylib = mpv_lib_dir.join("libsoia_utils.dylib");
-            if !soia_utils_dylib.exists() {
-                panic!(
-                    "\n[!] Cannot find libsoia_utils.dylib for target '{}'.\n    Expected in libs/mpv: {}\n    Please run: npm run setup:libs\n",
-                    target_triple,
-                    soia_utils_dylib.display()
-                );
-            }
-            println!("cargo:rustc-link-lib=dylib=soia_utils");
+            // magnolia's own vulkan context replaces soia_utils on macOS (see native/macos_vk.m)
+            cc::Build::new()
+                .file("native/macos_vk.m")
+                .flag("-fobjc-arc")
+                .compile("magnolia_vk");
+            println!("cargo:rustc-link-lib=dylib=placebo");
+            println!("cargo:rustc-link-lib=framework=AppKit");
+            println!("cargo:rerun-if-changed=native/macos_vk.m");
         }
         "linux" => {
             if !has_linux_soia_utils_runtime(&mpv_lib_dir) {

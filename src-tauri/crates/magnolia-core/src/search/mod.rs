@@ -29,6 +29,9 @@ pub struct SearchResult {
     pub seeds: u32,
     pub peers: u32,
     pub magnet_link: String,
+    /// direct .torrent download, which skips resolving the magnet over the swarm
+    #[serde(default)]
+    pub torrent_url: Option<String>,
     #[serde(default)]
     pub info_hash: Option<String>,
     pub provider: String,
@@ -99,6 +102,10 @@ impl SearchResult {
         }
         if self.release.subtitles.is_none() && other.release.subtitles.is_some() {
             self.release.subtitles = other.release.subtitles;
+            changed = true;
+        }
+        if self.torrent_url.is_none() && other.torrent_url.is_some() {
+            self.torrent_url = other.torrent_url;
             changed = true;
         }
         if other.trusted && !self.trusted {
@@ -671,6 +678,7 @@ impl Core {
             let (count, error) = match outcome.result {
                 Ok(results) => {
                     let count = results.len();
+                    self.torrents.remember_torrent_urls(&results);
                     for mut r in results {
                         rank_result_into(&mut r, &rank_ctx);
                         match merged.entry(r.key()) {

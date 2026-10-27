@@ -148,6 +148,18 @@ impl PrefetchState {
     }
 }
 
+const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const TORRENT_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// lowercase hex info hash of a magnet link (base32 hashes are left out).
+fn info_hash_from_magnet(magnet: &str) -> Option<String> {
+    let start = magnet.find("xt=urn:btih:")? + "xt=urn:btih:".len();
+    let hash = magnet.get(start..start + 40)?;
+    hash.chars()
+        .all(|c| c.is_ascii_hexdigit())
+        .then(|| hash.to_ascii_lowercase())
+}
+
 const HEAD_PREFETCH_BYTES: u64 = 3 * 1024 * 1024;
 const TAIL_PREFETCH_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -229,6 +241,11 @@ struct CachedTorrent {
 pub struct TorrentManager {
     session: Arc<Session>,
     download_dir: PathBuf,
+    // resolved .torrent files by info hash, outside download_dir which gets wiped
+    metadata_dir: PathBuf,
+    // .torrent download links from search results, by info hash
+    torrent_urls: std::sync::Mutex<HashMap<String, String>>,
+    http: reqwest::Client,
     torrents: Arc<RwLock<HashMap<usize, TorrentEntry>>>,
     next_id: Arc<RwLock<usize>>,
     http_addr: SocketAddr,
@@ -455,7 +472,7 @@ impl TorrentManager {
             // keep recently written pieces in memory so the stream reads them back
             // without touching disk (librqbit 9 dropped its deferred write queue)
             default_storage_factory: Some(
-                WriteThroughCacheStorageFactory::new(32 * 1024 * 1024, FilesystemStorageFactory::default()).boxed(),
+                WriteThroughCacheStorageFactory::new(128 * 1024 * 1024, FilesystemStorageFactory::default()).boxed(),
             ),
             trackers: DEFAULT_TRACKERS
                 .iter()
@@ -538,9 +555,16 @@ impl TorrentManager {
             axum::serve(listener, app).await.ok();
         });
 
+        let metadata_dir = download_dir
+            .parent()
+            .map(|p| p.join("torrent_metadata"))
+            .unwrap_or_else(|| download_dir.join(".metadata"));
         let manager = Self {
             session,
             download_dir,
+            metadata_dir,
+            torrent_urls: std::sync::Mutex::new(HashMap::new()),
+            http: reqwest::Client::new(),
             torrents,
             next_id,
             http_addr,
@@ -584,7 +608,24 @@ impl TorrentManager {
             }
         }
 
-        let add_torrent = if magnet_or_url.starts_with("magnet:") {
+        // resolving a magnet can take a minute when few peers share metadata (clients refuse to
+        // for torrents with the private flag), so resolved metadata is kept on disk by info
+        // hash and every later episode of a batch starts instantly, even after a restart.
+        let info_hash = info_hash_from_magnet(&magnet_or_url);
+        let cache_path = info_hash
+            .as_ref()
+            .map(|hash| self.metadata_dir.join(format!("{hash}.torrent")));
+        let cached_bytes = cache_path.as_ref().and_then(|p| std::fs::read(p).ok());
+        let from_cache = cached_bytes.is_some();
+        // a tracker's own .torrent download beats asking the swarm for the metadata
+        let downloaded = match (&cached_bytes, &info_hash) {
+            (None, Some(hash)) => self.download_torrent_file(hash).await,
+            _ => None,
+        };
+
+        let add_torrent = if let Some(bytes) = cached_bytes.map(bytes::Bytes::from).or(downloaded) {
+            AddTorrent::from_bytes(bytes)
+        } else if magnet_or_url.starts_with("magnet:") {
             AddTorrent::from_url(&magnet_or_url)
         } else if magnet_or_url.starts_with("http") {
             AddTorrent::from_url(&magnet_or_url)
@@ -597,7 +638,13 @@ impl TorrentManager {
             ..Default::default()
         };
 
-        let response = self.session.add_torrent(add_torrent, Some(opts)).await?;
+        // without a deadline a dead magnet left the player loading forever
+        let response = tokio::time::timeout(
+            METADATA_TIMEOUT,
+            self.session.add_torrent(add_torrent, Some(opts)),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out fetching torrent metadata after {:?}", METADATA_TIMEOUT))??;
 
         // Extract session_id if it was added (shouldn't happen with list_only, but handle it)
         let (session_id, torrent_bytes, seen_peers, cached_files) = match response {
@@ -606,7 +653,13 @@ impl TorrentManager {
                 (Some(id), None, Vec::new(), None)
             }
             AddTorrentResponse::ListOnly(list_info) => {
-                tracing::info!("Got list-only response (metadata fetched, {} peers seen)", list_info.seen_peers.len());
+                tracing::info!("Got list-only response (metadata fetched, {} peers seen, from_cache={})", list_info.seen_peers.len(), from_cache);
+                if let (Some(path), false) = (&cache_path, from_cache) {
+                    let _ = std::fs::create_dir_all(&self.metadata_dir);
+                    if let Err(e) = std::fs::write(path, &list_info.torrent_bytes) {
+                        tracing::warn!("failed to cache torrent metadata {:?}: {}", path, e);
+                    }
+                }
                 let files = video_files_from_info(&list_info.info).unwrap_or_default();
                 let name = list_info.info.name()
                     .map(|n| n.to_string())
@@ -638,6 +691,52 @@ impl TorrentManager {
 
         tracing::info!("[player-init] add_torrent: done, our_id={} in {:.3}s", our_id, t0.elapsed().as_secs_f64());
         Ok(our_id)
+    }
+
+    /// note the .torrent download links search results came with, by info hash.
+    pub fn remember_torrent_urls(&self, results: &[crate::search::SearchResult]) {
+        let mut urls = self.torrent_urls.lock().unwrap();
+        for r in results {
+            let hash = r
+                .info_hash
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                .or_else(|| info_hash_from_magnet(&r.magnet_link));
+            if let (Some(hash), Some(url)) = (hash, &r.torrent_url) {
+                urls.insert(hash, url.clone());
+            }
+        }
+    }
+
+    /// fetch the .torrent a search result linked for this info hash. anything that fails or
+    /// doesn't hash to the magnet's info hash falls back to resolving the magnet.
+    async fn download_torrent_file(&self, info_hash: &str) -> Option<bytes::Bytes> {
+        let url = self.torrent_urls.lock().unwrap().get(info_hash).cloned()?;
+        let t0 = std::time::Instant::now();
+        let result = async {
+            let response = self
+                .http
+                .get(&url)
+                .timeout(TORRENT_DOWNLOAD_TIMEOUT)
+                .send()
+                .await?
+                .error_for_status()?;
+            let bytes = response.bytes().await?;
+            let actual = librqbit::torrent_from_bytes(&bytes)?.info_hash.as_string();
+            anyhow::ensure!(actual == info_hash, "info hash mismatch ({actual})");
+            Ok::<_, anyhow::Error>(bytes)
+        }
+        .await;
+        match result {
+            Ok(bytes) => {
+                tracing::info!("[player-init] add_torrent: downloaded .torrent in {:.3}s", t0.elapsed().as_secs_f64());
+                Some(bytes)
+            }
+            Err(e) => {
+                tracing::warn!("[player-init] add_torrent: .torrent download failed ({:#}), resolving the magnet", e);
+                None
+            }
+        }
     }
 
     pub async fn get_torrent_info(&self, handle_id: usize) -> Result<TorrentInfo> {

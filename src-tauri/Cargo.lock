@@ -3162,8 +3162,9 @@ dependencies = [
 
 [[package]]
 name = "magnolia-tauri-app"
-version = "2.5.5"
+version = "2.6.0"
 dependencies = [
+ "cc",
  "cfg-if",
  "chrono",
  "fix-path-env",

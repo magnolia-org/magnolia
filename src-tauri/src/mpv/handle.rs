@@ -92,6 +92,20 @@ impl MpvHandle {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         ensure_numeric_locale_for_mpv();
 
+        // the vulkan loader doesn't pick up the moltenvk manifest bundled in
+        // Resources/vulkan/icd.d on its own (vkCreateInstance fails with
+        // VK_ERROR_INCOMPATIBLE_DRIVER), so point it there unless the dev runner already did
+        #[cfg(target_os = "macos")]
+        if std::env::var_os("VK_DRIVER_FILES").is_none() && std::env::var_os("VK_ICD_FILENAMES").is_none() {
+            let icd = std::env::current_exe().ok().and_then(|exe| {
+                Some(exe.parent()?.parent()?.join("Resources/vulkan/icd.d/MoltenVK_icd.json"))
+            });
+            if let Some(icd) = icd.filter(|p| p.exists()) {
+                std::env::set_var("VK_DRIVER_FILES", &icd);
+                std::env::set_var("VK_ICD_FILENAMES", &icd);
+            }
+        }
+
         let ctx = unsafe { mpv_create() };
         if ctx.is_null() {
             return Err(
@@ -106,11 +120,15 @@ impl MpvHandle {
             unsafe { mpv_set_option_string(ctx, c_name.as_ptr(), c_value.as_ptr()) };
         };
 
-        // soia_utils handles vo, wid, and GPU backend selection — only set
-        // options that are independent of the render path.
-        // Force Metal API on macOS to avoid MoltenVK/Vulkan shader compilation delays.
+        // soia_utils (or the macos vulkan context, see ffi.rs) handles vo, wid, and gpu
+        // backend selection, so only set options that are independent of the render path.
+
+        // hdr passthrough. "auto" only hints when the vo knows the display is in hdr mode,
+        // which the embedded context never reports, so hdr sources would be tone-mapped to sdr.
+        // on macos the hint just makes moltenvk switch the layer to edr (no display mode
+        // change), and sdr content keeps an sdr swapchain.
         #[cfg(target_os = "macos")]
-        set_str("gpu-api", "metal");
+        set_str("target-colorspace-hint", "yes");
         // Hardware decode. On Linux the bundled ffmpeg's hw paths (nvdec/vdpau)
         // segfault inside avcodec_send_packet on NVIDIA driver stacks, so
         // default to software decoding there; override with MAGNOLIA_HWDEC=auto

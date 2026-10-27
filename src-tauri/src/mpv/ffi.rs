@@ -183,6 +183,7 @@ pub(crate) struct SoiaUtils {
     _private: [u8; 0],
 }
 
+#[cfg(not(target_os = "macos"))]
 #[link(name = "soia_utils")]
 unsafe extern "C" {
     /// Create a SoiaUtils instance that embeds mpv into `window`.
@@ -210,10 +211,63 @@ unsafe extern "C" {
     pub(crate) fn soia_utils_destroy(utils: *mut SoiaUtils);
 }
 
+// macos: soia_utils only enables its native vulkan path with a signed auth payload and
+// otherwise renders through opengl and the cpu, so the vulkan context in native/macos_vk.m
+// is used instead, behind the same functions the rest of the app calls.
 #[cfg(target_os = "macos")]
-#[link(name = "soia_utils")]
 unsafe extern "C" {
-    /// Sync the Metal layer geometry to match the NSView bounds.
-    /// Call on the main thread after every resize and at startup.
-    pub(crate) fn soia_sync_layer_geometry(ns_view: *mut c_void, utils: usize);
+    static ra_ctx_vulkan_soia: u8;
+    fn magnolia_vk_attach(view: *mut c_void);
+    fn magnolia_vk_sync(view: *mut c_void);
+    fn magnolia_vk_detach();
+}
+
+/// embed mpv into `window` (an NSView). must run on the main thread after mpv_initialize().
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn soia_utils_create(
+    mpv_ctx: *mut c_void,
+    window: *const c_void,
+    _display: *const c_void,
+    _mode: i32,
+    _auth_payload: *const c_char,
+    _auth_signature_hex: *const c_char,
+) -> *mut SoiaUtils {
+    // keep the exported context from being dead-stripped; libmpv binds it at load time
+    std::hint::black_box(&raw const ra_ctx_vulkan_soia);
+    if window.is_null() {
+        return std::ptr::null_mut();
+    }
+    for (name, value) in [("gpu-api", "vulkan"), ("gpu-context", "magnoliavk"), ("vo", "gpu-next")] {
+        let name = std::ffi::CString::new(name).unwrap();
+        let value = std::ffi::CString::new(value).unwrap();
+        if mpv_set_option_string(mpv_ctx, name.as_ptr(), value.as_ptr()) < 0 {
+            return std::ptr::null_mut();
+        }
+    }
+    magnolia_vk_attach(window as *mut c_void);
+    // nothing to hand back, the layer is global; any non-null pointer means success
+    std::ptr::NonNull::<SoiaUtils>::dangling().as_ptr()
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn soia_utils_render_target_resize(_utils: *mut SoiaUtils, _width: u32, _height: u32) {}
+
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn soia_utils_render_context_update(_utils: *mut SoiaUtils) {}
+
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn soia_utils_uses_render_context(_utils: *mut SoiaUtils) -> i32 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn soia_utils_destroy(_utils: *mut SoiaUtils) {
+    magnolia_vk_detach();
+}
+
+/// sync the video layer geometry to match the NSView bounds.
+/// call on the main thread after every resize and at startup.
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn soia_sync_layer_geometry(ns_view: *mut c_void, _utils: usize) {
+    magnolia_vk_sync(ns_view);
 }

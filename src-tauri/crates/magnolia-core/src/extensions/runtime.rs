@@ -447,6 +447,9 @@ struct RawSearchResult {
     /// enough on its own: magnolia builds the magnet
     #[serde(default)]
     info_hash: Option<String>,
+    /// http(s) link to the .torrent file, used before resolving the magnet
+    #[serde(default)]
+    torrent_url: Option<String>,
     #[serde(default)]
     size: Option<String>,
     #[serde(default)]
@@ -625,6 +628,10 @@ fn search_result_from_raw(raw: RawSearchResult, provider: &str) -> Option<Search
         seeds: raw.seeds.unwrap_or(0).max(0) as u32,
         peers: raw.peers.unwrap_or(0).max(0) as u32,
         magnet_link,
+        torrent_url: raw
+            .torrent_url
+            .map(|u| u.trim().to_string())
+            .filter(|u| u.starts_with("https://") || u.starts_with("http://")),
         info_hash,
         provider: provider.to_string(),
         providers: vec![provider.to_string()],

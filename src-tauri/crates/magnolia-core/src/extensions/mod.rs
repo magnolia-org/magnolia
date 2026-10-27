@@ -655,6 +655,11 @@ mod tests {
         let results = run_search("nyaa", "one piece", None);
         assert!(!results.is_empty());
         assert!(results[0].magnet_link.starts_with("magnet:"));
+        // the .torrent link lets playback skip resolving the magnet
+        assert!(results.iter().all(|r| r
+            .torrent_url
+            .as_deref()
+            .is_some_and(|u| u.starts_with("https://nyaa.si/download/") && u.ends_with(".torrent"))));
         // Nyaa's RSS ignores paging — make sure we don't fetch duplicates
         let unique: std::collections::HashSet<&str> =
             results.iter().map(|r| r.magnet_link.as_str()).collect();
