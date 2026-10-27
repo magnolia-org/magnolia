@@ -5,9 +5,16 @@
 //! for subtitle sources. Scripts live in `<app data dir>/extensions/`, with
 //! install state and per-extension field values in `extensions.json` next to
 //! them. The four original built-in trackers ship as preinstalled extensions.
+//!
+//! a search runs `search(ctx)` once per pass (`ctx.kind` is "episode", "season",
+//! "show" or "movie", with `ctx.query` ready to send), every tracker and pass at
+//! once. a tracker that can't use some passes lists the ones it can in its
+//! manifest's `search_kinds`. results need a `title` and a `magnet_link` or
+//! `info_hash`; everything else is read from the title when left out.
 
 pub mod runtime;
 
+use crate::search::PassKind;
 use crate::subtitles::Subtitle;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -66,11 +73,20 @@ pub struct ExtensionManifest {
     pub can_auto_fetch: Option<bool>,
     #[serde(default)]
     pub debrid_name: Option<String>,
+    /// the search passes a tracker answers; none means all of them
+    #[serde(default)]
+    pub search_kinds: Option<Vec<String>>,
     #[serde(default)]
     pub fields: Vec<FieldDef>,
 }
 
 impl ExtensionManifest {
+    pub fn supports_kind(&self, kind: PassKind) -> bool {
+        self.search_kinds
+            .as_ref()
+            .map_or(true, |kinds| kinds.iter().any(|k| k == kind.as_str()))
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.name.trim().is_empty() {
             return Err("manifest: 'name' is required".to_string());
@@ -82,6 +98,17 @@ impl ExtensionManifest {
                 }
                 if self.is_anime.is_none() {
                     return Err("manifest: 'is_anime' is required for tracker extensions".to_string());
+                }
+                if let Some(kind) = self
+                    .search_kinds
+                    .iter()
+                    .flatten()
+                    .find(|k| PassKind::parse(k).is_none())
+                {
+                    return Err(format!(
+                        "manifest: unknown search kind '{}', expected episode, season, show or movie",
+                        kind
+                    ));
                 }
             }
             "subtitles" => {
@@ -608,6 +635,10 @@ mod tests {
         let manifest = runtime::parse_manifest(source).unwrap();
         let ctx = runtime::TrackerSearchContext {
             query: query.to_string(),
+            kind: "show".to_string(),
+            title: query.to_string(),
+            anime: None,
+            year: None,
             media_type: None,
             imdb_id: imdb_id.map(String::from),
             season: None,
@@ -660,7 +691,11 @@ mod tests {
 
         if manifest.ext_type == "tracker" {
             let ctx = runtime::TrackerSearchContext {
-                query: "test query".to_string(),
+                query: "breaking bad S01E02".to_string(),
+                kind: "episode".to_string(),
+                title: "breaking bad".to_string(),
+                anime: None,
+                year: Some(2008),
                 media_type: Some("tv".to_string()),
                 imdb_id: Some("tt0903747".to_string()),
                 season: Some(1),

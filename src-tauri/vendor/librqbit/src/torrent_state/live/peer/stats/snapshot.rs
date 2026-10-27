@@ -2,12 +2,16 @@ use std::{collections::HashMap, sync::atomic::Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::torrent_state::live::peer::{Peer, PeerState};
+use crate::{
+    stream_connect::ConnectionKind,
+    torrent_state::live::peer::{Peer, PeerState},
+};
 
 #[derive(Serialize, Deserialize)]
 pub struct PeerCounters {
     pub incoming_connections: u32,
     pub fetched_bytes: u64,
+    pub uploaded_bytes: u64,
     pub total_time_connecting_ms: u64,
     pub connection_attempts: u32,
     pub connections: u32,
@@ -19,10 +23,12 @@ pub struct PeerCounters {
     pub times_i_stole: u32,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 pub struct PeerStats {
     pub counters: PeerCounters,
     pub state: &'static str,
+    pub conn_kind: Option<ConnectionKind>,
+    pub client_name: Option<String>,
 }
 
 impl From<&super::atomic::PeerCountersAtomic> for PeerCounters {
@@ -30,6 +36,7 @@ impl From<&super::atomic::PeerCountersAtomic> for PeerCounters {
         Self {
             incoming_connections: counters.incoming_connections.load(Ordering::Relaxed),
             fetched_bytes: counters.fetched_bytes.load(Ordering::Relaxed),
+            uploaded_bytes: counters.uploaded_bytes.load(Ordering::Relaxed),
             total_time_connecting_ms: counters.total_time_connecting_ms.load(Ordering::Relaxed),
             connection_attempts: counters
                 .outgoing_connection_attempts
@@ -49,9 +56,18 @@ impl From<&super::atomic::PeerCountersAtomic> for PeerCounters {
 
 impl From<&Peer> for PeerStats {
     fn from(peer: &Peer) -> Self {
+        let state = peer.get_state();
         Self {
             counters: peer.stats.counters.as_ref().into(),
-            state: peer.get_state().name(),
+            state: state.name(),
+            conn_kind: match state {
+                PeerState::Live(l) => Some(l.connection_kind),
+                _ => None,
+            },
+            client_name: match state {
+                PeerState::Live(l) => l.client_name.clone(),
+                _ => None,
+            },
         }
     }
 }
@@ -63,8 +79,10 @@ pub struct PeerStatsSnapshot {
 
 #[derive(Clone, Copy, Default, Deserialize)]
 pub enum PeerStatsFilterState {
+    #[serde(rename = "all")]
     All,
     #[default]
+    #[serde(rename = "live")]
     Live,
 }
 
@@ -76,5 +94,6 @@ impl PeerStatsFilterState {
 
 #[derive(Default, Deserialize)]
 pub struct PeerStatsFilter {
+    #[serde(default)]
     pub state: PeerStatsFilterState,
 }

@@ -38,14 +38,17 @@ macro_rules! aframe {
     }};
 }
 
+#[macro_use]
+mod stat_gen;
+
 pub mod api;
 mod api_error;
 pub mod bitv; // Magnolia patch: public so the app can read the have-pieces bitfield
 mod bitv_factory;
-mod blocklist;
 mod chunk_tracker;
 mod create_torrent_file;
 mod dht_utils;
+mod error;
 pub mod file_info;
 mod file_ops;
 #[cfg(feature = "http-api")]
@@ -54,15 +57,19 @@ pub mod http_api;
 pub mod http_api_client;
 #[cfg(any(feature = "http-api", feature = "http-api-client"))]
 pub mod http_api_types;
+mod ip_ranges;
 pub mod limits;
+mod listen;
 mod merge_streams;
 mod peer_connection;
 mod peer_info_reader;
+mod piece_tracker;
 mod read_buf;
 mod session;
 mod session_persistence;
 pub mod session_stats;
-mod spawn_utils;
+pub mod spawn_utils;
+
 pub mod storage;
 mod stream_connect;
 mod torrent_state;
@@ -71,19 +78,24 @@ pub mod tracing_subscriber_config_utils;
 mod type_aliases;
 #[cfg(all(feature = "http-api", feature = "upnp-serve-adapter"))]
 pub mod upnp_server_adapter;
+mod vectored_traits;
 #[cfg(feature = "watch")]
 pub mod watch;
 
+pub use error::{Error, Result};
+
 pub use api::Api;
-pub use api_error::ApiError;
-pub use create_torrent_file::{create_torrent, CreateTorrentOptions};
+pub use api_error::{ApiError, WithStatus, WithStatusError};
+pub use create_torrent_file::{CreateTorrentOptions, CreateTorrentResult, create_torrent};
 pub use dht;
+pub use librqbit_core::spawn_utils::spawn as librqbit_spawn;
+pub use listen::{ListenerMode, ListenerOptions};
 pub use peer_connection::PeerConnectionOptions;
 pub use session::{
-    AddTorrent, AddTorrentOptions, AddTorrentResponse, ListOnlyResponse, Session, SessionOptions,
-    SessionPersistenceConfig, SUPPORTED_SCHEMES,
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, DhtSessionConfig, ListOnlyResponse,
+    SUPPORTED_SCHEMES, Session, SessionOptions, SessionPersistenceConfig,
 };
-pub use spawn_utils::spawn as librqbit_spawn;
+pub use stream_connect::ConnectionOptions;
 pub use torrent_state::{
     ManagedTorrent, ManagedTorrentShared, ManagedTorrentState, TorrentMetadata, TorrentStats,
     TorrentStatsState,

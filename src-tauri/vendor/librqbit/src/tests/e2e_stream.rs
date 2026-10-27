@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::Ipv4Addr, time::Duration};
 
 use anyhow::Context;
 use tempfile::TempDir;
@@ -6,9 +6,9 @@ use tokio::{io::AsyncReadExt, time::timeout};
 use tracing::info;
 
 use crate::{
-    create_torrent,
-    tests::test_util::{setup_test_logging, TestPeerMetadata},
-    AddTorrent, CreateTorrentOptions, Session,
+    AddTorrent, CreateTorrentOptions, Session, create_torrent,
+    spawn_utils::BlockingSpawner,
+    tests::test_util::{TestPeerMetadata, setup_test_logging},
 };
 
 use super::test_util::create_default_random_dir_with_torrents;
@@ -21,7 +21,9 @@ async fn e2e_stream() -> anyhow::Result<()> {
         CreateTorrentOptions {
             name: None,
             piece_length: Some(1024),
+            ..Default::default()
         },
+        &BlockingSpawner::new(1),
     )
     .await?;
 
@@ -29,11 +31,13 @@ async fn e2e_stream() -> anyhow::Result<()> {
     let server_session = Session::new_with_opts(
         files.path().into(),
         crate::SessionOptions {
-            disable_dht: true,
+            dht: None,
             peer_id: Some(TestPeerMetadata::good().as_peer_id()),
             persistence: None,
-            listen_port_range: Some(16001..16100),
-            enable_upnp_port_forwarding: false,
+            listen: Some(crate::listen::ListenerOptions {
+                listen_addr: (Ipv4Addr::LOCALHOST, 16001).into(),
+                ..Default::default()
+            }),
             ..Default::default()
         },
     )
@@ -64,21 +68,18 @@ async fn e2e_stream() -> anyhow::Result<()> {
 
     info!("server torrent was completed");
 
-    let peer = SocketAddr::new(
-        "127.0.0.1".parse().unwrap(),
-        server_session.tcp_listen_port().unwrap(),
-    );
+    let peer = server_session
+        .listen_addr()
+        .context("expected listen_addr to be set")?;
 
     let client_dir = TempDir::with_prefix("test_e2e_stream_client")?;
 
     let client_session = Session::new_with_opts(
         client_dir.path().into(),
         crate::SessionOptions {
-            disable_dht: true,
+            dht: None,
             persistence: None,
             peer_id: Some(TestPeerMetadata::good().as_peer_id()),
-            listen_port_range: None,
-            enable_upnp_port_forwarding: false,
             ..Default::default()
         },
     )
@@ -103,7 +104,7 @@ async fn e2e_stream() -> anyhow::Result<()> {
 
     info!("client torrent initialized, starting stream");
 
-    let mut stream = client_handle.stream(0)?;
+    let mut stream = client_handle.stream(0).await?;
     let mut buf = Vec::<u8>::with_capacity(8192);
     stream.read_to_end(&mut buf).await?;
 

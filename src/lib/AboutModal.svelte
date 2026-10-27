@@ -19,7 +19,7 @@
   async function openGitHub() {
     try {
       const { open } = await import('@tauri-apps/plugin-shell');
-      await open('https://github.com/chwair/magnolia');
+      await open('https://github.com/magnolia-org/magnolia');
     } catch (e) {
       console.error('failed to open github', e);
     }

@@ -2,22 +2,24 @@ use std::{
     collections::VecDeque,
     io::SeekFrom,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     task::{Poll, Waker},
+    time::Instant,
 };
 
 use anyhow::Context;
 use dashmap::DashMap;
 
 use librqbit_core::lengths::{CurrentPiece, Lengths, ValidPieceIndex};
-use tokio::io::{AsyncRead, AsyncSeek};
+use tokio::{
+    io::{AsyncRead, AsyncSeek},
+    sync::OwnedSemaphorePermit,
+};
 use tracing::{debug, trace};
 
-use crate::{
-    file_info::FileInfo, spawn_utils::BlockingSpawner, storage::TorrentStorage, ManagedTorrent,
-};
+use crate::{ManagedTorrent, file_info::FileInfo, storage::TorrentStorage};
 
 use super::{ManagedTorrentHandle, TorrentMetadata};
 
@@ -47,7 +49,7 @@ impl StreamState {
         lengths.compute_current_piece(self.position, self.file_abs_offset)
     }
 
-    fn queue<'a>(&self, lengths: &'a Lengths) -> impl Iterator<Item = ValidPieceIndex> + 'a {
+    fn queue<'a>(&self, lengths: &'a Lengths) -> impl Iterator<Item = ValidPieceIndex> + use<'a> {
         let start = self.file_abs_offset + self.position;
         let end = (start + self.lookahead).min(self.file_abs_offset + self.file_len);
         let dpl = lengths.default_piece_length();
@@ -129,21 +131,21 @@ impl TorrentStreams {
         lengths: &Lengths,
     ) {
         for mut w in self.streams.iter_mut() {
-            if w.value().current_piece(lengths).map(|p| p.id) == Some(piece_id) {
-                if let Some(waker) = w.value_mut().waker.take() {
-                    trace!(
-                        stream_id = *w.key(),
-                        piece_id = piece_id.get(),
-                        "waking stream"
-                    );
-                    waker.wake();
-                }
+            if w.value().current_piece(lengths).map(|p| p.id) == Some(piece_id)
+                && let Some(waker) = w.value_mut().waker.take()
+            {
+                debug!(
+                    stream_id = *w.key(),
+                    piece_id = piece_id.get(),
+                    "waking stream"
+                );
+                waker.wake();
             }
         }
     }
 
     fn drop_stream(&self, stream_id: StreamId) -> Option<StreamState> {
-        trace!(stream_id, "dropping stream");
+        debug!(stream_id, "dropping stream");
         self.streams.remove(&stream_id).map(|s| s.1)
     }
 
@@ -164,7 +166,7 @@ pub struct FileStream {
     file_len: u64,
     file_torrent_abs_offset: u64,
 
-    spawner: BlockingSpawner,
+    _blocking_permit: OwnedSemaphorePermit,
 }
 
 macro_rules! map_io_err {
@@ -194,7 +196,7 @@ impl AsyncRead for FileStream {
     ) -> Poll<std::io::Result<()>> {
         // if the file is over, return 0
         if self.position == self.file_len {
-            trace!(
+            debug!(
                 stream_id = self.stream_id,
                 file_id = self.file_id,
                 "stream completed, EOF"
@@ -202,11 +204,12 @@ impl AsyncRead for FileStream {
             return Poll::Ready(Ok(()));
         }
 
-        let current = poll_try_io!(self
-            .metadata
-            .lengths
-            .compute_current_piece(self.position, self.file_torrent_abs_offset)
-            .context("invalid position"));
+        let current = poll_try_io!(
+            self.metadata
+                .lengths()
+                .compute_current_piece(self.position, self.file_torrent_abs_offset)
+                .context("invalid position")
+        );
 
         // if the piece is not there, register to wake when it is
         // check if we have the piece for real
@@ -219,36 +222,43 @@ impl AsyncRead for FileStream {
             have
         }));
         if !have {
-            trace!(stream_id = self.stream_id, file_id = self.file_id, piece_id = %current.id, "poll pending, not have");
+            debug!(stream_id = self.stream_id, file_id = self.file_id, piece_id = %current.id, "poll pending, not have");
             return Poll::Pending;
         }
 
         // actually stream the piece
         let buf = tbuf.initialize_unfilled();
         let file_remaining = self.file_len - self.position;
-        let bytes_to_read: usize = poll_try_io!((buf.len() as u64)
-            .min(current.piece_remaining as u64)
-            .min(file_remaining)
-            .try_into());
+        let bytes_to_read: usize = poll_try_io!(
+            (buf.len() as u64)
+                .min(current.piece_remaining as u64)
+                .min(file_remaining)
+                .try_into()
+        );
 
         let buf = &mut buf[..bytes_to_read];
+
+        let start = Instant::now();
+        poll_try_io!(poll_try_io!(self.torrent.shared.spawner.block_in_place(
+            || {
+                self.torrent.with_storage_and_file(
+                    self.file_id,
+                    |files, _fi| {
+                        files.pread_exact(self.file_id, self.position, buf)?;
+                        Ok::<_, anyhow::Error>(())
+                    },
+                    &self.metadata,
+                )
+            }
+        )));
+
         trace!(
             buflen = buf.len(),
             stream_id = self.stream_id,
             file_id = self.file_id,
+            read_time = ?start.elapsed(),
             "will write bytes"
         );
-
-        poll_try_io!(poll_try_io!(self.spawner.spawn_block_in_place(|| {
-            self.torrent.with_storage_and_file(
-                self.file_id,
-                |files, _fi| {
-                    files.pread_exact(self.file_id, self.position, buf)?;
-                    Ok::<_, anyhow::Error>(())
-                },
-                &self.metadata,
-            )
-        })));
 
         self.as_mut().advance(bytes_to_read as u64);
         tbuf.advance(bytes_to_read);
@@ -277,7 +287,7 @@ impl AsyncSeek for FileStream {
         }
 
         self.as_mut().set_position(map_io_err!(new_pos.try_into())?);
-        trace!(stream_id = self.stream_id, position = self.position, "seek");
+        debug!(stream_id = self.stream_id, position = self.position, "seek");
         Ok(())
     }
 
@@ -348,7 +358,7 @@ impl ManagedTorrent {
             .unwrap_or(false)
     }
 
-    pub fn stream(self: Arc<Self>, file_id: usize) -> anyhow::Result<FileStream> {
+    pub async fn stream(self: Arc<Self>, file_id: usize) -> anyhow::Result<FileStream> {
         let metadata = self
             .metadata
             .load_full()
@@ -359,6 +369,7 @@ impl ManagedTorrent {
             &metadata,
         )?;
         let streams = self.streams()?;
+        let blocking_permit = self.shared().spawner.semaphore().acquire_owned().await?;
         let s = FileStream {
             stream_id: streams.next_id(),
             streams: streams.clone(),
@@ -367,8 +378,8 @@ impl ManagedTorrent {
 
             file_len: fd_len,
             file_torrent_abs_offset: fd_offset,
+            _blocking_permit: blocking_permit,
             torrent: self,
-            spawner: BlockingSpawner::default(),
             metadata,
         };
         s.torrent.maybe_reconnect_needed_peers_for_file(file_id);

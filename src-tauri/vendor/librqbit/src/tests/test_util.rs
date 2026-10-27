@@ -6,15 +6,15 @@ use std::{
 };
 
 use anyhow::bail;
-use librqbit_core::Id20;
+use librqbit_core::{Id20, crate_version, peer_id::generate_azereus_style};
 use parking_lot::RwLock;
-use rand::{rng, Rng, RngCore, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng, rng};
 use tempfile::TempDir;
 use tracing::{info, trace};
 
 pub fn setup_test_logging() {
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "debug,librqbit_core=trace");
+        unsafe { std::env::set_var("RUST_LOG", "info") };
     }
     let _ = tracing_subscriber::fmt::try_init();
 }
@@ -29,7 +29,7 @@ pub fn create_new_file_with_random_content(path: &Path, mut size: usize) {
     trace!(?path, "creating temp file");
 
     const BUF_SIZE: usize = 8192 * 16;
-    let mut rng = rand::rngs::SmallRng::from_os_rng();
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(rand::random());
     let mut write_buf = [0; BUF_SIZE];
     while size > 0 {
         rng.fill_bytes(&mut write_buf[..]);
@@ -66,17 +66,21 @@ impl TestPeerMetadata {
     }
 
     pub fn as_peer_id(&self) -> Id20 {
-        let mut peer_id = Id20::default();
+        let mut peer_id = generate_azereus_style(*b"rQ", crate_version!());
+        peer_id.0[15..19].copy_from_slice(b"test");
         rng().fill(&mut peer_id.0);
-        peer_id.0[0] = self.server_id;
-        peer_id.0[1] = self.max_random_sleep_ms;
+        peer_id.0[14] = self.server_id;
+        peer_id.0[13] = self.max_random_sleep_ms;
         peer_id
     }
 
     pub fn from_peer_id(peer_id: Id20) -> Self {
+        if &peer_id.0[15..19] != b"test" {
+            return Self::good();
+        }
         Self {
-            server_id: peer_id.0[0],
-            max_random_sleep_ms: peer_id.0[1],
+            server_id: peer_id.0[14],
+            max_random_sleep_ms: peer_id.0[13],
         }
     }
 
@@ -98,7 +102,7 @@ impl TestPeerMetadata {
 #[cfg(feature = "http-api")]
 async fn debug_server() -> anyhow::Result<()> {
     use anyhow::Context;
-    use axum::{response::IntoResponse, routing::get, Router};
+    use axum::{Router, response::IntoResponse, routing::get};
     async fn backtraces() -> impl IntoResponse {
         #[cfg(feature = "async-bt")]
         {

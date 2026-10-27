@@ -3,7 +3,7 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
-use super::{parse_audio_codec, parse_title_metadata, SearchResult};
+use super::{parse_release, SearchResult};
 
 /// lowercase info hash of a magnet, used to drop duplicate results.
 pub fn extract_info_hash(magnet: &str) -> Option<String> {
@@ -37,19 +37,15 @@ pub fn result_from_magnet(link: &str) -> Result<SearchResult, String> {
         return Err("Invalid magnet link format".to_string());
     }
     let title = display_name(link).unwrap_or_else(|| "Custom Magnet Link".to_string());
-    let meta = parse_title_metadata(&title);
     Ok(SearchResult {
         size: "Unknown".to_string(),
         seeds: 0,
         peers: 0,
         magnet_link: link.to_string(),
+        info_hash: extract_info_hash(link),
         provider: "custom".to_string(),
-        season: meta.season,
-        episode: meta.episode,
-        quality: meta.quality,
-        encode: meta.encode,
-        is_batch: meta.is_batch,
-        audio_codec: parse_audio_codec(&title),
+        providers: vec!["custom".to_string()],
+        release: parse_release(&title),
         title,
         ..Default::default()
     })
@@ -80,8 +76,8 @@ mod tests {
         let link = format!("magnet:?xt=urn:btih:{}&dn=Show+S01E02+1080p", hash);
         let result = result_from_magnet(&link).unwrap();
         assert_eq!(result.title, "Show S01E02 1080p");
-        assert_eq!(result.season, Some(1));
-        assert_eq!(result.episode, Some(2));
+        assert_eq!(result.release.season, Some(1));
+        assert_eq!(result.release.episode, Some(2));
         assert_eq!(result.provider, "custom");
 
         assert!(result_from_magnet("magnet:?xt=urn:btih:short").is_err());

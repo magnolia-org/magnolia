@@ -1,27 +1,23 @@
 use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
-use anyhow::Context;
-use backoff::backoff::Backoff;
 use dashmap::DashMap;
 use librqbit_core::lengths::ValidPieceIndex;
 use parking_lot::RwLock;
-use peer_binary_protocol::{Message, Request};
 
 use crate::{
-    peer_connection::WriterRequest,
-    session_stats::atomic::AtomicSessionStats,
-    torrent_state::utils::{atomic_inc, TimedExistence},
-    type_aliases::{PeerHandle, BF},
+    Error,
+    torrent_state::utils::{TimedExistence, atomic_inc},
+    type_aliases::{BF, PeerHandle},
 };
 
-use self::stats::{atomic::AggregatePeerStatsAtomic, snapshot::AggregatePeerStats};
+use self::stats::{AggregatePeerStats, AggregatePeerStatsAtomic};
 
 use super::peer::{LivePeerState, Peer, PeerRx, PeerState, PeerTx};
 
 pub mod stats;
 
 pub(crate) struct PeerStates {
-    pub session_stats: Arc<AtomicSessionStats>,
+    pub session_stats: Arc<AggregatePeerStatsAtomic>,
 
     // This keeps track of live addresses we connected to, for PEX.
     pub live_outgoing_peers: RwLock<HashSet<PeerHandle>>,
@@ -39,7 +35,7 @@ impl Drop for PeerStates {
 
 impl PeerStates {
     pub fn stats(&self) -> AggregatePeerStats {
-        AggregatePeerStats::from(&self.stats)
+        self.stats.snapshot()
     }
 
     pub fn add_if_not_seen(&self, addr: SocketAddr) -> Option<PeerHandle> {
@@ -49,10 +45,10 @@ impl PeerStates {
             Entry::Vacant(vac) => {
                 vac.insert(Peer::new_with_outgoing_address(addr));
                 atomic_inc(&self.stats.queued);
-                atomic_inc(&self.session_stats.peers.queued);
+                atomic_inc(&self.session_stats.queued);
 
                 atomic_inc(&self.stats.seen);
-                atomic_inc(&self.session_stats.peers.seen);
+                atomic_inc(&self.session_stats.seen);
                 Some(addr)
             }
         }
@@ -91,14 +87,20 @@ impl PeerStates {
         let p = self.states.remove(&handle).map(|r| r.1)?;
         let s = p.get_state();
         self.stats.dec(s);
-        self.session_stats.peers.dec(s);
+        self.session_stats.dec(s);
 
         Some(p)
     }
 
-    pub fn is_peer_interested(&self, handle: PeerHandle) -> bool {
-        self.with_live(handle, |live| live.peer_interested)
-            .unwrap_or(false)
+    pub fn is_peer_not_interested_and_has_full_torrent(
+        &self,
+        handle: PeerHandle,
+        total_pieces: usize,
+    ) -> bool {
+        self.with_live(handle, |live| {
+            !live.peer_interested && live.has_full_torrent(total_pieces)
+        })
+        .unwrap_or(false)
     }
 
     pub fn mark_peer_interested(&self, handle: PeerHandle, is_interested: bool) -> Option<bool> {
@@ -115,18 +117,19 @@ impl PeerStates {
         })
     }
 
-    pub fn mark_peer_connecting(&self, h: PeerHandle) -> anyhow::Result<(PeerRx, PeerTx)> {
+    pub fn mark_peer_connecting(&self, h: PeerHandle) -> crate::Result<(PeerRx, PeerTx)> {
         let rx = self
             .with_peer_mut(h, "mark_peer_connecting", |peer| {
-                peer.idle_to_connecting(self).context("invalid peer state")
+                peer.idle_to_connecting(self)
+                    .ok_or(Error::BugInvalidPeerState)
             })
-            .context("peer not found in states")??;
+            .ok_or(Error::BugPeerNotFound)??;
         Ok(rx)
     }
 
     pub fn reset_peer_backoff(&self, handle: PeerHandle) {
         self.with_peer_mut(handle, "reset_peer_backoff", |p| {
-            p.stats.backoff.reset();
+            p.stats.reset_backoff();
         });
     }
 
@@ -150,24 +153,10 @@ impl PeerStates {
             atomic_inc(&p.stats.counters.times_stolen_from_me);
         });
         self.stats.inc_steals();
-        self.session_stats.peers.inc_steals();
+        self.session_stats.inc_steals();
 
         self.with_live_mut(from_peer, "send_cancellations", |live| {
-            let to_remove = live
-                .inflight_requests
-                .iter()
-                .filter(|r| r.piece_index == stolen_idx)
-                .copied()
-                .collect::<Vec<_>>();
-            for req in to_remove {
-                let _ = live
-                    .tx
-                    .send(WriterRequest::Message(Message::Cancel(Request {
-                        index: stolen_idx.get(),
-                        begin: req.offset,
-                        length: req.size,
-                    })));
-            }
+            live.cancel_inflight_requests_for_piece(stolen_idx);
         });
     }
 }

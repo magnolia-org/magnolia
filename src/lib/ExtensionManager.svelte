@@ -167,7 +167,7 @@
 
   function openDocs() {
     invoke('open_external_url', {
-      url: 'https://github.com/chwair/magnolia/wiki/Extensions',
+      url: 'https://github.com/magnolia-org/magnolia/wiki/Extensions',
     }).catch(() => {});
   }
 </script>

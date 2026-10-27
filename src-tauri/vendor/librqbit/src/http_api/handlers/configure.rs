@@ -1,4 +1,4 @@
-use axum::{extract::State, response::IntoResponse, Json};
+use axum::{Json, extract::State, response::IntoResponse};
 
 use super::ApiState;
 use crate::{
@@ -21,4 +21,9 @@ pub async fn h_update_session_ratelimits(
         .ratelimits
         .set_download_bps(limits.download_bps);
     Ok(Json(EmptyJsonResponse {}))
+}
+
+pub async fn h_get_session_ratelimits(State(state): State<ApiState>) -> Result<impl IntoResponse> {
+    let config = state.api.session().ratelimits.get_config();
+    Ok(Json(config))
 }

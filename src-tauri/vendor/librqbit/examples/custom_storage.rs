@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use librqbit::{
+    DhtSessionConfig, SessionOptions,
     storage::{StorageFactory, StorageFactoryExt, TorrentStorage},
-    SessionOptions,
 };
 use tracing::info;
 
@@ -72,16 +72,17 @@ async fn main() -> anyhow::Result<()> {
     // Output logs to console.
     match std::env::var("RUST_LOG") {
         Ok(_) => {}
-        Err(_) => std::env::set_var("RUST_LOG", "info"),
+        Err(_) => unsafe { std::env::set_var("RUST_LOG", "info") },
     }
     tracing_subscriber::fmt::init();
     let s = librqbit::Session::new_with_opts(
         Default::default(),
         SessionOptions {
-            disable_dht_persistence: true,
+            dht: Some(DhtSessionConfig {
+                persistence: None,
+                ..Default::default()
+            }),
             persistence: None,
-            listen_port_range: None,
-            enable_upnp_port_forwarding: false,
             ..Default::default()
         },
     )

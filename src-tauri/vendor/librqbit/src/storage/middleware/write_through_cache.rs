@@ -13,9 +13,9 @@ use lru::LruCache;
 use parking_lot::RwLock;
 
 use crate::{
+    FileInfos, ManagedTorrentShared,
     storage::{StorageFactory, StorageFactoryExt, TorrentStorage},
     torrent_state::TorrentMetadata,
-    FileInfos, ManagedTorrentShared,
 };
 
 #[derive(Clone, Copy)]
@@ -43,14 +43,14 @@ impl<U: StorageFactory + Clone> StorageFactory for WriteThroughCacheStorageFacto
     ) -> anyhow::Result<Self::Storage> {
         let pieces = self
             .max_cache_bytes
-            .div_ceil(metadata.lengths.default_piece_length() as u64)
+            .div_ceil(metadata.info.lengths().default_piece_length() as u64)
             .try_into()?;
         let pieces = NonZeroUsize::new(pieces).context("bug: pieces == 0")?;
         let lru = RwLock::new(LruCache::new(pieces));
         Ok(WriteThroughCacheStorage {
             lru,
             underlying: self.underlying.create(shared, metadata)?,
-            lengths: metadata.lengths,
+            lengths: *metadata.info.lengths(),
             file_infos: metadata.file_infos.clone(),
         })
     }
@@ -67,16 +67,31 @@ pub struct WriteThroughCacheStorage<U> {
     underlying: U,
 }
 
+impl<U> WriteThroughCacheStorage<U> {
+    // magnolia: the piece and the offset inside it for a position in a file. upstream used
+    // `Lengths::compute_current_piece`, whose `piece_offset` is the piece index in
+    // librqbit-core 9.0.1 (abs / piece_len instead of abs % piece_len) and which rejects
+    // larger positions, so cached chunks landed in the wrong place and every hash failed.
+    fn locate(&self, file_id: usize, offset: u64) -> anyhow::Result<(ValidPieceIndex, usize)> {
+        let file = self.file_infos.get(file_id).context("wrong file")?;
+        let abs = file.offset_in_torrent + offset;
+        let dpl = self.lengths.default_piece_length() as u64;
+        let id = self
+            .lengths
+            .validate_piece_index((abs / dpl).try_into()?)
+            .context("wrong piece")?;
+        Ok((id, (abs % dpl) as usize))
+    }
+}
+
 impl<U: TorrentStorage> TorrentStorage for WriteThroughCacheStorage<U> {
     fn pread_exact(&self, file_id: usize, offset: u64, buf: &mut [u8]) -> anyhow::Result<()> {
-        let file = self.file_infos.get(file_id).context("wrong file")?;
-        let current = self
-            .lengths
-            .compute_current_piece(offset, file.offset_in_torrent)
-            .context("wrong piece")?;
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let (id, start) = self.locate(file_id, offset)?;
         let mut g = self.lru.write();
-        if let Some(p) = g.get(&current.id) {
-            let start = current.piece_offset as usize;
+        if let Some(p) = g.get(&id) {
             let end = start + buf.len();
             let pbuf = p.get(start..end).context("bugged length")?;
             buf.copy_from_slice(pbuf);
@@ -86,16 +101,16 @@ impl<U: TorrentStorage> TorrentStorage for WriteThroughCacheStorage<U> {
     }
 
     fn pwrite_all(&self, file_id: usize, offset: u64, buf: &[u8]) -> anyhow::Result<()> {
-        let file = self.file_infos.get(file_id).context("wrong file")?;
-        let current = self
-            .lengths
-            .compute_current_piece(offset, file.offset_in_torrent)
-            .context("wrong piece")?;
+        // magnolia: the default vectored write passes its empty second slice too, positioned
+        // at the end of the file, which is past the last piece
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let (id, start) = self.locate(file_id, offset)?;
         let mut g = self.lru.write();
-        let pbuf = g.get_or_insert_mut(current.id, || {
-            vec![0; self.lengths.piece_length(current.id) as usize].into_boxed_slice()
+        let pbuf = g.get_or_insert_mut(id, || {
+            vec![0; self.lengths.piece_length(id) as usize].into_boxed_slice()
         });
-        let start = current.piece_offset as usize;
         let end = start + buf.len();
         pbuf.get_mut(start..end)
             .context("bugged range")?

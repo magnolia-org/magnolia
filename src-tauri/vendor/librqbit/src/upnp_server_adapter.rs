@@ -1,30 +1,29 @@
 use std::{
     collections::{
-        hash_map::Entry::{Occupied, Vacant},
         HashMap,
+        hash_map::Entry::{Occupied, Vacant},
     },
     sync::Arc,
 };
 
-use crate::{session::TorrentId, torrent_state::TorrentMetadata, ManagedTorrentShared, Session};
+use crate::{ManagedTorrentShared, Session, session::TorrentId, torrent_state::TorrentMetadata};
 
 #[derive(Clone)]
 pub struct UpnpServerSessionAdapter {
     session: Arc<Session>,
-    port: u16,
 }
 
 use anyhow::Context;
 use buffers::ByteBufOwned;
 use itertools::Itertools;
-use librqbit_core::torrent_metainfo::TorrentMetaV1Info;
+use librqbit_core::torrent_metainfo::ValidatedTorrentMetaV1Info;
 use tracing::{debug, trace, warn};
 use upnp_serve::{
-    services::content_directory::{
-        browse::response::{Container, Item, ItemOrContainer},
-        ContentDirectoryBrowseProvider,
-    },
     UpnpServer, UpnpServerOptions,
+    services::content_directory::{
+        ContentDirectoryBrowseProvider,
+        browse::response::{Container, Item, ItemOrContainer},
+    },
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -57,7 +56,6 @@ impl TorrentFileTreeNode {
         http_host: &str,
         torrent: &ManagedTorrentShared,
         metadata: &TorrentMetadata,
-        adapter: &UpnpServerSessionAdapter,
     ) -> ItemOrContainer {
         let encoded_id = encode_id(id, torrent.id);
         let encoded_parent_id = self.parent_id.map(|p| encode_id(p, torrent.id));
@@ -69,9 +67,8 @@ impl TorrentFileTreeNode {
                 let last_url_bit = metadata
                     .info
                     .iter_file_details()
-                    .ok()
-                    .and_then(|mut it| it.nth(fid))
-                    .and_then(|fd| fd.filename.to_vec().ok())
+                    .nth(fid)
+                    .map(|fd| fd.filename.to_vec())
                     .map(|components| {
                         components
                             .into_iter()
@@ -85,8 +82,8 @@ impl TorrentFileTreeNode {
                     title: self.title.clone(),
                     mime_type: mime_guess::from_path(filename).first(),
                     url: format!(
-                        "http://{}:{}/torrents/{}/stream/{}/{}",
-                        http_host, adapter.port, torrent.id, fid, last_url_bit
+                        "http://{}/torrents/{}/stream/{}/{}",
+                        http_host, torrent.id, fid, last_url_bit
                     ),
                     size: fi.len,
                 })
@@ -106,28 +103,29 @@ struct TorrentFileTree {
     nodes: Vec<TorrentFileTreeNode>,
 }
 
-fn is_single_file_at_root(info: &TorrentMetaV1Info<ByteBufOwned>) -> bool {
+fn is_single_file_at_root(info: &ValidatedTorrentMetaV1Info<ByteBufOwned>) -> bool {
     info.iter_file_details()
-        .into_iter()
-        .flatten()
-        .flat_map(|fd| fd.filename.iter_components())
+        .flat_map(move |fd| fd.filename.iter_components())
         .nth(1)
         .is_none()
 }
 
 impl TorrentFileTree {
-    fn build(torent_id: TorrentId, info: &TorrentMetaV1Info<ByteBufOwned>) -> anyhow::Result<Self> {
+    fn build(
+        torent_id: TorrentId,
+        info: &ValidatedTorrentMetaV1Info<ByteBufOwned>,
+    ) -> anyhow::Result<Self> {
         if is_single_file_at_root(info) {
             let filename = info
-                .iter_file_details()?
+                .iter_file_details()
                 .next()
-                .context("bug")?
+                .unwrap()
                 .filename
                 .iter_components()
                 .last()
-                .context("bug")??;
+                .unwrap();
             let root_node = TorrentFileTreeNode {
-                title: filename.to_owned(),
+                title: filename.into_owned(),
                 parent_id: None,
                 children: vec![],
                 real_torrent_file_id: Some(0),
@@ -138,12 +136,9 @@ impl TorrentFileTree {
         }
 
         let root_node = TorrentFileTreeNode {
-            title: match info.name.as_ref() {
-                Some(n) => std::str::from_utf8(n)?.to_owned(),
-                None => {
-                    format!("torrent {}", torent_id)
-                }
-            },
+            title: info
+                .name_or_else(|| format!("torrent {torent_id}"))
+                .into_owned(),
             parent_id: None,
             children: vec![],
             real_torrent_file_id: None,
@@ -155,11 +150,8 @@ impl TorrentFileTree {
 
         let mut name_cache = HashMap::new();
 
-        for (fid, fd) in info.iter_file_details()?.enumerate() {
-            let components = match fd.filename.to_vec() {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+        for (fid, fd) in info.iter_file_details().enumerate() {
+            let components = fd.filename.to_vec();
             let mut parent_id = 0;
             let mut it = components.iter().peekable();
             while let Some(component) = it.next() {
@@ -234,17 +226,13 @@ impl UpnpServerSessionAdapter {
                             hostname,
                             t.shared(),
                             metadata,
-                            self,
                         ),
                     )
                 } else {
                     let title = metadata
                         .info
-                        .name
-                        .as_ref()
-                        .and_then(|b| std::str::from_utf8(&b.0).ok())
-                        .map(|n| n.to_owned())
-                        .unwrap_or_else(|| format!("torrent {real_id}"));
+                        .name_or_else(|| format!("torrent {real_id}"))
+                        .into_owned();
 
                     // Create a folder
                     Some(ItemOrContainer::Container(Container {
@@ -326,7 +314,6 @@ impl UpnpServerSessionAdapter {
                 http_hostname,
                 torrent.shared(),
                 t_metadata,
-                self,
             ))
         } else {
             for (child_node_id, child_node) in node
@@ -339,7 +326,6 @@ impl UpnpServerSessionAdapter {
                     http_hostname,
                     torrent.shared(),
                     t_metadata,
-                    self,
                 ));
             }
         };
@@ -374,7 +360,6 @@ impl Session {
             http_prefix: "/upnp".to_owned(),
             browse_provider: Box::new(UpnpServerSessionAdapter {
                 session: self.clone(),
-                port: http_listen_port,
             }),
             cancellation_token: self.cancellation_token().child_token(),
         })
@@ -393,44 +378,47 @@ mod tests {
     };
     use tempfile::TempDir;
     use upnp_serve::services::content_directory::{
-        browse::response::{Container, Item, ItemOrContainer},
         ContentDirectoryBrowseProvider,
+        browse::response::{Container, Item, ItemOrContainer},
     };
 
     use crate::{
+        AddTorrent, AddTorrentOptions, Session, SessionOptions,
         tests::test_util::setup_test_logging,
         upnp_server_adapter::{
-            decode_id, encode_id, TorrentFileTree, TorrentFileTreeNode, UpnpServerSessionAdapter,
+            TorrentFileTree, TorrentFileTreeNode, UpnpServerSessionAdapter, decode_id, encode_id,
         },
-        AddTorrent, AddTorrentOptions, Session, SessionOptions,
     };
 
     fn create_torrent(name: Option<&str>, files: &[&str]) -> TorrentMetaV1Owned {
         TorrentMetaV1Owned {
             announce: None,
             announce_list: vec![],
-            info: TorrentMetaV1Info {
-                name: name.map(|n| n.as_bytes().into()),
-                pieces: b""[..].into(),
-                piece_length: 1,
-                length: None,
-                md5sum: None,
-                files: Some(
-                    files
-                        .iter()
-                        .map(|f| TorrentMetaV1File {
-                            length: 1,
-                            path: f.split("/").map(|f| f.as_bytes().into()).collect(),
-                            attr: None,
-                            sha1: None,
-                            symlink_path: None,
-                        })
-                        .collect(),
-                ),
-                attr: None,
-                sha1: None,
-                symlink_path: None,
-                private: false,
+            info: bencode::WithRawBytes {
+                data: TorrentMetaV1Info {
+                    name: name.map(|n| n.as_bytes().into()),
+                    pieces: b""[..].into(),
+                    piece_length: 1,
+                    length: None,
+                    md5sum: None,
+                    files: Some(
+                        files
+                            .iter()
+                            .map(|f| TorrentMetaV1File {
+                                length: 1,
+                                path: f.split("/").map(|f| f.as_bytes().into()).collect(),
+                                attr: None,
+                                sha1: None,
+                                symlink_path: None,
+                            })
+                            .collect(),
+                    ),
+                    attr: None,
+                    sha1: None,
+                    symlink_path: None,
+                    private: false,
+                },
+                raw_bytes: Default::default(),
             },
             comment: None,
             created_by: None,
@@ -445,7 +433,7 @@ mod tests {
     #[test]
     fn test_torrent_file_tree_single() -> anyhow::Result<()> {
         let t = create_torrent(Some("test t"), &["file0"]);
-        let tree = TorrentFileTree::build(0, &t.info)?;
+        let tree = TorrentFileTree::build(0, &t.info.data.validate().unwrap())?;
         assert_eq!(
             &tree.nodes,
             &[TorrentFileTreeNode {
@@ -462,7 +450,7 @@ mod tests {
     #[test]
     fn test_torrent_file_tree_flat() -> anyhow::Result<()> {
         let t = create_torrent(Some("test t"), &["file0", "file1"]);
-        let tree = TorrentFileTree::build(0, &t.info)?;
+        let tree = TorrentFileTree::build(0, &t.info.data.validate().unwrap())?;
         assert_eq!(
             &tree.nodes,
             &[
@@ -496,7 +484,7 @@ mod tests {
             Some("test t"),
             &["file0", "file1", "dir0/file2", "dir0/dir1/file3"],
         );
-        let tree = TorrentFileTree::build(0, &t.info)?;
+        let tree = TorrentFileTree::build(0, &t.info.data.validate().unwrap())?;
         assert_eq!(
             &tree.nodes,
             &[
@@ -565,7 +553,7 @@ mod tests {
         let session = Session::new_with_opts(
             td.path().to_owned(),
             SessionOptions {
-                disable_dht: true,
+                dht: None,
                 ..Default::default()
             },
         )
@@ -593,10 +581,7 @@ mod tests {
             .await
             .unwrap();
 
-        let adapter = UpnpServerSessionAdapter {
-            session,
-            port: 9005,
-        };
+        let adapter = UpnpServerSessionAdapter { session };
 
         assert_eq!(
             adapter.browse_metadata(0, "127.0.0.1"),
@@ -616,7 +601,7 @@ mod tests {
                     parent_id: 0,
                     title: "f1".into(),
                     mime_type: None,
-                    url: "http://127.0.0.1:9005/torrents/0/stream/0/f1".into(),
+                    url: "http://127.0.0.1/torrents/0/stream/0/f1".into(),
                     size: 1,
                 }),
                 ItemOrContainer::Container(Container {
@@ -635,7 +620,7 @@ mod tests {
                 parent_id: 0,
                 title: "f1".into(),
                 mime_type: None,
-                url: "http://127.0.0.1:9005/torrents/0/stream/0/f1".into(),
+                url: "http://127.0.0.1/torrents/0/stream/0/f1".into(),
                 size: 1,
             })]
         );
@@ -677,7 +662,7 @@ mod tests {
                 parent_id: encode_id(1, 1),
                 title: "f2".into(),
                 mime_type: None,
-                url: "http://127.0.0.1:9005/torrents/1/stream/0/d1/f2".into(),
+                url: "http://127.0.0.1/torrents/1/stream/0/d1/f2".into(),
                 size: 1,
             })]
         );
@@ -689,7 +674,7 @@ mod tests {
                 parent_id: encode_id(1, 1),
                 title: "f2".into(),
                 mime_type: None,
-                url: "http://127.0.0.1:9005/torrents/1/stream/0/d1/f2".into(),
+                url: "http://127.0.0.1/torrents/1/stream/0/d1/f2".into(),
                 size: 1,
             })]
         );

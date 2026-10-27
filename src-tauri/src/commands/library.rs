@@ -1,5 +1,6 @@
 //! watch tracking, my list, settings and other saved state.
 
+use magnolia_core::anime_db::TmdbEpisodeDate;
 use magnolia_core::cache_metadata::CacheMetadata;
 use magnolia_core::settings::Settings;
 use magnolia_core::track_preferences::TrackPreference;
@@ -22,6 +23,33 @@ pub async fn record_watch_progress(
         notify_watch_state_changed(&app);
     }
     Ok(entry)
+}
+
+/// anilist numbering for every episode of an anime, with the tmdb episodes that air as one
+/// grouped. none for shows that aren't anime or anilist can't place.
+#[tauri::command]
+pub async fn get_anime_numbering(
+    core: CoreState<'_>,
+    tmdb_id: u32,
+    episodes: Vec<TmdbEpisodeDate>,
+) -> Result<Option<AnimeNumbering>, String> {
+    Ok(core.anime_numbering(tmdb_id, &episodes).await.map(|n| AnimeNumbering {
+        groups: n.split_groups(),
+        episodes: n.episodes,
+    }))
+}
+
+#[derive(serde::Serialize)]
+pub struct AnimeNumbering {
+    episodes: Vec<magnolia_core::anime_db::MappedEpisode>,
+    /// tmdb (season, episode) lists that play from one file
+    groups: Vec<Vec<(u32, u32)>>,
+}
+
+/// the episode after this one, past every tmdb episode sharing its file.
+#[tauri::command]
+pub fn get_next_episode(core: CoreState<'_>, media_id: u32, media_type: String, season: u32, episode: u32) -> u32 {
+    core.next_episode(media_id, &media_type, season, episode)
 }
 
 #[tauri::command]

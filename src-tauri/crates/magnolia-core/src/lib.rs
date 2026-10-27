@@ -1,6 +1,7 @@
 //! magnolia's backend: torrent streaming, tracker search, extensions and watch
 //! tracking. nothing here depends on the ui layer; the desktop app wraps it in commands.
 
+pub mod anime_db;
 pub mod anime_list;
 pub mod cache_metadata;
 pub mod extensions;
@@ -22,10 +23,12 @@ pub mod watching;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anime_db::AnimeDb;
 use anime_list::AnimeListManager;
 use cache_metadata::CacheMetadataManager;
 use extensions::ExtensionManager;
 use my_list::MyListManager;
+use search::SearchService;
 use settings::SettingsManager;
 use subtitle_packs::SubtitlePackStore;
 use torrent::TorrentManager;
@@ -44,8 +47,10 @@ pub struct Core {
     pub my_list: MyListManager,
     pub track_preferences: TrackPreferencesManager,
     pub anime_list: Arc<AnimeListManager>,
+    pub anime_db: AnimeDb,
     pub cache_metadata: CacheMetadataManager,
     pub extensions: Arc<ExtensionManager>,
+    pub search: Arc<SearchService>,
     pub subtitle_packs: SubtitlePackStore,
     pub torrents: Arc<TorrentManager>,
 }
@@ -66,8 +71,10 @@ impl Core {
             my_list: MyListManager::new(data_dir.clone()),
             track_preferences: TrackPreferencesManager::new(data_dir.clone()),
             anime_list: Arc::new(AnimeListManager::new(data_dir.clone())),
+            anime_db: AnimeDb::new(data_dir.clone()),
             cache_metadata: CacheMetadataManager::new(data_dir.clone()),
             extensions: Arc::new(ExtensionManager::new(data_dir.clone())),
+            search: Arc::new(SearchService::new()),
             subtitle_packs: SubtitlePackStore::new(data_dir.join("subtitle_packs")),
             torrents: Arc::new(torrents),
             data_dir,

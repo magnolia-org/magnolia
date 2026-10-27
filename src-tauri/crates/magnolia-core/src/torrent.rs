@@ -1,5 +1,10 @@
 use anyhow::{Context, Result};
-use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, PeerConnectionOptions, Session, SessionOptions, api::TorrentIdOrHash};
+use librqbit::storage::middleware::write_through_cache::WriteThroughCacheStorageFactory;
+use librqbit::storage::{StorageFactoryExt, filesystem::FilesystemStorageFactory};
+use librqbit::{
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, ConnectionOptions, PeerConnectionOptions, Session, SessionOptions,
+    ValidatedTorrentMetaV1Info, api::TorrentIdOrHash,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -167,7 +172,7 @@ fn spawn_prefetch(
             let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
                 // stream() fails while the torrent is still initializing.
                 let mut stream = loop {
-                    match handle.clone().stream(file_index) {
+                    match handle.clone().stream(file_index).await {
                         Ok(s) => break s,
                         Err(_) => tokio::time::sleep(std::time::Duration::from_millis(150)).await,
                     }
@@ -231,14 +236,14 @@ pub struct TorrentManager {
     torrent_cache: Arc<RwLock<Vec<CachedTorrent>>>,
 }
 
-fn video_files_from_info(info: &librqbit::TorrentMetaV1Info<librqbit::ByteBufOwned>) -> Result<Vec<TorrentFile>> {
+fn video_files_from_info(info: &ValidatedTorrentMetaV1Info<librqbit::ByteBufOwned>) -> Result<Vec<TorrentFile>> {
     Ok(info
-        .iter_file_details()?
+        .iter_file_details()
         .enumerate()
         .filter_map(|(index, detail)| {
-            let filename_str = detail.filename.to_string().ok()?;
+            let filename_str = detail.filename.to_string();
             if is_video_file(&filename_str) {
-                let pathbuf = detail.filename.to_pathbuf().ok()?;
+                let pathbuf = detail.filename.to_pathbuf();
                 let name = pathbuf
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -320,7 +325,7 @@ async fn stream_file(
     // Try the librqbit streaming path first (works for in-progress and most finished torrents).
     // If that fails (can happen on fully-finished torrents), fall back to serving the file
     // directly from disk, which always works for completed downloads.
-    let body = match handle.stream(file_id) {
+    let body = match handle.stream(file_id).await {
         Ok(mut stream) => {
             if start > 0 {
                 if let Err(e) = stream.seek(SeekFrom::Start(start)).await {
@@ -436,14 +441,22 @@ impl TorrentManager {
         let session_options = || SessionOptions {
             // librqbit's default peer connect timeout is 10s; dead peers from DHT are
             // common, so churn through them quickly to find live ones sooner.
-            peer_opts: Some(PeerConnectionOptions {
-                connect_timeout: Some(std::time::Duration::from_secs(2)),
-                read_write_timeout: Some(std::time::Duration::from_secs(10)),
-                keep_alive_interval: None,
+            connect: Some(ConnectionOptions {
+                peer_opts: Some(PeerConnectionOptions {
+                    connect_timeout: Some(std::time::Duration::from_secs(2)),
+                    read_write_timeout: Some(std::time::Duration::from_secs(10)),
+                    keep_alive_interval: None,
+                }),
+                ..Default::default()
             }),
-            // Buffer writes in memory so pieces complete (and wake the stream)
-            // without waiting on disk; reads are served from the same cache.
-            defer_writes_up_to: Some(32),
+            // librqbit 9 holds a blocking-pool permit for every open stream, and the
+            // prefetch reads, the player's http ranges and disk writes share that pool
+            runtime_worker_threads: Some(16),
+            // keep recently written pieces in memory so the stream reads them back
+            // without touching disk (librqbit 9 dropped its deferred write queue)
+            default_storage_factory: Some(
+                WriteThroughCacheStorageFactory::new(32 * 1024 * 1024, FilesystemStorageFactory::default()).boxed(),
+            ),
             trackers: DEFAULT_TRACKERS
                 .iter()
                 .filter_map(|t| url::Url::parse(t).ok())
@@ -595,7 +608,7 @@ impl TorrentManager {
             AddTorrentResponse::ListOnly(list_info) => {
                 tracing::info!("Got list-only response (metadata fetched, {} peers seen)", list_info.seen_peers.len());
                 let files = video_files_from_info(&list_info.info).unwrap_or_default();
-                let name = list_info.info.name.as_ref()
+                let name = list_info.info.name()
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "Unknown".to_string());
                 (
@@ -673,7 +686,7 @@ impl TorrentManager {
                 AddTorrentResponse::ListOnly(list_info) => {
                     let files = video_files_from_info(&list_info.info)?;
 
-                    let name = match &list_info.info.name {
+                    let name = match list_info.info.name() {
                         Some(n) => n.to_string(),
                         None => "Unknown".to_string(),
                     };
@@ -778,7 +791,7 @@ impl TorrentManager {
                 .as_ref()
                 .map(|l| l.upload_speed.mbps as u64)
                 .unwrap_or(0),
-            peers: stats.live.as_ref().map(|l| l.snapshot.peer_stats.live).unwrap_or(0),
+            peers: stats.live.as_ref().map(|l| l.snapshot.peer_stats.live as usize).unwrap_or(0),
             is_paused,
             state,
         })
@@ -959,7 +972,7 @@ impl TorrentManager {
         // the cheap checks pass now that the player polls several times a second.
         let is_ready = has_buffer
             && (stats.finished
-                || (prefetch_complete && handle.clone().stream(file_index).is_ok()));
+                || (prefetch_complete && handle.clone().stream(file_index).await.is_ok()));
 
         let stream_info = if is_ready {
             Some(StreamInfo {
@@ -987,7 +1000,7 @@ impl TorrentManager {
 
         let status = if is_ready { "ready".to_string() } else { "initializing".to_string() };
 
-        let peers = stats.live.as_ref().map(|l| l.snapshot.peer_stats.live).unwrap_or(0);
+        let peers = stats.live.as_ref().map(|l| l.snapshot.peer_stats.live as usize).unwrap_or(0);
         let download_mbps = stats.live.as_ref().map(|l| l.download_speed.mbps).unwrap_or_default();
         let elapsed_str = buffer_start
             .map(|t| format!("{:.1}s", t.elapsed().as_secs_f64()))
@@ -1084,7 +1097,7 @@ impl TorrentManager {
         
         // Get torrent name for the base directory
         let torrent_name = handle.with_metadata(|meta| {
-            meta.info.name.as_ref()
+            meta.info.name()
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "unknown".to_string())
         })?;
@@ -1258,7 +1271,7 @@ impl TorrentManager {
             .with_metadata(|m| {
                 m.file_infos
                     .get(file_index)
-                    .map(|fi| (fi.offset_in_torrent, fi.len, m.lengths.default_piece_length() as u64))
+                    .map(|fi| (fi.offset_in_torrent, fi.len, m.lengths().default_piece_length() as u64))
             })?
             .context("File index out of range")?;
 

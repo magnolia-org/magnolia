@@ -4,7 +4,7 @@ version = "2.5.5"
 description = "Media torrent client"
 authors = ["chair"]
 license = "MIT"
-repository = "https://github.com/chwair/magnolia"
+repository = "https://github.com/magnolia-org/magnolia"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -29,7 +29,7 @@ log = "0.4"
 
 magnolia-core = { path = "crates/magnolia-core" }
 
-reqwest = { version = "0.11", features = ["json", "blocking"] }
+reqwest = { version = "0.13", features = ["json", "blocking", "query"] }
 chrono = "0.4"
 fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
 gag = "1.0"
@@ -59,13 +59,10 @@ objc2-quartz-core = "0.3.1"
 # DO NOT REMOVE!!
 custom-protocol = ["tauri/custom-protocol"]
 
-# Patch librqbit to fix Windows seek_read not returning UnexpectedEof on short reads.
-# Without this, initial_check SHA1-hashes every piece on Windows (minutes for large
-# torrents) instead of using the is_broken fast-path that macOS/Linux get for free.
-# The vendored copy also carries streaming changes marked `magnolia:` (stream look-ahead,
+# The vendored librqbit carries streaming changes marked `magnolia:` (stream look-ahead,
 # several peers sharing a piece playback is blocked on, per-peer request caps while
-# streaming, releasing a dead peer's pieces). Keep this section when bumping librqbit and
-# port those changes over.
+# streaming, a dead peer's pieces passing to its helpers). Keep this section when bumping
+# librqbit and port those changes over.
 [patch.crates-io]
 librqbit = { path = "vendor/librqbit" }
 

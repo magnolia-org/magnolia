@@ -8,6 +8,8 @@ use crate::{AddTorrentOptions, PeerConnectionOptions};
 pub struct OnlyFiles(Vec<usize>);
 pub struct InitialPeers(pub Vec<SocketAddr>);
 
+pub use crate::torrent_state::peer::stats::snapshot::{PeerStatsFilter, PeerStatsSnapshot};
+
 #[derive(Serialize, Deserialize, Default)]
 pub struct TorrentAddQueryParams {
     pub overwrite: Option<bool>,
@@ -49,8 +51,7 @@ impl<'de> Deserialize<'de> for OnlyFiles {
                     Ok(acc)
                 }
                 Err(_) => Err(D::Error::custom(format!(
-                    "only_files: failed to parse {:?} as integer",
-                    c
+                    "only_files: failed to parse {c:?} as integer"
                 ))),
             })?;
         if list.is_empty() {

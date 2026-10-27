@@ -138,6 +138,18 @@ impl WatchProgressManager {
         Some(entry)
     }
 
+    /// copies an episode's saved state to other episodes, for tmdb episodes that share a file.
+    pub async fn mirror_episode(&self, media_id: u32, media_type: &str, from: (u32, u32), to: &[(u32, u32)]) {
+        let mut data = self.data.write().await;
+        let Some(value) = data.progress.get(&episode_key(media_id, media_type, from.0, from.1)).cloned() else {
+            return;
+        };
+        for (s, e) in to.iter().filter(|ep| **ep != from) {
+            data.progress.insert(episode_key(media_id, media_type, *s, *e), value.clone());
+        }
+        Self::persist(&self.file_path, &data);
+    }
+
     pub async fn set_all(&self, progress: HashMap<String, Value>) {
         let mut data = self.data.write().await;
         data.progress = progress;

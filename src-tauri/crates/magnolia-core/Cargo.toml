@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Magnolia backend: torrent streaming, search, extensions and watch tracking"
 authors = ["chair"]
 license = "MIT"
-repository = "https://github.com/chwair/magnolia"
+repository = "https://github.com/magnolia-org/magnolia"
 edition = "2021"
 publish = false
 
@@ -16,19 +16,19 @@ anyhow = "1"
 tracing = "0.1"
 log = "0.4"
 
-librqbit = "8.1.1"
+librqbit = { version = "9.0.1", features = ["storage_middleware"] }
 bytes = "1"
 url = "2"
 axum = { version = "0.8", features = ["http2"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.7", features = ["cors"] }
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = "0.3"
 
-reqwest = { version = "0.11", features = ["json", "blocking"] }
+reqwest = { version = "0.13", features = ["json", "blocking", "query"] }
 regex = "1.10"
 rhai = { version = "1", features = ["sync", "serde"] }
 urlencoding = "2.1"
-zip = { version = "0.6", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3"

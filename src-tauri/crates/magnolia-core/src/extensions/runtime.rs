@@ -6,15 +6,31 @@
 //! so callers must run these functions inside `spawn_blocking`.
 
 use super::{ExtensionManifest, FieldDef};
-use crate::search::{parse_audio_codec, parse_title_metadata, SearchResult};
+use crate::search::ranking::parse_size;
+use crate::search::release::normalize_resolution;
+use crate::search::{magnet, parse_release, SearchResult, Subtitles};
 use crate::subtitles::Subtitle;
 use regex::Regex;
-use rhai::{Array, Dynamic, Engine, Map as RhaiMap, Scope};
+use rhai::{Array, Dynamic, Engine, Map as RhaiMap, Scope, AST};
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const HTTP_TIMEOUT_SECS: u64 = 30;
+const HTTP_CONNECT_TIMEOUT_SECS: u64 = 8;
+/// how many requests one `http_get_all` call runs at a time
+const HTTP_PARALLEL: usize = 8;
+/// public trackers added to magnets built from a bare info hash
+const DEFAULT_TRACKERS: &[&str] = &[
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://exodus.desync.com:6969/announce",
+    "udp://open.demonii.com:1337/announce",
+    "udp://tracker.dler.org:6969/announce",
+];
 const DEFAULT_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -24,6 +40,8 @@ fn http_client() -> &'static reqwest::blocking::Client {
         reqwest::blocking::Client::builder()
             .user_agent(DEFAULT_USER_AGENT)
             .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
+            .connect_timeout(std::time::Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
+            .pool_max_idle_per_host(8)
             .build()
             .expect("failed to build http client for extensions")
     })
@@ -112,6 +130,105 @@ fn html_unescape_impl(s: &str) -> String {
         .replace("&apos;", "'")
 }
 
+/// fetches every url at once (a few at a time), in order. a failed request
+/// gives an empty string, so one dead detail page can't sink a whole search.
+fn http_get_all_impl(urls: Array, headers: Option<&RhaiMap>) -> Array {
+    let urls: Vec<String> = urls.into_iter().map(|u| u.to_string()).collect();
+    let mut bodies: Vec<String> = vec![String::new(); urls.len()];
+    for (chunk_urls, chunk_bodies) in urls.chunks(HTTP_PARALLEL).zip(bodies.chunks_mut(HTTP_PARALLEL)) {
+        std::thread::scope(|scope| {
+            for (url, body) in chunk_urls.iter().zip(chunk_bodies.iter_mut()) {
+                scope.spawn(move || match http_request("GET", url, None, headers) {
+                    Ok(text) => *body = text,
+                    Err(e) => log::info!("[extension] {}", e),
+                });
+            }
+        });
+    }
+    bodies.into_iter().map(Dynamic::from).collect()
+}
+
+pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// unix seconds for the dates trackers print: rfc 2822 ("Sat, 17 Oct 2026
+/// 15:42:41 -0000"), iso 8601 ("2026-10-17 15:42:41" or with a t), or a bare number.
+pub fn parse_date_impl(text: &str) -> Option<i64> {
+    let text = text.trim();
+    if let Ok(n) = text.parse::<i64>() {
+        return Some(n);
+    }
+    static RFC: OnceLock<Regex> = OnceLock::new();
+    static ISO: OnceLock<Regex> = OnceLock::new();
+    let rfc = RFC.get_or_init(|| {
+        Regex::new(r"(?i)(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?(?:\s*([+-])(\d{2}):?(\d{2}))?").unwrap()
+    });
+    let iso = ISO.get_or_init(|| {
+        Regex::new(r"(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2})(?::(\d{2}))?)?(?:\s*(?:Z|([+-])(\d{2}):?(\d{2})))?").unwrap()
+    });
+    let num = |c: &regex::Captures, i: usize| c.get(i).and_then(|m| m.as_str().parse::<i64>().ok()).unwrap_or(0);
+    let (y, mo, d, c) = if let Some(c) = rfc.captures(text) {
+        const MONTHS: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+        let mo = MONTHS.iter().position(|m| c[2].eq_ignore_ascii_case(m))? as i64 + 1;
+        (num(&c, 3), mo, num(&c, 1), c)
+    } else {
+        let c = iso.captures(text)?;
+        (num(&c, 1), num(&c, 2), num(&c, 3), c)
+    };
+    let mut secs = days_from_civil(y, mo, d) * 86400 + num(&c, 4) * 3600 + num(&c, 5) * 60 + num(&c, 6);
+    if let Some(sign) = c.get(7) {
+        let offset = num(&c, 8) * 3600 + num(&c, 9) * 60;
+        secs += if sign.as_str() == "-" { offset } else { -offset };
+    }
+    Some(secs)
+}
+
+/// a magnet for a bare info hash, named and with public trackers.
+pub fn magnet_from_hash(hash: &str, name: &str) -> String {
+    let mut link = format!("magnet:?xt=urn:btih:{}", hash.trim());
+    if !name.is_empty() {
+        link.push_str("&dn=");
+        link.push_str(&urlencoding::encode(name));
+    }
+    for tracker in DEFAULT_TRACKERS {
+        link.push_str("&tr=");
+        link.push_str(&urlencoding::encode(tracker));
+    }
+    link
+}
+
+/// one engine for every script; building it registers the whole host api.
+fn shared_engine() -> &'static Engine {
+    static ENGINE: OnceLock<Engine> = OnceLock::new();
+    ENGINE.get_or_init(build_engine)
+}
+
+/// scripts compile once per source text, not on every search.
+fn compiled(source: &str) -> Result<Arc<AST>, String> {
+    static CACHE: OnceLock<Mutex<HashMap<u64, Arc<AST>>>> = OnceLock::new();
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    let key = hasher.finish();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(ast) = cache.lock().map_err(|e| e.to_string())?.get(&key) {
+        return Ok(ast.clone());
+    }
+    let ast = Arc::new(
+        shared_engine()
+            .compile(source)
+            .map_err(|e| format!("script compile error: {}", e))?,
+    );
+    cache.lock().map_err(|e| e.to_string())?.insert(key, ast.clone());
+    Ok(ast)
+}
+
 /// Build a sandboxed engine with the extension host API registered.
 pub fn build_engine() -> Engine {
     let mut engine = Engine::new();
@@ -132,6 +249,10 @@ pub fn build_engine() -> Engine {
     engine.register_fn("http_get", |url: &str| http_request("GET", url, None, None));
     engine.register_fn("http_get", |url: &str, headers: RhaiMap| {
         http_request("GET", url, None, Some(&headers))
+    });
+    engine.register_fn("http_get_all", |urls: Array| http_get_all_impl(urls, None));
+    engine.register_fn("http_get_all", |urls: Array, headers: RhaiMap| {
+        http_get_all_impl(urls, Some(&headers))
     });
     engine.register_fn("http_post", |url: &str, body: &str| {
         http_request("POST", url, Some(body), None)
@@ -216,20 +337,32 @@ pub fn build_engine() -> Engine {
         std::thread::sleep(std::time::Duration::from_millis(capped));
     });
 
-    // Shared release-title parser so tracker extensions get the same
-    // season/episode/quality detection as the built-in providers had.
+    engine.register_fn("parse_size", |s: &str| parse_size(s) as i64);
+    engine.register_fn("parse_date", |s: &str| match parse_date_impl(s) {
+        Some(secs) => Dynamic::from_int(secs),
+        None => Dynamic::UNIT,
+    });
+    engine.register_fn("info_hash", |magnet: &str| {
+        opt_string_to_dynamic(magnet::extract_info_hash(magnet))
+    });
+    engine.register_fn("magnet_from_hash", |hash: &str, name: &str| magnet_from_hash(hash, name));
+    engine.register_fn("magnet_from_hash", |hash: &str| magnet_from_hash(hash, ""));
+
+    // the same release parser magnolia runs on every result, for scripts that
+    // want to filter on it. results are parsed anyway, so scripts needn't call it.
+    engine.register_fn("parse_release", |title: &str| -> Dynamic {
+        rhai::serde::to_dynamic(parse_release(title)).unwrap_or(Dynamic::UNIT)
+    });
+    // the older, smaller form of parse_release
     engine.register_fn("parse_title_meta", |title: &str| -> RhaiMap {
-        let meta = parse_title_metadata(title);
+        let info = parse_release(title);
         let mut map = RhaiMap::new();
-        map.insert("season".into(), opt_u32_to_dynamic(meta.season));
-        map.insert("episode".into(), opt_u32_to_dynamic(meta.episode));
-        map.insert("quality".into(), opt_string_to_dynamic(meta.quality));
-        map.insert("encode".into(), opt_string_to_dynamic(meta.encode));
-        map.insert("is_batch".into(), meta.is_batch.into());
-        map.insert(
-            "audio_codec".into(),
-            opt_string_to_dynamic(parse_audio_codec(title)),
-        );
+        map.insert("season".into(), opt_u32_to_dynamic(info.season));
+        map.insert("episode".into(), opt_u32_to_dynamic(info.episode));
+        map.insert("quality".into(), opt_string_to_dynamic(info.resolution));
+        map.insert("encode".into(), opt_string_to_dynamic(info.video_codec));
+        map.insert("is_batch".into(), info.is_batch.into());
+        map.insert("audio_codec".into(), opt_string_to_dynamic(info.audio_codec));
         map
     });
 
@@ -252,12 +385,9 @@ fn opt_string_to_dynamic(v: Option<String>) -> Dynamic {
 
 /// Run `manifest()` from a script and validate the result.
 pub fn parse_manifest(source: &str) -> Result<ExtensionManifest, String> {
-    let engine = build_engine();
-    let ast = engine
-        .compile(source)
-        .map_err(|e| format!("script compile error: {}", e))?;
+    let ast = compiled(source)?;
     let mut scope = Scope::new();
-    let result: Dynamic = engine
+    let result: Dynamic = shared_engine()
         .call_fn(&mut scope, &ast, "manifest", ())
         .map_err(|e| format!("failed to call manifest(): {}", e))?;
     let manifest: ExtensionManifest = rhai::serde::from_dynamic(&result)
@@ -294,7 +424,15 @@ pub fn json_value_to_string(v: &serde_json::Value) -> String {
 }
 
 pub struct TrackerSearchContext {
+    /// the query for this pass, ready to send
     pub query: String,
+    /// which pass this is: "episode", "season", "show" or "movie"
+    pub kind: String,
+    /// the bare show or movie name, for trackers that build their own queries
+    pub title: String,
+    /// where the episode falls in anilist's numbering, for anime
+    pub anime: Option<crate::anime_db::AnimeEpisode>,
+    pub year: Option<u32>,
     pub media_type: Option<String>,
     pub imdb_id: Option<String>,
     pub season: Option<u32>,
@@ -304,9 +442,15 @@ pub struct TrackerSearchContext {
 #[derive(Debug, Deserialize)]
 struct RawSearchResult {
     title: String,
-    magnet_link: String,
+    #[serde(default)]
+    magnet_link: Option<String>,
+    /// enough on its own: magnolia builds the magnet
+    #[serde(default)]
+    info_hash: Option<String>,
     #[serde(default)]
     size: Option<String>,
+    #[serde(default)]
+    size_bytes: Option<i64>,
     #[serde(default)]
     seeds: Option<i64>,
     #[serde(default)]
@@ -323,6 +467,22 @@ struct RawSearchResult {
     is_batch: Option<bool>,
     #[serde(default)]
     audio_codec: Option<String>,
+    /// "english", "multi", "foreign", "hardcoded" or "none"
+    #[serde(default)]
+    subtitles: Option<String>,
+    #[serde(default)]
+    languages: Option<Vec<String>>,
+    #[serde(default)]
+    hdr: Option<Vec<String>>,
+    #[serde(default)]
+    group: Option<String>,
+    /// unix seconds, or any date `parse_date` reads
+    #[serde(default)]
+    uploaded: Option<Dynamic>,
+    #[serde(default)]
+    file_count: Option<i64>,
+    #[serde(default)]
+    trusted: Option<bool>,
 }
 
 fn call_entry_point(
@@ -330,12 +490,9 @@ fn call_entry_point(
     fn_name: &str,
     ctx_map: RhaiMap,
 ) -> Result<Array, String> {
-    let engine = build_engine();
-    let ast = engine
-        .compile(source)
-        .map_err(|e| format!("script compile error: {}", e))?;
+    let ast = compiled(source)?;
     let mut scope = Scope::new();
-    let result: Dynamic = engine
+    let result: Dynamic = shared_engine()
         .call_fn(&mut scope, &ast, fn_name, (Dynamic::from_map(ctx_map),))
         .map_err(|e| format!("{}() failed: {}", fn_name, e))?;
     result
@@ -358,6 +515,16 @@ pub fn run_tracker_search(
 
     let mut ctx_map = RhaiMap::new();
     ctx_map.insert("query".into(), ctx.query.clone().into());
+    ctx_map.insert("kind".into(), ctx.kind.clone().into());
+    ctx_map.insert("title".into(), ctx.title.clone().into());
+    ctx_map.insert("year".into(), opt_u32_to_dynamic(ctx.year));
+    ctx_map.insert(
+        "anime".into(),
+        ctx.anime
+            .as_ref()
+            .and_then(|a| rhai::serde::to_dynamic(a).ok())
+            .unwrap_or(Dynamic::UNIT),
+    );
     ctx_map.insert(
         "media_type".into(),
         opt_string_to_dynamic(ctx.media_type.clone()),
@@ -381,29 +548,93 @@ pub fn run_tracker_search(
                 continue;
             }
         };
-        if raw.title.is_empty() || !raw.magnet_link.starts_with("magnet:") {
-            continue;
+        if let Some(result) = search_result_from_raw(raw, &provider) {
+            results.push(result);
         }
-
-        // Auto-fill anything the script didn't provide from the title.
-        let meta = parse_title_metadata(&raw.title);
-        results.push(SearchResult {
-            season: raw.season.map(|v| v.max(0) as u32).or(meta.season),
-            episode: raw.episode.map(|v| v.max(0) as u32).or(meta.episode),
-            quality: raw.quality.or(meta.quality),
-            encode: raw.encode.or(meta.encode),
-            is_batch: raw.is_batch.unwrap_or(meta.is_batch),
-            audio_codec: raw.audio_codec.or_else(|| parse_audio_codec(&raw.title)),
-            size: raw.size.unwrap_or_else(|| "Unknown".to_string()),
-            seeds: raw.seeds.unwrap_or(0).max(0) as u32,
-            peers: raw.peers.unwrap_or(0).max(0) as u32,
-            title: raw.title,
-            magnet_link: raw.magnet_link,
-            provider: provider.clone(),
-            ..Default::default()
-        });
     }
     Ok(results)
+}
+
+/// a script's result with everything it left out read from the title.
+fn search_result_from_raw(raw: RawSearchResult, provider: &str) -> Option<SearchResult> {
+    let title = html_unescape_impl(raw.title.trim());
+    if title.is_empty() {
+        return None;
+    }
+    let hash = raw
+        .info_hash
+        .map(|h| h.trim().to_lowercase())
+        .filter(|h| h.len() >= 32 && h.chars().all(|c| c.is_ascii_alphanumeric()));
+    let magnet_link = match (raw.magnet_link.filter(|m| m.starts_with("magnet:")), &hash) {
+        (Some(link), _) => link,
+        (None, Some(hash)) => magnet_from_hash(hash, &title),
+        (None, None) => return None,
+    };
+    let info_hash = hash.or_else(|| magnet::extract_info_hash(&magnet_link));
+
+    let mut release = parse_release(&title);
+    let positive = |v: Option<i64>| v.filter(|v| *v > 0).map(|v| v as u32);
+    if let Some(season) = positive(raw.season) {
+        release.season = Some(season);
+    }
+    if let Some(episode) = positive(raw.episode) {
+        release.episode = Some(episode);
+    }
+    if let Some(is_batch) = raw.is_batch {
+        release.is_batch = is_batch;
+    }
+    if let Some(resolution) = raw.quality.as_deref().and_then(normalize_resolution) {
+        release.resolution = Some(resolution);
+    }
+    release.video_codec = release.video_codec.or(raw.encode);
+    release.audio_codec = release.audio_codec.or(raw.audio_codec);
+    if let Some(subs) = raw.subtitles.as_deref().and_then(Subtitles::parse) {
+        // a tracker's own category beats a guess from the name, except burned in subtitles
+        if release.subtitles != Some(Subtitles::Hardcoded) {
+            release.subtitles = Some(subs);
+        }
+    }
+    for lang in raw.languages.unwrap_or_default() {
+        if !release.languages.contains(&lang) {
+            release.languages.push(lang);
+        }
+    }
+    if let Some(hdr) = raw.hdr.filter(|h| !h.is_empty()) {
+        release.hdr = hdr;
+    }
+    if raw.group.is_some() {
+        release.group = raw.group;
+    }
+
+    let size_bytes = raw.size_bytes.filter(|b| *b > 0).map(|b| b as u64);
+    let size = match (raw.size.filter(|s| !s.trim().is_empty()), size_bytes) {
+        (Some(size), _) => size,
+        (None, Some(bytes)) => format_size_impl(bytes as i64),
+        (None, None) => "Unknown".to_string(),
+    };
+    let uploaded = raw.uploaded.and_then(|d| {
+        if let Ok(n) = d.as_int() {
+            return Some(n);
+        }
+        parse_date_impl(&d.into_string().ok()?)
+    });
+
+    Some(SearchResult {
+        size_bytes: size_bytes.unwrap_or_else(|| parse_size(&size)),
+        size,
+        seeds: raw.seeds.unwrap_or(0).max(0) as u32,
+        peers: raw.peers.unwrap_or(0).max(0) as u32,
+        magnet_link,
+        info_hash,
+        provider: provider.to_string(),
+        providers: vec![provider.to_string()],
+        uploaded: uploaded.filter(|t| *t > 0),
+        file_count: positive(raw.file_count),
+        trusted: raw.trusted.unwrap_or(false),
+        release,
+        title,
+        ..Default::default()
+    })
 }
 
 pub struct SubtitleFetchContext {
@@ -636,12 +867,9 @@ pub fn run_debrid_resolve(
         Dynamic::from_map(build_fields_map(&manifest.fields, field_values)),
     );
 
-    let engine = build_engine();
-    let ast = engine
-        .compile(source)
-        .map_err(|e| format!("script compile error: {}", e))?;
+    let ast = compiled(source)?;
     let mut scope = Scope::new();
-    let result: Dynamic = engine
+    let result: Dynamic = shared_engine()
         .call_fn(&mut scope, &ast, "resolve", (Dynamic::from_map(ctx_map),))
         .map_err(|e| format!("[{}] resolve() failed: {}", service, e))?;
 
@@ -662,4 +890,39 @@ pub fn run_debrid_resolve(
         ));
     }
     Ok(url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dates_parse_in_tracker_formats() {
+        assert_eq!(parse_date_impl("Sat, 17 Oct 2026 15:42:41 -0000"), Some(1792251761));
+        assert_eq!(parse_date_impl("17 Oct 2026 17:42:41 +0200"), Some(1792251761));
+        assert_eq!(parse_date_impl("2026-10-17 15:42:41"), Some(1792251761));
+        assert_eq!(parse_date_impl("1774118449"), Some(1774118449));
+        assert_eq!(parse_date_impl("yesterday"), None);
+    }
+
+    #[test]
+    fn results_from_a_bare_info_hash_get_a_magnet() {
+        let raw: RawSearchResult = serde_json::from_value(serde_json::json!({
+            "title": "Show S01E02 1080p",
+            "info_hash": "0123456789ABCDEF0123456789ABCDEF01234567",
+            "size_bytes": 1048576,
+            "seeds": 3,
+            "subtitles": "english",
+            "file_count": 1,
+            "trusted": true,
+        }))
+        .unwrap();
+        let r = search_result_from_raw(raw, "Test").unwrap();
+        assert!(r.magnet_link.starts_with("magnet:?xt=urn:btih:0123456789abcdef"));
+        assert_eq!(r.info_hash.as_deref(), Some("0123456789abcdef0123456789abcdef01234567"));
+        assert_eq!(r.release.episode, Some(2));
+        assert_eq!(r.release.subtitles, Some(Subtitles::English));
+        assert_eq!(r.size, "1.00 MB");
+        assert_eq!(r.providers, vec!["Test"]);
+    }
 }

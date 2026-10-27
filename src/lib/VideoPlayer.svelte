@@ -1082,7 +1082,13 @@ let currentSkipSection = null;
   }
 
   async function openNextEpisode() {
-    const nextEpisode = episodeNum + 1;
+    // split anime episodes share a file, so the backend skips past the rest of this one
+    const nextEpisode = await invoke('get_next_episode', {
+      mediaId: Number(mediaId),
+      mediaType,
+      season: seasonNum,
+      episode: episodeNum,
+    }).catch(() => episodeNum + 1);
     const openDetailForNext = () => {
       dispatch('close');
       window.dispatchEvent(new CustomEvent('openMediaDetail', {

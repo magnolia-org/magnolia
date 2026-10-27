@@ -25,7 +25,7 @@
 - Recommendations based on your "my list"
 
 ## Download
-### Get the latest build [here](https://github.com/chwair/magnolia/releases/latest)
+### Get the latest build [here](https://github.com/magnolia-org/magnolia/releases/latest)
 (Windows, MacOS (Apple Silicon) and Linux (.deb) support.)<br>
 You can also get it through the AUR if using Arch.
 ```bash
@@ -44,7 +44,7 @@ yay -S magnolia-bin
 
 ```bash
 # Clone the repository
-git clone https://github.com/chwair/magnolia.git
+git clone https://github.com/magnolia-org/magnolia.git
 cd magnolia
 
 # Install dependencies

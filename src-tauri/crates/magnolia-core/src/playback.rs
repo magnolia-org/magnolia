@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::extensions::runtime::DebridListContext;
 use crate::extensions::LoadedExtension;
 use crate::files::{self, MediaFile};
+use crate::search::{parse_release, ranking};
 use crate::watch_state;
 use crate::Core;
 
@@ -133,6 +134,18 @@ impl Core {
         files: &[MediaFile],
     ) -> Option<MediaFile> {
         let videos: Vec<MediaFile> = files.iter().filter(|f| files::is_video_file(&f.name)).cloned().collect();
+
+        // anime files follow anilist's numbering, and one file can hold several tmdb episodes
+        let numbering = self.anime_db.numbering(show_id).filter(|_| media_type == "tv");
+        if let Some(numbering) = numbering {
+            if let Some(matched) = self
+                .auto_assign_anime_files(show_id, season, episode, magnet_link, &videos, &numbering)
+                .await
+            {
+                return Some(matched);
+            }
+        }
+
         let matched = videos.get(files::find_episode_file(&videos, season, episode)?)?.clone();
 
         self.selections
@@ -157,11 +170,64 @@ impl Core {
         Some(matched)
     }
 
+    /// `auto_assign_files` in anilist's numbering: a file named "- 13" holds every tmdb
+    /// episode mapped to anilist episode 13. none when no file matches the requested one.
+    async fn auto_assign_anime_files(
+        &self,
+        show_id: u32,
+        season: u32,
+        episode: u32,
+        magnet_link: &str,
+        videos: &[MediaFile],
+        numbering: &crate::anime_db::ShowNumbering,
+    ) -> Option<MediaFile> {
+        let wanted = numbering.get(season, episode)?;
+        let holds = |file: &MediaFile, m: &crate::anime_db::MappedEpisode| {
+            ranking::anime_match(&parse_release(&file.name), &m.anime, m.season) == ranking::MatchKind::Exact
+        };
+        let matched = match videos {
+            [only] => only.clone(),
+            _ => videos.iter().find(|f| holds(f, wanted))?.clone(),
+        };
+
+        let mut batch: Vec<(u32, u32, String, usize)> = numbering
+            .group(season, episode)
+            .into_iter()
+            .map(|(s, e)| (s, e, magnet_link.to_string(), matched.index))
+            .collect();
+        if videos.len() > 1 {
+            for file in videos.iter().filter(|f| f.index != matched.index) {
+                batch.extend(
+                    numbering
+                        .episodes
+                        .iter()
+                        .filter(|m| holds(file, m))
+                        .map(|m| (m.season, m.episode, magnet_link.to_string(), file.index)),
+                );
+            }
+        }
+        log::info!(
+            "auto-assigned {} tmdb episodes by anime numbering from {}",
+            batch.len(),
+            magnet_link
+        );
+        self.selections.save_multiple_selections(show_id, batch).await;
+        Some(matched)
+    }
+
     /// readies a chosen torrent file for the player. if the torrent can't be
     /// added its saved selection is dropped, so the next play asks for a new source.
     pub async fn prepare_playback(&self, req: PlaybackRequest) -> Result<PlaybackPlan, String> {
         let is_movie = req.media_type == "movie";
         let (season, episode) = if is_movie { (None, None) } else { (req.season, req.episode) };
+        // a split anime episode plays, resumes and records as the first tmdb episode of its file
+        let (season, episode) = match (season, episode) {
+            (Some(s), Some(e)) => {
+                let first = self.episode_group(req.media_id, &req.media_type, s, e)[0];
+                (Some(first.0), Some(first.1))
+            }
+            other => other,
+        };
 
         let handle_id = match req.handle_id {
             Some(id) => Some(id),

@@ -8,8 +8,9 @@ use itertools::Itertools;
 
 use super::ApiState;
 use crate::{
+    ManagedTorrent,
     api::{Result, TorrentIdOrHash},
-    ApiError, ManagedTorrent,
+    api_error::WithStatus,
 };
 
 fn torrent_playlist_items(handle: &ManagedTorrent) -> Result<Vec<(usize, String)>> {
@@ -19,10 +20,10 @@ fn torrent_playlist_items(handle: &ManagedTorrent) -> Result<Vec<(usize, String)
         .as_ref()
         .context("torrent metadata not resolved")?
         .info
-        .iter_file_details()?
+        .iter_file_details()
         .enumerate()
         .filter_map(|(file_idx, file_details)| {
-            let filename = file_details.filename.to_vec().ok()?.join("/");
+            let filename = file_details.filename.to_vec().join("/");
             let is_playable = mime_guess::from_path(&filename)
                 .first()
                 .map(|mime| {
@@ -43,17 +44,17 @@ fn torrent_playlist_items(handle: &ManagedTorrent) -> Result<Vec<(usize, String)
 }
 
 fn get_host(headers: &HeaderMap) -> Result<&str> {
-    Ok(headers
+    headers
         .get("host")
-        .ok_or_else(|| ApiError::new_from_text(StatusCode::BAD_REQUEST, "Missing host header"))?
-        .to_str()
-        .context("hostname is not string")?)
+        .ok_or("Missing host header")
+        .and_then(|h| h.to_str().map_err(|_| "hostname is not a string"))
+        .with_status(StatusCode::BAD_REQUEST)
 }
 
-fn build_playlist_content(
+fn build_playlist_content<I: IntoIterator<Item = (TorrentIdOrHash, usize, String)>>(
     host: &str,
-    it: impl IntoIterator<Item = (TorrentIdOrHash, usize, String)>,
-) -> impl IntoResponse {
+    it: I,
+) -> impl IntoResponse + use<I> {
     let body = it
         .into_iter()
         .map(|(torrent_idx, file_idx, filename)| {

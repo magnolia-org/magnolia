@@ -4,21 +4,22 @@ use anyhow::Context;
 use buffers::ByteBufOwned;
 use dht::{DhtStats, Id20};
 use http::StatusCode;
-use librqbit_core::torrent_metainfo::{FileDetailsAttrs, TorrentMetaV1Info};
+use librqbit_core::torrent_metainfo::{FileDetailsAttrs, ValidatedTorrentMetaV1Info};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::warn;
 
 use crate::{
-    api_error::{ApiError, ApiErrorExt},
+    WithStatus, WithStatusError,
+    api_error::ApiError,
     session::{
         AddTorrent, AddTorrentOptions, AddTorrentResponse, ListOnlyResponse, Session, TorrentId,
     },
     session_stats::snapshot::SessionStatsSnapshot,
     torrent_state::{
-        peer::stats::snapshot::{PeerStatsFilter, PeerStatsSnapshot},
         FileStream, ManagedTorrentHandle,
+        peer::stats::snapshot::{PeerStatsFilter, PeerStatsSnapshot},
     },
+    type_aliases::BF,
 };
 
 #[cfg(feature = "tracing-subscriber-utils")]
@@ -26,7 +27,7 @@ use crate::tracing_subscriber_config_utils::LineBroadcast;
 #[cfg(feature = "tracing-subscriber-utils")]
 use futures::Stream;
 #[cfg(feature = "tracing-subscriber-utils")]
-use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
+use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 
 pub use crate::torrent_state::stats::{LiveStats, TorrentStats};
 
@@ -131,8 +132,8 @@ impl<'de> Deserialize<'de> for TorrentIdOrHash {
 impl std::fmt::Display for TorrentIdOrHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TorrentIdOrHash::Id(id) => write!(f, "{}", id),
-            TorrentIdOrHash::Hash(h) => write!(f, "{:?}", h),
+            TorrentIdOrHash::Id(id) => write!(f, "{id}"),
+            TorrentIdOrHash::Hash(h) => write!(f, "{h:?}"),
         }
     }
 }
@@ -206,6 +207,12 @@ impl Api {
         let items = self.session.with_torrents(|torrents| {
             torrents
                 .map(|(id, mgr)| {
+                    let total_pieces = mgr
+                        .metadata
+                        .load()
+                        .as_ref()
+                        .map(|m| m.info.lengths().total_pieces())
+                        .unwrap_or(0);
                     let mut r = TorrentDetailsResponse {
                         id: Some(id),
                         info_hash: mgr.shared().info_hash.as_string(),
@@ -216,6 +223,7 @@ impl Api {
                             .output_folder
                             .to_string_lossy()
                             .into_owned(),
+                        total_pieces,
 
                         // These will be filled in /details and /stats endpoints
                         files: None,
@@ -273,7 +281,10 @@ impl Api {
         let handle = self.mgr_handle(idx)?;
         Ok(handle
             .live()
-            .context("not live")?
+            .with_status_error(
+                StatusCode::PRECONDITION_FAILED,
+                crate::Error::TorrentIsNotLive,
+            )?
             .per_peer_stats_snapshot(filter))
     }
 
@@ -285,8 +296,7 @@ impl Api {
         self.session()
             .pause(&handle)
             .await
-            .context("error pausing torrent")
-            .with_error_status_code(StatusCode::BAD_REQUEST)?;
+            .with_status(StatusCode::BAD_REQUEST)?;
         Ok(Default::default())
     }
 
@@ -298,8 +308,7 @@ impl Api {
         self.session
             .unpause(&handle)
             .await
-            .context("error unpausing torrent")
-            .with_error_status_code(StatusCode::BAD_REQUEST)?;
+            .with_status(StatusCode::BAD_REQUEST)?;
         Ok(Default::default())
     }
 
@@ -353,9 +362,9 @@ impl Api {
         &self,
     ) -> Result<
         impl Stream<Item = std::result::Result<bytes::Bytes, BroadcastStreamRecvError>>
-            + Send
-            + Sync
-            + 'static,
+        + Send
+        + Sync
+        + 'static,
     > {
         Ok(self
             .line_broadcast
@@ -374,7 +383,7 @@ impl Api {
             .add_torrent(add, opts)
             .await
             .context("error adding torrent")
-            .with_error_status_code(StatusCode::BAD_REQUEST)?
+            .with_status(StatusCode::BAD_REQUEST)?
         {
             AddTorrentResponse::AlreadyManaged(id, handle) => {
                 let details = make_torrent_details(
@@ -463,9 +472,19 @@ impl Api {
             .ok_or(ApiError::dht_disabled())
     }
 
-    pub fn api_dht_table(&self) -> Result<impl Serialize> {
+    pub fn api_dht_table(&self) -> Result<impl Serialize + use<>> {
         let dht = self.session.get_dht().ok_or(ApiError::dht_disabled())?;
-        Ok(dht.with_routing_table(|r| r.clone()))
+        Ok(dht.with_routing_tables(|v4, v6| {
+            #[derive(Serialize)]
+            struct Tables<T> {
+                v4: T,
+                v6: T,
+            }
+            Tables {
+                v4: v4.clone(),
+                v6: v6.clone(),
+            }
+        }))
     }
 
     pub fn api_stats_v0(&self, idx: TorrentIdOrHash) -> Result<LiveStats> {
@@ -479,14 +498,22 @@ impl Api {
         Ok(mgr.stats())
     }
 
-    pub fn api_dump_haves(&self, idx: TorrentIdOrHash) -> Result<String> {
+    pub fn api_dump_haves(&self, idx: TorrentIdOrHash) -> Result<(BF, u32)> {
         let mgr = self.mgr_handle(idx)?;
-        Ok(mgr.with_chunk_tracker(|chunks| format!("{:?}", chunks.get_have_pieces().as_slice()))?)
+        mgr.with_chunk_tracker(|chunks| {
+            let bf = BF::from_bitslice(chunks.get_have_pieces().as_slice());
+            let len = chunks.get_lengths().total_pieces();
+            (bf, len)
+        })
+        .with_status_error(
+            StatusCode::PRECONDITION_FAILED,
+            crate::Error::TorrentIsNotLive,
+        )
     }
 
-    pub fn api_stream(&self, idx: TorrentIdOrHash, file_id: usize) -> Result<FileStream> {
+    pub async fn api_stream(&self, idx: TorrentIdOrHash, file_id: usize) -> Result<FileStream> {
         let mgr = self.mgr_handle(idx)?;
-        Ok(mgr.stream(file_id)?)
+        Ok(mgr.stream(file_id).await?)
     }
 }
 
@@ -515,6 +542,9 @@ pub struct TorrentDetailsResponse {
     pub name: Option<String>,
     pub output_folder: String,
 
+    #[serde(default)]
+    pub total_pieces: u32,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub files: Option<Vec<TorrentDetailsResponseFile>>,
     #[serde(skip_serializing_if = "Option::is_none", skip_deserializing)]
@@ -532,7 +562,7 @@ pub struct ApiAddTorrentResponse {
 fn make_torrent_details(
     id: Option<TorrentId>,
     info_hash: &Id20,
-    info: Option<&TorrentMetaV1Info<ByteBufOwned>>,
+    info: Option<&ValidatedTorrentMetaV1Info<ByteBufOwned>>,
     name: Option<&str>,
     only_files: Option<&[usize]>,
     output_folder: String,
@@ -540,17 +570,10 @@ fn make_torrent_details(
     let files = match info {
         Some(info) => info
             .iter_file_details()
-            .context("error iterating filenames and lengths")?
             .enumerate()
             .map(|(idx, d)| {
-                let name = match d.filename.to_string() {
-                    Ok(s) => s,
-                    Err(err) => {
-                        warn!("error reading filename: {:?}", err);
-                        "<INVALID NAME>".to_string()
-                    }
-                };
-                let components = d.filename.to_vec().unwrap_or_default();
+                let name = d.filename.to_string();
+                let components = d.filename.to_vec();
                 let included = only_files.map(|o| o.contains(&idx)).unwrap_or(true);
                 TorrentDetailsResponseFile {
                     name,
@@ -563,39 +586,35 @@ fn make_torrent_details(
             .collect(),
         None => Default::default(),
     };
+    let total_pieces = info.map(|i| i.lengths().total_pieces()).unwrap_or(0);
     Ok(TorrentDetailsResponse {
         id,
         info_hash: info_hash.as_string(),
-        name: name.map(|s| s.to_owned()).or_else(|| {
-            info.and_then(|i| {
-                i.name
-                    .as_ref()
-                    .map(|b| String::from_utf8_lossy(b.as_ref()).into())
-            })
-        }),
+        name: name
+            .map(|s| s.to_owned())
+            .or_else(|| info.and_then(|i| i.name().map(|n| n.into_owned()))),
         files: Some(files),
         output_folder,
+        total_pieces,
         stats: None,
     })
 }
 
 fn torrent_file_mime_type(
-    info: &TorrentMetaV1Info<ByteBufOwned>,
+    info: &ValidatedTorrentMetaV1Info<ByteBufOwned>,
     file_idx: usize,
 ) -> Result<&'static str> {
-    info.iter_file_details()?
+    Ok(info
+        .iter_file_details()
         .nth(file_idx)
         .and_then(|d| {
             d.filename
                 .iter_components()
                 .last()
-                .and_then(|r| r.ok())
-                .and_then(|s| mime_guess::from_path(s).first_raw())
+                .and_then(|s| mime_guess::from_path(&*s).first_raw())
         })
-        .ok_or_else(|| {
-            ApiError::new_from_text(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot determine mime type for file",
-            )
-        })
+        .ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot determine mime type for file",
+        ))?)
 }

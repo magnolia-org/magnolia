@@ -164,7 +164,8 @@ pub async fn download_subtitle(url: String) -> Result<String, String> {
             let mut file = archive
                 .by_index(i)
                 .map_err(|e| format!("ZIP read failed: {}", e))?;
-            if let Some(ext) = extension_from_name(file.name()) {
+            let name = file.name().map_err(|e| format!("ZIP read failed: {}", e))?.to_string();
+            if let Some(ext) = extension_from_name(&name) {
                 subtitle_ext = ext.to_string();
                 let mut content = Vec::new();
                 file.read_to_end(&mut content)

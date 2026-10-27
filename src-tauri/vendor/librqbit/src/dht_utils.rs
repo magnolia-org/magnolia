@@ -2,9 +2,9 @@ use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
 use anyhow::Context;
 use buffers::ByteBufOwned;
-use futures::{stream::FuturesUnordered, Stream, StreamExt};
+use futures::{Stream, StreamExt, stream::FuturesUnordered};
 use librqbit_core::torrent_metainfo::TorrentMetaV1Info;
-use tracing::{debug, error_span, Instrument};
+use tracing::{Instrument, debug, debug_span};
 
 use crate::{
     peer_connection::PeerConnectionOptions, peer_info_reader, spawn_utils::BlockingSpawner,
@@ -34,6 +34,7 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
     addrs_stream: A,
     peer_connection_options: Option<PeerConnectionOptions>,
     connector: Arc<StreamConnector>,
+    client_name_and_version: String,
 ) -> ReadMetainfoResult<A> {
     let mut seen = HashSet::<SocketAddr>::new();
     let mut addrs = addrs_stream;
@@ -43,6 +44,7 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
     let read_info_guarded = |addr| {
         let semaphore = &semaphore;
         let connector = connector.clone();
+        let client_name_and_version = client_name_and_version.clone();
         async move {
             let token = semaphore.acquire().await?;
             let ret = peer_info_reader::read_metainfo_from_peer(
@@ -50,10 +52,13 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
                 peer_id,
                 info_hash,
                 peer_connection_options,
-                BlockingSpawner::new(true),
+                // This shouldn't be called anyway as we aren't reading/writing to disk, so it's
+                // ok not to use a shared one.
+                BlockingSpawner::new(1),
                 connector,
+                client_name_and_version,
             )
-            .instrument(error_span!("read_metainfo_from_peer", ?addr))
+            .instrument(debug_span!("read_metainfo_from_peer", ?addr))
             .await
             .with_context(|| format!("error reading metainfo from {addr}"));
             drop(token);
@@ -139,7 +144,8 @@ mod tests {
             Vec::new(),
             peer_rx,
             None,
-            Arc::new(Default::default()),
+            Arc::new(StreamConnector::new(Default::default()).await.unwrap()),
+            crate::client_name_and_version().to_owned(),
         )
         .await
         {

@@ -15,6 +15,7 @@
   import { watchProgressStore } from "./stores/watchProgressStore.js";
 import { invoke } from "@tauri-apps/api/core";
   import TorrentSelector from "./TorrentSelector.svelte";
+  import { startTorrentSearch } from "./torrentSearch.js";
   import FileSelector from "./FileSelector.svelte";
   import ErrorModal from "./ErrorModal.svelte";
   import TorrentManager from "./TorrentManager.svelte";
@@ -36,6 +37,10 @@ import { invoke } from "@tauri-apps/api/core";
   let selectedSeason = null;
   let seasonDetails = null;
   let allSeasonsData = {};
+  // "season-episode" -> [[season, episode], ...] for tmdb episodes that air as one anime
+  // episode and play from one file (panty & stocking splits each broadcast in two or three)
+  let animeGroups = {};
+  let animeNumberingFor = null;
   let selectedEpisode = null;
   let credits = null;
   let detailsToken = 0;
@@ -50,11 +55,16 @@ import { invoke } from "@tauri-apps/api/core";
   let isOperationCancelled = false;
   let isSelectingTorrent = false;
   let searchResults = [];
+  let searchJobs = [];
+  let searchNote = "";
+  let searchAnime = null;
   let isSearching = false;
+  let activeSearch = null;
   let currentSearchQuery = "";
   let originalSearchQuery = "";
   let pendingPlayRequest = null;
   let currentImdbId = null;
+  let currentImdbFor = null;
   
   let showFileSelector = false;
   let availableFiles = [];
@@ -156,6 +166,8 @@ import { invoke } from "@tauri-apps/api/core";
     recommendations = [];
     keywords = [];
     selectedTorrentName = ""; // Reset torrent name for new media
+    animeGroups = {};
+    animeNumberingFor = null;
     isPlayLoading = false;
     detectedIsAnime = false;
   }
@@ -354,6 +366,57 @@ import { invoke } from "@tauri-apps/api/core";
     } catch (err) {
       console.error("Error loading all seasons:", err);
     }
+  }
+
+  // the backend places every episode in anilist's numbering and remembers it, so file
+  // picking and watch tracking treat split episodes as one
+  $: if (detectedIsAnime && details?.id && media?.media_type === "tv" && Object.keys(allSeasonsData).length && animeNumberingFor !== details.id) {
+    loadAnimeNumbering(details, allSeasonsData);
+  }
+
+  async function loadAnimeNumbering(forDetails, seasonsData) {
+    animeNumberingFor = forDetails.id;
+    const episodes = Object.entries(seasonsData).flatMap(([season, data]) =>
+      (data?.episodes || []).map(e => ({ season: Number(season), episode: e.episode_number, airDate: e.air_date || null })));
+    try {
+      const numbering = await invoke("get_anime_numbering", { tmdbId: forDetails.id, episodes });
+      if (details !== forDetails || !numbering) return;
+      const groups = {};
+      for (const group of numbering.groups) {
+        for (const [s, e] of group) groups[`${s}-${e}`] = group;
+      }
+      animeGroups = groups;
+    } catch (err) {
+      console.warn("anime numbering unavailable:", err);
+    }
+  }
+
+  function episodeGroup(season, episode) {
+    return animeGroups[`${season}-${episode}`] || null;
+  }
+
+  // "E28-30" for a split episode, "E28" otherwise
+  function episodeNumberLabel(season, episode) {
+    const group = episodeGroup(season, episode);
+    if (!group) return `E${episode}`;
+    return `E${group[0][1]}-${group[group.length - 1][1]}`;
+  }
+
+  // the episodes to list: a split episode shows once, under its first part
+  function listedEpisodes(seasonNumber, episodes) {
+    return episodes.filter(e => {
+      const group = episodeGroup(seasonNumber, e.episode_number);
+      return !group || (group[0][0] === seasonNumber && group[0][1] === e.episode_number);
+    });
+  }
+
+  function groupedEpisodeName(seasonNumber, episode) {
+    const group = episodeGroup(seasonNumber, episode.episode_number);
+    if (!group) return episode.name;
+    const names = group
+      .map(([s, e]) => allSeasonsData[s]?.episodes?.find(x => x.episode_number === e)?.name)
+      .filter(Boolean);
+    return names.join(" / ") || episode.name;
   }
 
   // tmdb's recommendations are usually on point; similar titles only fill in when there are none
@@ -560,7 +623,7 @@ import { invoke } from "@tauri-apps/api/core";
     if (target.season == null) {
       return { ...target, label: `Resume from ${formatTime(target.timestamp)}` };
     }
-    const label = `S${target.season}E${target.episode}`;
+    const label = `S${target.season}${episodeNumberLabel(target.season, target.episode)}`;
     const hasTimestamp = target.timestamp > 60;
     return { ...target, label: `${label}${hasTimestamp ? ` • ${formatTime(target.timestamp)}` : ''}` };
   }
@@ -672,6 +735,7 @@ import { invoke } from "@tauri-apps/api/core";
     isSearching = true;
     showTorrentSelector = true;
     searchResults = [];
+    searchJobs = [];
 
     // Try to get the saved torrent name for display
     if (!selectedTorrentName) {
@@ -698,20 +762,12 @@ import { invoke } from "@tauri-apps/api/core";
     const imdbId = await fetchImdbId(isMovie);
 
     // the backend picks the trackers (saved preference, or anime/general in
-    // auto mode), merges their results and ranks them for this episode
+    // auto mode) and streams ranked results in as each one answers
     try {
       const response = await runSearch({ seasonNum, episodeNum, imdbId, query: null, trackers: null });
-      searchResults = response.results;
-      originalSearchQuery = currentSearchQuery = response.query;
-
-      if (searchResults.length === 0) {
-        console.log("No results found.");
-      }
+      if (response) originalSearchQuery = currentSearchQuery = response.query;
     } catch (err) {
       console.error("Search error:", err);
-      searchResults = [];
-    } finally {
-      isSearching = false;
     }
   }
 
@@ -721,12 +777,15 @@ import { invoke } from "@tauri-apps/api/core";
   }
 
   async function fetchImdbId(isMovie) {
+    // the id doesn't change between searches for the same title
+    if (currentImdbId && currentImdbFor === details.id) return currentImdbId;
     try {
       const externalIds = isMovie
         ? await getMovieExternalIds(details.id)
         : await getTVExternalIds(details.id);
       if (externalIds?.imdb_id) {
         currentImdbId = externalIds.imdb_id;
+        currentImdbFor = details.id;
         console.log("Got IMDB ID:", currentImdbId);
         return currentImdbId;
       }
@@ -736,23 +795,58 @@ import { invoke } from "@tauri-apps/api/core";
     return null;
   }
 
-  // trackers: null uses the saved preference, [] means auto
+  // trackers: null uses the saved preference, [] means auto. a newer search
+  // replaces this one, which then resolves to null
   async function runSearch({ seasonNum, episodeNum, imdbId, query, trackers }) {
-    return await invoke("search_torrents", {
-      request: {
-        tmdbId: details.id,
-        mediaType: media.media_type,
-        title: details.title || details.name,
-        query,
-        genreIds: (details.genres || []).map(genre => genre.id),
-        releaseYear: releaseYear(),
-        season: seasonNum,
-        episode: episodeNum,
-        imdbId,
-        trackers,
-        originalLanguage: details.original_language || null,
-      },
+    const search = startTorrentSearch({
+      tmdbId: details.id,
+      mediaType: media.media_type,
+      title: details.title || details.name,
+      query,
+      genreIds: (details.genres || []).map(genre => genre.id),
+      releaseYear: releaseYear(),
+      season: seasonNum,
+      episode: episodeNum,
+      imdbId,
+      trackers,
+      originalLanguage: details.original_language || null,
+      // anime numbering maps tmdb episodes onto anilist entries by these
+      seasonEpisodeCounts: seasonEpisodeCounts(),
+      episodeAirDate: allSeasonsData[seasonNum]?.episodes?.find(e => e.episode_number === episodeNum)?.air_date || null,
+    }, (update) => {
+      if (search !== activeSearch) return;
+      searchResults = update.results;
+      searchJobs = update.jobs;
+      searchNote = update.note;
+      searchAnime = update.anime;
+      if (update.query) currentSearchQuery = update.query;
     });
+    activeSearch = search;
+    isSearching = true;
+    searchResults = [];
+    searchJobs = [];
+    searchNote = "";
+    searchAnime = null;
+    try {
+      const response = await search.promise;
+      return search === activeSearch ? response : null;
+    } finally {
+      if (search === activeSearch) isSearching = false;
+    }
+  }
+
+  function seasonEpisodeCounts() {
+    const counts = {};
+    for (const s of details.seasons || []) {
+      if (s.season_number > 0) counts[s.season_number] = s.episode_count || 0;
+    }
+    return counts;
+  }
+
+  function cancelSearch() {
+    if (activeSearch) activeSearch.cancel();
+    activeSearch = null;
+    isSearching = false;
   }
 
   function reselectTorrent() {
@@ -870,6 +964,8 @@ import { invoke } from "@tauri-apps/api/core";
 
   async function onTorrentSelect(event) {
     const torrent = event.detail;
+    // the pick is made, so the trackers still answering can stop
+    cancelSearch();
     console.log("Selected torrent:", torrent);
     
     // Store the selected torrent name for display
@@ -982,6 +1078,7 @@ import { invoke } from "@tauri-apps/api/core";
   }
 
   function closeTorrentSelector() {
+    cancelSearch();
     isOperationCancelled = true;
     isPlayLoading = false;
     isSelectingTorrent = false;
@@ -990,35 +1087,12 @@ import { invoke } from "@tauri-apps/api/core";
   }
 
   const handleResearch = async (event) => {
-    console.log("Event detail:", event.detail);
-    console.log("isSearching:", isSearching);
-    console.log("pendingPlayRequest:", pendingPlayRequest);
-    
     const { trackers, query: customQuery, useImdb } = event.detail;
-    
-    // Prevent concurrent searches
-    if (isSearching) {
-      console.log("Search already in progress, ignoring research request");
-      return;
-    }
-    
-    if (!pendingPlayRequest) {
-      console.log("No pending play request, ignoring research");
-      return;
-    }
-    
-    console.log("New trackers:", trackers);
-    console.log("Custom query:", customQuery);
-    console.log("Use IMDB:", useImdb);
-    
-    // Re-run the search with new tracker preference
-    isSearching = true;
-    searchResults = [];
+    if (!pendingPlayRequest) return;
 
     const isMovieCheck = media.media_type === "movie" || !!details.title;
     const { season: seasonNum, episode: episodeNum } = pendingPlayRequest;
 
-    // If useImdb is true, re-fetch IMDB ID for EZTV
     let imdbIdToUse = currentImdbId;
     if (useImdb && !imdbIdToUse) {
       imdbIdToUse = await fetchImdbId(isMovieCheck);
@@ -1032,15 +1106,9 @@ import { invoke } from "@tauri-apps/api/core";
         query: customQuery || null,
         trackers: trackers || [],
       });
-      searchResults = response.results;
-      currentSearchQuery = response.query;
-
-      console.log(`Found ${searchResults.length} results`);
+      if (response) currentSearchQuery = response.query;
     } catch (err) {
       console.error("Error during research:", err);
-      searchResults = [];
-    } finally {
-      isSearching = false;
     }
   };
 
@@ -1502,7 +1570,7 @@ import { invoke } from "@tauri-apps/api/core";
                       <div class="accordion-content">
                         {#if allSeasonsData[season.season_number]}
                           <div class="episodes-list">
-                            {#each allSeasonsData[season.season_number].episodes.filter(e => !episodeSearchQuery || e.name.toLowerCase().includes(episodeSearchQuery.toLowerCase()) || e.episode_number.toString().includes(episodeSearchQuery)) as episode}
+                            {#each listedEpisodes(season.season_number, allSeasonsData[season.season_number].episodes, animeGroups).filter(e => !episodeSearchQuery || e.name.toLowerCase().includes(episodeSearchQuery.toLowerCase()) || e.episode_number.toString().includes(episodeSearchQuery)) as episode}
                               {@const episodeKey = `${details.id}-${media.media_type}-S${season.season_number}-E${episode.episode_number}`}
                               {@const episodeProgress = $watchProgressStore[episodeKey]}
                               {@const percentage = episodeProgress && episodeProgress.duration ? (episodeProgress.currentTimestamp / episodeProgress.duration) * 100 : 0}
@@ -1541,8 +1609,8 @@ import { invoke } from "@tauri-apps/api/core";
                                 </div>
                                 <div class="episode-details">
                                   <div class="episode-top">
-                                    <span class="episode-num">E{episode.episode_number}</span>
-                                    <span class="episode-name" class:ep-watched-name={isWatched}>{episode.name}</span>
+                                    <span class="episode-num">{episodeNumberLabel(season.season_number, episode.episode_number, animeGroups)}</span>
+                                    <span class="episode-name" class:ep-watched-name={isWatched}>{groupedEpisodeName(season.season_number, episode, animeGroups)}</span>
                                   </div>
                                   <div class="episode-meta">
                                     {#if episode.vote_average}
@@ -1903,12 +1971,16 @@ import { invoke } from "@tauri-apps/api/core";
     searchQuery={currentSearchQuery}
     originalSearchQuery={originalSearchQuery}
     results={searchResults}
+    jobs={searchJobs}
+    searchNote={searchNote}
+    anime={searchAnime}
+    mediaTitle={details.title || details.name}
+    releaseYear={releaseYear()}
     loading={isSearching}
     selectedTorrentName={selectedTorrentName}
     isAnime={detectedIsAnime}
-    hasImdbId={!!currentImdbId}
     isMovie={media.media_type === 'movie'}
-currentSeason={pendingPlayRequest?.season}
+    currentSeason={pendingPlayRequest?.season}
     currentEpisode={pendingPlayRequest?.episode}
     bind:isSelectingTorrent
     on:select={onTorrentSelect}

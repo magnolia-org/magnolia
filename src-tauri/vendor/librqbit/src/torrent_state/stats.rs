@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use super::{live::stats::snapshot::StatsSnapshot, TorrentStateLive};
+use super::{TorrentStateLive, live::stats::snapshot::StatsSnapshot};
 use size_format::SizeFormatterBinary as SF;
 
 #[derive(Serialize, Default, Debug)]
@@ -44,21 +44,23 @@ impl From<&TorrentStateLive> for LiveStats {
 }
 
 #[derive(Clone, Copy, Serialize, Debug)]
+#[serde(tag = "state", rename_all = "lowercase")]
 pub enum TorrentStatsState {
-    #[serde(rename = "initializing")]
-    Initializing,
-    #[serde(rename = "live")]
+    Initializing {
+        // Serialized as a top-level `initializing_paused` (not just `paused`) to
+        // avoid confusion with the `paused` state once flattened into the JSON.
+        #[serde(rename = "initializing_paused")]
+        paused: bool,
+    },
     Live,
-    #[serde(rename = "paused")]
     Paused,
-    #[serde(rename = "error")]
     Error,
 }
 
 impl std::fmt::Display for TorrentStatsState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TorrentStatsState::Initializing => f.write_str("initializing"),
+            TorrentStatsState::Initializing { .. } => f.write_str("initializing"),
             TorrentStatsState::Live => f.write_str("live"),
             TorrentStatsState::Paused => f.write_str("paused"),
             TorrentStatsState::Error => f.write_str("error"),
@@ -68,6 +70,10 @@ impl std::fmt::Display for TorrentStatsState {
 
 #[derive(Serialize, Debug)]
 pub struct TorrentStats {
+    // Flattens into `{ "state": "initializing", "paused": <bool> }` etc., so
+    // `state` stays a plain string on the wire and `paused` only appears for
+    // the `initializing` variant.
+    #[serde(flatten)]
     pub state: TorrentStatsState,
     pub file_progress: Vec<u64>,
     pub error: Option<String>,
@@ -135,17 +141,50 @@ impl TorrentStats {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(state: TorrentStatsState) -> TorrentStats {
+        TorrentStats {
+            state,
+            file_progress: vec![],
+            error: None,
+            progress_bytes: 10,
+            uploaded_bytes: 0,
+            total_bytes: 100,
+            finished: false,
+            live: None,
+        }
+    }
+
+    #[test]
+    fn state_flattens_to_string_with_optional_paused() {
+        let init =
+            serde_json::to_value(sample(TorrentStatsState::Initializing { paused: true })).unwrap();
+        assert_eq!(init["state"], "initializing");
+        assert_eq!(init["initializing_paused"], true);
+
+        let live = serde_json::to_value(sample(TorrentStatsState::Live)).unwrap();
+        assert_eq!(live["state"], "live");
+        assert!(
+            live.get("initializing_paused").is_none(),
+            "initializing_paused must be absent for live"
+        );
+    }
+}
+
 fn format_seconds_to_time(seconds: u64, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;
     let seconds = seconds % 60;
 
     if hours > 0 {
-        write!(f, "{}h {}m", hours, minutes)
+        write!(f, "{hours}h {minutes}m")
     } else if minutes > 0 {
-        write!(f, "{}m {}s", minutes, seconds)
+        write!(f, "{minutes}m {seconds}s")
     } else {
-        write!(f, "{}s", seconds)
+        write!(f, "{seconds}s")
     }
 }
 
@@ -159,7 +198,7 @@ impl core::fmt::Display for DurationWithHumanReadable {
 
 impl core::fmt::Debug for DurationWithHumanReadable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 
@@ -175,7 +214,7 @@ impl Serialize for DurationWithHumanReadable {
         }
         Tmp {
             duration: self.0,
-            human_readable: format!("{}", self),
+            human_readable: self.to_string(),
         }
         .serialize(serializer)
     }
@@ -189,6 +228,11 @@ pub struct Speed {
 impl Speed {
     fn new(mbps: f64) -> Self {
         Self { mbps }
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    pub const fn as_bytes(&self) -> u64 {
+        (self.mbps * 1024f64 * 1024f64) as u64
     }
 }
 
@@ -206,7 +250,7 @@ impl core::fmt::Display for Speed {
 
 impl core::fmt::Debug for Speed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 
@@ -222,7 +266,7 @@ impl Serialize for Speed {
         }
         Tmp {
             mbps: self.mbps,
-            human_readable: format!("{}", self),
+            human_readable: self.to_string(),
         }
         .serialize(serializer)
     }

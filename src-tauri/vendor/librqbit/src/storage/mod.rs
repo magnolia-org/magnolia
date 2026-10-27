@@ -1,3 +1,27 @@
+//! Storage engine for torrent data.
+//!
+//! This is deliberately sync, not async by design, for several reasons.
+//!
+//! Reason 1. Performance: avoiding copying.
+//!
+//! Torrent files are large so memcpy costs can compound. Tokio FS does all file writes in a thread
+//! pool. To do those writes it has a buffer per file. When you call e.g. "write", your request is first
+//! memcpy'ed to that buffer, and only then written to the file.
+//!
+//! On the write path (download), we write straight from the peer's socket buffer into the file.
+//! On the read path (upload), we read straight into the peer's socket buffer also.
+//!
+//! Reason 2. Memory use: memory bloat would be a problem if tokio::fs was used.
+//!
+//! The said buffers above default to 2MB. We have a lot of files open, so this can compound into a pretty large
+//! memory use.
+//!
+//! Reason 3. Performance: advanced FS APIs.
+//!
+//! We use positioned vectored writes (pwritev). Tokio doesn't support that.
+//! Positioned so that writing can be done to files in parallel without locks.
+//! Vectored so that we issue 1 write call for a potentially non-contiguous chunk.
+
 pub mod filesystem;
 
 #[cfg(feature = "storage_examples")]
@@ -8,6 +32,7 @@ pub mod middleware;
 
 use std::{
     any::{Any, TypeId},
+    io::IoSlice,
     path::Path,
 };
 
@@ -107,6 +132,24 @@ pub trait TorrentStorage: Send + Sync {
     /// Given a file_id (which you can get more info from in init_storage() through torrent info)
     /// write buf.len() bytes into the file at offset.
     fn pwrite_all(&self, file_id: usize, offset: u64, buf: &[u8]) -> anyhow::Result<()>;
+
+    fn pwrite_all_vectored(
+        &self,
+        file_id: usize,
+        offset: u64,
+        bufs: [IoSlice<'_>; 2],
+    ) -> anyhow::Result<usize> {
+        let mut offset = offset;
+        let mut size = 0;
+
+        for ioslice in bufs {
+            self.pwrite_all(file_id, offset, &ioslice)?;
+            offset += ioslice.len() as u64;
+            size += ioslice.len();
+        }
+
+        Ok(size)
+    }
 
     /// Remove a file from the storage. If not supported, or it doesn't matter, just return Ok(())
     fn remove_file(&self, file_id: usize, filename: &Path) -> anyhow::Result<()>;

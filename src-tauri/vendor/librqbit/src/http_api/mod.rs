@@ -2,23 +2,23 @@ use anyhow::Context;
 use axum::extract::{ConnectInfo, Request};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
+#[cfg(any(feature = "webui", feature = "prometheus"))]
 use axum::routing::get;
 use base64::Engine;
-use futures::future::BoxFuture;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use http::{HeaderMap, StatusCode};
-use std::net::SocketAddr;
+use librqbit_dualstack_sockets::TcpListener;
 use std::sync::Arc;
-use tokio::net::TcpListener;
 use tower_http::trace::{DefaultOnFailure, DefaultOnResponse, OnFailure};
-use tracing::{debug, error_span, info, Span};
+use tracing::{Span, debug, debug_span, info};
 
 use axum::Router;
 
 use crate::api::Api;
 
-use crate::api::Result;
 use crate::ApiError;
+use crate::api::Result;
 
 mod handlers;
 mod timeout;
@@ -35,6 +35,12 @@ pub struct HttpApi {
 pub struct HttpApiOptions {
     pub read_only: bool,
     pub basic_auth: Option<(String, String)>,
+    // Allow creating torrents via API.
+    pub allow_create: bool,
+    /// Maximum upload body size.
+    pub max_upload_body_size: Option<usize>,
+    #[cfg(feature = "prometheus")]
+    pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
 }
 
 async fn simple_basic_auth(
@@ -61,13 +67,13 @@ async fn simple_basic_auth(
                 StatusCode::UNAUTHORIZED,
                 [("WWW-Authenticate", "Basic realm=\"API\"")],
             )
-                .into_response())
+                .into_response());
         }
     };
     // TODO: constant time compare
     match user_pass.split_once(':') {
         Some((u, p)) if u == expected_user && p == expected_pass => Ok(next.run(request).await),
-        _ => Err(ApiError::unathorized()),
+        _ => Err(ApiError::unauthorized()),
     }
 }
 
@@ -83,10 +89,13 @@ impl HttpApi {
     /// If read_only is passed, no state-modifying methods will be exposed.
     #[inline(never)]
     pub fn make_http_api_and_run(
-        self,
+        #[allow(unused_mut)] mut self,
         listener: TcpListener,
         upnp_router: Option<Router>,
     ) -> BoxFuture<'static, anyhow::Result<()>> {
+        #[cfg(feature = "prometheus")]
+        let mut prometheus_handle = self.opts.prometheus_handle.take();
+
         let state = Arc::new(self);
 
         let mut main_router = handlers::make_api_router(state.clone());
@@ -98,6 +107,19 @@ impl HttpApi {
             let webui_router = webui::make_webui_router();
             main_router = main_router.nest("/web/", webui_router);
             main_router = main_router.route("/web", get(|| async { Redirect::permanent("./web/") }))
+        }
+
+        #[cfg(feature = "prometheus")]
+        if let Some(handle) = prometheus_handle.take() {
+            let session = state.api.session().clone();
+            main_router = main_router.route(
+                "/metrics",
+                get(move || async move {
+                    let mut metrics = handle.render();
+                    session.stats_snapshot().as_prometheus(&mut metrics);
+                    metrics
+                }),
+            );
         }
 
         let cors_layer = {
@@ -153,13 +175,13 @@ impl HttpApi {
                     .make_span_with(|req: &Request| {
                         let method = req.method();
                         let uri = req.uri();
-                        if let Some(ConnectInfo(addr)) =
-                            req.extensions().get::<ConnectInfo<SocketAddr>>()
+                        if let Some(ConnectInfo(addr)) = req
+                            .extensions()
+                            .get::<ConnectInfo<librqbit_dualstack_sockets::WrappedSocketAddr>>()
                         {
-                            let addr = SocketAddr::new(addr.ip().to_canonical(), addr.port());
-                            error_span!("request", %method, %uri, %addr)
+                            debug_span!("request", %method, %uri, addr=%addr.0)
                         } else {
-                            error_span!("request", %method, %uri)
+                            debug_span!("request", %method, %uri)
                         }
                     })
                     .on_request(|req: &Request, _: &Span| {
@@ -178,7 +200,7 @@ impl HttpApi {
                         }
                     }),
             )
-            .into_make_service_with_connect_info::<SocketAddr>();
+            .into_make_service_with_connect_info::<librqbit_dualstack_sockets::WrappedSocketAddr>();
 
         async move {
             axum::serve(listener, app)

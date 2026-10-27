@@ -6,8 +6,7 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 
 use super::ApiState;
 use crate::{
-    api::Result, http_api::timeout::Timeout, AddTorrent, AddTorrentOptions, ApiError,
-    ListOnlyResponse,
+    AddTorrent, AddTorrentOptions, ListOnlyResponse, api::Result, http_api::timeout::Timeout,
 };
 
 pub async fn h_resolve_magnet(
@@ -39,10 +38,11 @@ pub async fn h_resolve_magnet(
             ..
         }) => (info, torrent_bytes),
         crate::AddTorrentResponse::Added(_, _) => {
-            return Err(ApiError::new_from_text(
+            return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "bug: torrent was added to session, but shouldn't have been",
-            ))
+            )
+                .into());
         }
     };
 
@@ -54,6 +54,10 @@ pub async fn h_resolve_magnet(
         == Some("application/json")
     {
         let data = bencode::dyn_from_bytes::<AsDisplay<ByteBuf>>(&content)
+            .map_err(|e| {
+                tracing::trace!("error decoding .torrent file content: {e:#}");
+                e.into_kind()
+            })
             .context("error decoding .torrent file content")?;
         let data = serde_json::to_string(&data).context("error serializing")?;
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
@@ -65,14 +69,10 @@ pub async fn h_resolve_magnet(
         HeaderValue::from_static("application/x-bittorrent"),
     );
 
-    if let Some(name) = info.name.as_ref() {
-        if let Ok(name) = std::str::from_utf8(name) {
-            if let Ok(h) =
-                HeaderValue::from_str(&format!("attachment; filename=\"{}.torrent\"", name))
-            {
-                headers.insert("Content-Disposition", h);
-            }
-        }
+    if let Some(name) = info.name()
+        && let Ok(h) = HeaderValue::from_str(&format!("attachment; filename=\"{name}.torrent\""))
+    {
+        headers.insert("Content-Disposition", h);
     }
     Ok((headers, content).into_response())
 }

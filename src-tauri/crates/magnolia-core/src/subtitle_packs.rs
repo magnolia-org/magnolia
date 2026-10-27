@@ -111,7 +111,7 @@ fn process_zip(zip_path: &Path, show_dir: &Path, result: &mut ImportResult) -> R
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     for i in 0..archive.len() {
         let mut zf = archive.by_index(i).map_err(|e| e.to_string())?;
-        let name = zf.name().to_string();
+        let name = zf.name().map_err(|e| e.to_string())?.to_string();
         let ext = Path::new(&name)
             .extension()
             .and_then(|e| e.to_str())

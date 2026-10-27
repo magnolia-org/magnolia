@@ -59,7 +59,7 @@
       console.log(`current version: ${currentVersion}`);
 
       const [os, arch] = await invoke('get_platform_info');
-      const response = await fetch('https://api.github.com/repos/chwair/magnolia/releases/latest');
+      const response = await fetch('https://api.github.com/repos/magnolia-org/magnolia/releases/latest');
       const release = await response.json();
 
       latestVersion = release.tag_name.replace('v', '');

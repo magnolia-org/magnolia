@@ -5,10 +5,10 @@ use crate::{
     torrent_state::ManagedTorrentHandle, type_aliases::BF,
 };
 use anyhow::Context;
-use futures::{stream::BoxStream, StreamExt};
-use librqbit_core::Id20;
+use futures::{StreamExt, stream::BoxStream};
+use librqbit_core::{Id20, spawn_utils::spawn};
 use sqlx::{Pool, Postgres};
-use tracing::error_span;
+use tracing::debug_span;
 
 use super::{SerializedTorrent, SessionPersistenceStore};
 
@@ -214,11 +214,11 @@ impl BitV for PgBitfield {
         self.inmem.as_raw_slice()
     }
 
-    fn flush(&mut self) -> anyhow::Result<()> {
+    fn flush(&mut self, _flush_async: bool) -> anyhow::Result<()> {
         // TODO: make flush async, and don't spawn this, to avoid allocations and capture the result.
-        crate::spawn_utils::spawn(
-            "pg",
-            error_span!("pg_update_bitfield", id=?self.torrent_id),
+        spawn(
+            debug_span!("pg_update_bitfield", id=?self.torrent_id),
+            "pg_update_bitfield",
             {
                 let hb = self.as_bytes().to_owned();
                 let pool = self.pool.clone();
@@ -254,7 +254,7 @@ impl BitV for PgBitfield {
                             )?;
                         }
                     };
-                    Ok(())
+                    Ok::<_, anyhow::Error>(())
                 }
             },
         );
@@ -315,7 +315,7 @@ impl BitVFactory for PostgresSessionStorage {
             inmem: b,
             pool: self.pool.clone(),
         };
-        bf.flush()?;
+        bf.flush(false)?;
         Ok(bf.into_dyn())
     }
 

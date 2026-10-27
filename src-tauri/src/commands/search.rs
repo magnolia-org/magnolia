@@ -1,16 +1,30 @@
 //! torrent search.
 
-use magnolia_core::search::{
-    magnet, parse_audio_codec, parse_title_metadata, SearchResult, TitleMeta, TorrentSearchRequest,
-    TorrentSearchResponse,
-};
-use serde::Serialize;
+use magnolia_core::search::{magnet, parse_release, ReleaseInfo, SearchEvent, SearchResult, TorrentSearchRequest, TorrentSearchResponse};
+use tauri::ipc::Channel;
 
 use super::CoreState;
 
+/// streams progress and results to `on_event` as trackers answer, then returns
+/// every result, best first. starting a search cancels the one before it.
 #[tauri::command]
-pub async fn search_torrents(core: CoreState<'_>, request: TorrentSearchRequest) -> Result<TorrentSearchResponse, String> {
-    Ok(core.search_torrents(request).await)
+pub async fn search_torrents(
+    core: CoreState<'_>,
+    request: TorrentSearchRequest,
+    on_event: Channel<SearchEvent>,
+) -> Result<TorrentSearchResponse, String> {
+    Ok(core
+        .search_torrents_streaming(request, |event| {
+            if let Err(e) = on_event.send(event) {
+                log::warn!("failed to send search event: {}", e);
+            }
+        })
+        .await)
+}
+
+#[tauri::command]
+pub fn cancel_torrent_search(core: CoreState<'_>) {
+    core.cancel_torrent_search();
 }
 
 #[tauri::command]
@@ -30,17 +44,7 @@ pub fn parse_magnet_link(link: String) -> Result<SearchResult, String> {
     magnet::result_from_magnet(&link)
 }
 
-#[derive(Serialize)]
-pub struct ReleaseTitleInfo {
-    #[serde(flatten)]
-    meta: TitleMeta,
-    audio_codec: Option<String>,
-}
-
 #[tauri::command]
-pub fn parse_release_title(title: String) -> ReleaseTitleInfo {
-    ReleaseTitleInfo {
-        meta: parse_title_metadata(&title),
-        audio_codec: parse_audio_codec(&title),
-    }
+pub fn parse_release_title(title: String) -> ReleaseInfo {
+    parse_release(&title)
 }

@@ -5,12 +5,11 @@ use std::{
 };
 
 use crate::Magnet;
-use anyhow::{bail, Context};
-use buffers::ByteBuf;
-use librqbit_core::torrent_metainfo::torrent_from_bytes;
+use anyhow::{Context, bail};
+use librqbit_core::{spawn_utils::spawn, torrent_metainfo::torrent_from_bytes};
 use notify::Watcher;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tracing::{debug, error, error_span, trace, warn};
+use tracing::{debug, debug_span, error, trace, warn};
 use walkdir::WalkDir;
 
 use crate::{AddTorrent, AddTorrentOptions, AddTorrentResponse, Session};
@@ -93,7 +92,7 @@ fn watch_thread(
             .context("error opening")?
             .read_to_string(&mut url)
             .context("error reading")?;
-        warn!("validating {url}");
+        debug!("validating {url}");
         Magnet::parse(&url)?;
         Ok(AddTorrent::Url(url.into()))
     }
@@ -104,7 +103,7 @@ fn watch_thread(
             .context("error opening")?
             .read_to_end(&mut buf)
             .context("error reading")?;
-        torrent_from_bytes::<ByteBuf>(&buf).context("invalid .torrent file")?;
+        torrent_from_bytes(&buf).context("invalid .torrent file")?;
         Ok(AddTorrent::from_bytes(buf))
     }
 
@@ -190,29 +189,33 @@ impl Session {
     pub fn watch_folder(self: &Arc<Self>, watch_folder: &Path) {
         let session_w = Arc::downgrade(self);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        self.spawn(error_span!("watch_adder", ?watch_folder), async move {
-            watch_adder(session_w, rx).await;
-            Ok(())
-        });
+        self.spawn(
+            debug_span!("watch_adder", ?watch_folder),
+            "watch_adder",
+            async move {
+                watch_adder(session_w, rx).await;
+                Ok(())
+            },
+        );
 
         let cancel_event = ThreadCancelEvent::new();
         let cancel_event_2 = cancel_event.clone();
         let cancel_token = self.cancellation_token().clone();
-        crate::spawn_utils::spawn(
+        spawn(
+            debug_span!("watch_cancel", ?watch_folder),
             "watch_cancel",
-            error_span!("watch_cancel", ?watch_folder),
             async move {
                 cancel_token.cancelled().await;
                 trace!("canceling watcher");
                 cancel_event.cancel();
-                Ok(())
+                Ok::<_, &'static str>(())
             },
         );
 
         let watch_folder = PathBuf::from(watch_folder);
         let session_span = self.rs();
         std::thread::spawn(move || {
-            let span = error_span!(parent: session_span, "watcher", folder=?watch_folder);
+            let span = debug_span!(parent: session_span, "watcher", folder=?watch_folder);
             span.in_scope(move || {
                 if let Err(e) = watch_thread(watch_folder, tx, &cancel_event_2) {
                     error!("error in watcher thread: {e:#}");
