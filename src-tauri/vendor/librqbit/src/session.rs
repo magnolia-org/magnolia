@@ -1534,6 +1534,11 @@ impl Session {
         initial_peers: Vec<SocketAddr>,
         is_private: bool,
     ) -> Option<PeerStream> {
+        // magnolia: private-flagged releases are also shared on public trackers like nyaa, where
+        // the first tracker alone knows a handful of peers (too slow to stream 4k), so peers are
+        // looked for everywhere, as for a public torrent
+        let _ = is_private;
+        let is_private = false;
         let dht_rx = if is_private {
             None
         } else {

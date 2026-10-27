@@ -1102,16 +1102,8 @@ impl PeerConnectionHandler for &'_ PeerHandler {
                 }
             }
             Message::Extended(ExtendedMessage::UtPex(pex)) => {
-                if self.state.metadata.info.info().private {
-                    warn!(
-                        id = self.state.shared.id,
-                        info_hash = ?self.state.shared.info_hash,
-                        "received noncompliant PEX message from {}, ignoring",
-                        self.addr
-                    );
-                } else {
-                    self.on_pex_message(pex);
-                }
+                // magnolia: pex on private-flagged torrents too, see make_peer_rx in session.rs
+                self.on_pex_message(pex);
             }
             message => {
                 warn!(
@@ -1180,7 +1172,8 @@ impl PeerConnectionHandler for &'_ PeerHandler {
             }
         }
 
-        if !self.state.metadata.info.info().private && hs.m.ut_pex.is_some() {
+        // magnolia: pex on private-flagged torrents too, see make_peer_rx in session.rs
+        if hs.m.ut_pex.is_some() {
             spawn_with_cancel(
                 debug_span!(
                     parent: self.state.shared.span.clone(),
