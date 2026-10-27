@@ -1,5 +1,6 @@
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
+#include <dlfcn.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -23,7 +24,7 @@ typedef void (*PFN_vkDestroySurfaceKHR)(VkInstance, VkSurfaceKHR, const void *);
 #define VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT 1000217000
 #define VK_PRESENT_MODE_FIFO_KHR 2
 
-// libplacebo (API 349)
+// libplacebo (api 349 and 360 share these layouts)
 enum pl_log_level { PL_LOG_NONE = 0, PL_LOG_FATAL, PL_LOG_ERR, PL_LOG_WARN, PL_LOG_INFO };
 struct pl_log_params {
     void (*log_cb)(void *log_priv, enum pl_log_level level, const char *msg);
@@ -55,7 +56,6 @@ struct pl_vk_inst_params {
     int num_opt_layers;
 };
 typedef const struct pl_swapchain_t *pl_swapchain;
-pl_log pl_log_create_349(int api_ver, const struct pl_log_params *params);
 void pl_log_destroy(pl_log *log);
 pl_vk_inst pl_vk_inst_create(pl_log log, const struct pl_vk_inst_params *params);
 void pl_vk_inst_destroy(pl_vk_inst *inst);
@@ -145,6 +145,22 @@ struct priv {
     CGColorSpaceRef colorspace;
 };
 
+// libplacebo versions this entry point by api version (pl_log_create_349, _360, ...) and the
+// runtime lib releases bump it, so look up whichever one the loaded libplacebo exports
+static pl_log log_create(const struct pl_log_params *params)
+{
+    typedef pl_log (*log_create_fn)(int api_ver, const struct pl_log_params *params);
+    for (int ver = 500; ver >= 300; ver--) {
+        char name[32];
+        snprintf(name, sizeof(name), "pl_log_create_%d", ver);
+        log_create_fn fn = (log_create_fn)dlsym(RTLD_DEFAULT, name);
+        if (fn)
+            return fn(ver, params);
+    }
+    fprintf(stderr, "[magnolia-vk] no pl_log_create_* in the loaded libplacebo\n");
+    return NULL;
+}
+
 static void log_cb(void *priv, enum pl_log_level level, const char *msg)
 {
     (void)priv;
@@ -209,7 +225,7 @@ static bool init(struct ra_ctx *ctx)
     struct priv *p = ctx->priv = calloc(1, sizeof(struct priv));
     struct mpvk_ctx *vk = &p->vk;
 
-    vk->pllog = pl_log_create_349(349, &(struct pl_log_params){
+    vk->pllog = log_create(&(struct pl_log_params){
         .log_cb = log_cb,
         .log_level = PL_LOG_WARN,
     });
