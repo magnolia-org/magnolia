@@ -7,7 +7,7 @@
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
   import { formatTime } from "./utils/timeUtils.js";
   import { watchProgressStore } from "./stores/watchProgressStore.js";
-import { getSeasonDetails, getTVDetails, getImageUrl } from "./tmdb.js";
+import { getSeasonDetails, getTVDetails, getImageUrl, getMovieExternalIds, getTVExternalIds } from "./tmdb.js";
   import { randomSubtitlePreviewBackground } from "./subtitlePreviewBackgrounds.js";
   import { isWindows } from "./utils/platform.js";
 
@@ -129,6 +129,9 @@ import { getSeasonDetails, getTVDetails, getImageUrl } from "./tmdb.js";
   let chapters = [];
   let externalSubtitles = [];
   let localSubtitlePath = null;
+  // source url -> file loaded into mpv, so a loaded sub shows as its menu entry instead of a new track
+  let subtitleFiles = new Map();
+  let addedSubTracks = [];
   let loadingExternalSubs = false;
   let loadingSubtitle = false;
   let loadingAudio = false;
@@ -240,16 +243,55 @@ import { getSeasonDetails, getTVDetails, getImageUrl } from "./tmdb.js";
       ? "'Geist Sans', sans-serif"
       : 'Helvetica, Arial, sans-serif';
 
+  const fileName = (path) => (path || '').split(/[\\/]/).pop();
+
+  // the menu entry (local pack or online sub) an mpv track was loaded from, if any
+  function subtitleSourceUrl(track) {
+    if (!track?.external || !track.external_filename) return null;
+    const name = fileName(track.external_filename);
+    for (const [url, path] of subtitleFiles) {
+      if (fileName(path) === name) return url;
+    }
+    return null;
+  }
+
+  // menu order is embedded tracks, then the local pack, then online subs
+  function externalTrackIndex(i) {
+    return (videoMetadata?.subtitle_tracks?.length || 0) + (localSubtitlePath ? 1 : 0) + i;
+  }
+
+  function menuIndexForSource(url) {
+    if (url === localSubtitlePath) return videoMetadata?.subtitle_tracks?.length || 0;
+    const i = externalSubtitles.findIndex(s => s.url === url);
+    return i >= 0 ? externalTrackIndex(i) : -1;
+  }
+
   async function applySubtitleLangPreference(lang) {
+    if (loadingSubtitle) return;
     const match = externalSubtitles.find(s =>
       s.lang === lang ||
       s.language === lang ||
       (s.language || '').toLowerCase() === (lang || '').toLowerCase()
     );
     if (!match) return;
-    const embeddedCount = videoMetadata?.subtitle_tracks?.length || 0;
-    const idx = externalSubtitles.indexOf(match);
-    await selectSubtitle(match, embeddedCount + idx);
+    const idx = externalTrackIndex(externalSubtitles.indexOf(match));
+    if (selectedSubtitleTrack === idx) return;
+    await selectSubtitle(match, idx);
+  }
+
+  async function restoreAudioTrack(prefs) {
+    const tracks = videoMetadata?.audio_tracks || [];
+    let id = prefs?.audio_track_id ?? null;
+    // track ids differ between releases, so a language picked on another torrent is matched by name
+    const lang = prefs?.audio_language || (id == null ? localStorage.getItem('lastAudioLanguage') : null);
+    if (lang && tracks.length > 0) {
+      const saved = tracks.find(t => t.id === id);
+      if (!saved || (saved.lang && saved.lang !== lang)) {
+        id = tracks.find(t => t.lang === lang)?.id ?? (saved ? id : null);
+      }
+    }
+    if (id == null || tracks.find(t => t.id === id)?.selected) return;
+    await invoke("mpv_run_command", { args: ["set", "aid", String(id)] }).catch(() => {});
   }
 
   async function loadTrackPreferences() {
@@ -269,10 +311,9 @@ import { getSeasonDetails, getTVDetails, getImageUrl } from "./tmdb.js";
         }
       }
 
+      await restoreAudioTrack(prefs);
+
       if (prefs) {
-        if (prefs.audio_track_id != null) {
-          await invoke("mpv_run_command", { args: ["set", "aid", String(prefs.audio_track_id)] }).catch(() => {});
-        }
         if (prefs.subtitle_track_id != null && prefs.subtitle_track_id > 0) {
           await invoke("mpv_run_command", { args: ["set", "sid", String(prefs.subtitle_track_id)] }).catch(() => {});
         }
@@ -293,8 +334,9 @@ import { getSeasonDetails, getTVDetails, getImageUrl } from "./tmdb.js";
   async function saveTrackPreferences() {
     if (!magnetLink) return;
     try {
-      const audioTrack = selectedAudioTrack > 0 ? videoMetadata?.audio_tracks?.[selectedAudioTrack] : null;
+      const audioTrack = videoMetadata?.audio_tracks?.[selectedAudioTrack] ?? null;
       const audioTrackId = audioTrack?.id ?? null;
+      const audioLanguage = audioTrack?.lang || null;
       const embeddedCount = videoMetadata?.subtitle_tracks?.length || 0;
       let subtitleTrackId = null;
       let subtitleLanguage = null;
@@ -311,6 +353,7 @@ import { getSeasonDetails, getTVDetails, getImageUrl } from "./tmdb.js";
       await invoke('save_track_preference', {
         magnetLink,
         audioTrackId,
+        audioLanguage,
         subtitleTrackId,
         subtitleLanguage,
         subtitleOffset: subtitleOffset !== 0 ? subtitleOffset : null
@@ -444,6 +487,23 @@ let currentSkipSection = null;
     }
   }
 
+  let imdbIdCache = { key: null, id: null };
+
+  // subtitle extensions get the movie's or show's imdb id, looked up once per title
+  async function getImdbId() {
+    const key = `${mediaType}-${mediaId}`;
+    if (imdbIdCache.key === key) return imdbIdCache.id;
+    let id = null;
+    try {
+      const ids = mediaType === "tv" ? await getTVExternalIds(mediaId) : await getMovieExternalIds(mediaId);
+      id = ids?.imdb_id || null;
+    } catch (e) {
+      console.warn("failed to get imdb id for subtitles:", e);
+    }
+    imdbIdCache = { key, id };
+    return id;
+  }
+
   async function loadExternalSubtitles(fetchKey) {
     if (loadingExternalSubs) return;
     loadingExternalSubs = true;
@@ -466,6 +526,7 @@ let currentSkipSection = null;
     try {
       const extSubs = await invoke('fetch_extension_subtitles', {
         tmdbId: String(mediaId),
+        imdbId: await getImdbId(),
         mediaType,
         season: seasonNum != null ? Number(seasonNum) : null,
         episode: episodeNum != null ? Number(episodeNum) : null,
@@ -519,6 +580,7 @@ let currentSkipSection = null;
     try {
       const extSubs = await invoke('fetch_extension_subtitles', {
         tmdbId: String(mediaId),
+        imdbId: await getImdbId(),
         mediaType,
         season: seasonNum != null ? Number(seasonNum) : null,
         episode: episodeNum != null ? Number(episodeNum) : null,
@@ -1506,6 +1568,7 @@ let currentSkipSection = null;
     loadingAudio = true;
     try {
       await invoke("mpv_run_command", { args: ["set", "aid", String(track.id)] });
+      if (track.lang) localStorage.setItem('lastAudioLanguage', track.lang);
     } catch (e) {
       console.error("Failed to switch audio track:", e);
     } finally {
@@ -1515,19 +1578,30 @@ let currentSkipSection = null;
     saveTrackPreferences();
   }
 
+  // picks the mpv track a source was already loaded into, so choosing it again doesn't add another
+  async function loadSubtitleSource(url, getPath) {
+    const existing = addedSubTracks.find(t => subtitleSourceUrl(t) === url);
+    if (existing) {
+      await invoke("mpv_run_command", { args: ["set", "sid", String(existing.id)] });
+      return;
+    }
+    const path = await getPath();
+    subtitleFiles.set(url, path);
+    await invoke("mpv_run_command", { args: ["sub-add", path, "select"] });
+  }
+
   async function selectSubtitle(track, trackIndex) {
     selectedSubtitleTrack = trackIndex;
     loadingSubtitle = true;
     try {
       if (track.source === "local") {
         // Local subtitle pack file — load directly from disk
-        await invoke("mpv_run_command", { args: ["sub-add", track.url, "select"] });
+        await loadSubtitleSource(track.url, async () => track.url);
         selectedSubtitleLanguage = null;
       } else if (track.url && /^https?:/i.test(track.url)) {
         // External subtitle (SubDL or extension source) — download (and
         // unzip if needed) to a temp file, then load via sub-add
-        const filePath = await invoke("download_subtitle", { url: track.url });
-        await invoke("mpv_run_command", { args: ["sub-add", filePath, "select"] });
+        await loadSubtitleSource(track.url, () => invoke("download_subtitle", { url: track.url }));
         selectedSubtitleLanguage = track.lang || track.language;
       } else {
         // Embedded subtitle — use mpv track id
@@ -2194,14 +2268,26 @@ let currentSkipSection = null;
 
     mpvUnlisteners.push(await listen("mpv-tracks-update", (event) => {
       const tracks = event.payload.tracks || [];
-      const subtitleTracks = tracks.filter(t => t.track_type === "sub");
+      const allSubs = tracks.filter(t => t.track_type === "sub");
+      // subs loaded from a menu entry stay under that entry instead of listing as tracks of their own
+      addedSubTracks = allSubs.filter(t => subtitleSourceUrl(t));
+      const subtitleTracks = allSubs.filter(t => !subtitleSourceUrl(t));
+      const audioTracks = tracks.filter(t => t.track_type === "audio");
       videoMetadata = {
-        audio_tracks: tracks.filter(t => t.track_type === "audio"),
+        audio_tracks: audioTracks,
         subtitle_tracks: subtitleTracks,
       };
-      // Sync selected subtitle track index from mpv's own selection state
-      const selectedIdx = subtitleTracks.findIndex(t => t.selected);
-      selectedSubtitleTrack = selectedIdx; // -1 when no sub track is selected
+      // sync selection from mpv so saved preferences never go stale
+      const audioIdx = audioTracks.findIndex(t => t.selected);
+      if (audioIdx >= 0) selectedAudioTrack = audioIdx;
+      // while a sub loads, keep the index selectSubtitle already set
+      if (!loadingSubtitle) {
+        const selectedSub = allSubs.find(t => t.selected);
+        const sourceUrl = subtitleSourceUrl(selectedSub);
+        selectedSubtitleTrack = !selectedSub ? -1
+          : sourceUrl ? menuIndexForSource(sourceUrl)
+          : subtitleTracks.indexOf(selectedSub);
+      }
     }));
 
     mpvUnlisteners.push(await listen("mpv-chapters-update", (event) => {
@@ -2809,7 +2895,7 @@ let currentSkipSection = null;
             {/if}
             {#if localSubtitlePath}
               {@const embeddedCount = videoMetadata?.subtitle_tracks?.length || 0}
-              {@const localTrackIndex = embeddedCount + externalSubtitles.length}
+              {@const localTrackIndex = embeddedCount}
               {@const localTrack = { source: "local", url: localSubtitlePath, lang: null, language: null }}
               <button
                 class="player-track-option menu-item"

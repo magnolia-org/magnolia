@@ -646,6 +646,8 @@ fn search_result_from_raw(raw: RawSearchResult, provider: &str) -> Option<Search
 
 pub struct SubtitleFetchContext {
     pub tmdb_id: String,
+    /// the movie's or show's imdb id ("tt..."), not the episode's
+    pub imdb_id: Option<String>,
     pub media_type: String,
     pub season: Option<u32>,
     pub episode: Option<u32>,
@@ -686,6 +688,7 @@ pub fn run_subtitle_fetch(
 
     let mut ctx_map = RhaiMap::new();
     ctx_map.insert("tmdb_id".into(), ctx.tmdb_id.clone().into());
+    ctx_map.insert("imdb_id".into(), opt_string_to_dynamic(ctx.imdb_id.clone()));
     ctx_map.insert("media_type".into(), ctx.media_type.clone().into());
     ctx_map.insert("season".into(), opt_u32_to_dynamic(ctx.season));
     ctx_map.insert("episode".into(), opt_u32_to_dynamic(ctx.episode));

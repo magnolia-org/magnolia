@@ -140,12 +140,13 @@ pub async fn save_track_preference(
     core: CoreState<'_>,
     magnet_link: String,
     audio_track_id: Option<i64>,
+    audio_language: Option<String>,
     subtitle_track_id: Option<i64>,
     subtitle_language: Option<String>,
     subtitle_offset: Option<f64>,
 ) -> Result<(), String> {
     core.track_preferences
-        .save_preference(magnet_link, audio_track_id, subtitle_track_id, subtitle_language, subtitle_offset)
+        .save_preference(magnet_link, audio_track_id, audio_language, subtitle_track_id, subtitle_language, subtitle_offset)
         .await;
     Ok(())
 }

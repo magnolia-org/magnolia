@@ -9,6 +9,9 @@ use tokio::sync::RwLock;
 pub struct TrackPreference {
     /// mpv track-list `id` for the preferred audio track.
     pub audio_track_id: Option<i64>,
+    /// language of the preferred audio track, matched when the track id isn't saved or doesn't fit.
+    #[serde(default)]
+    pub audio_language: Option<String>,
     /// mpv track-list `id` for the preferred subtitle track.
     /// `None` when no subtitle is selected or an external subtitle URL is used.
     pub subtitle_track_id: Option<i64>,
@@ -48,6 +51,7 @@ impl TrackPreferencesManager {
         &self,
         magnet_link: String,
         audio_track_id: Option<i64>,
+        audio_language: Option<String>,
         subtitle_track_id: Option<i64>,
         subtitle_language: Option<String>,
         subtitle_offset: Option<f64>,
@@ -56,6 +60,7 @@ impl TrackPreferencesManager {
         
         data.torrents.insert(magnet_link, TrackPreference {
             audio_track_id,
+            audio_language,
             subtitle_track_id,
             subtitle_language,
             subtitle_offset,

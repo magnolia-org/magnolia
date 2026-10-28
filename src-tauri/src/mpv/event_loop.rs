@@ -124,6 +124,7 @@ struct MediaTrack {
     is_default: Option<bool>,
     forced: Option<bool>,
     external: Option<bool>,
+    external_filename: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -924,6 +925,7 @@ pub(super) fn mpv_event_loop(
                                                 is_default: as_bool("default"),
                                                 forced: as_bool("forced"),
                                                 external: as_bool("external"),
+                                                external_filename: as_string("external-filename"),
                                             });
                                         }
                                         if !tracks.is_empty() {

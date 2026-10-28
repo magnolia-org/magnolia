@@ -45,6 +45,7 @@ pub async fn set_extension_field_values(
 pub async fn fetch_extension_subtitles(
     core: CoreState<'_>,
     tmdb_id: String,
+    imdb_id: Option<String>,
     media_type: String,
     season: Option<u32>,
     episode: Option<u32>,
@@ -52,7 +53,7 @@ pub async fn fetch_extension_subtitles(
 ) -> Result<Vec<Subtitle>, String> {
     Ok(core
         .extensions
-        .fetch_subtitles(tmdb_id, media_type, season, episode, auto_only)
+        .fetch_subtitles(tmdb_id, imdb_id, media_type, season, episode, auto_only)
         .await)
 }
 

@@ -526,6 +526,7 @@ impl ExtensionManager {
     pub async fn fetch_subtitles(
         &self,
         tmdb_id: String,
+        imdb_id: Option<String>,
         media_type: String,
         season: Option<u32>,
         episode: Option<u32>,
@@ -542,6 +543,7 @@ impl ExtensionManager {
         for ext in extensions {
             let ctx = runtime::SubtitleFetchContext {
                 tmdb_id: tmdb_id.clone(),
+                imdb_id: imdb_id.clone(),
                 media_type: media_type.clone(),
                 season,
                 episode,
@@ -715,6 +717,7 @@ mod tests {
         } else {
             let ctx = runtime::SubtitleFetchContext {
                 tmdb_id: "1396".to_string(),
+                imdb_id: Some("tt0903747".to_string()),
                 media_type: "tv".to_string(),
                 season: Some(1),
                 episode: Some(2),
