@@ -765,6 +765,7 @@ fn main() {
             commands::torrents::prepare_stream,
             commands::torrents::get_stream_status,
             commands::torrents::get_torrent_piece_ranges,
+            commands::torrents::get_stream_stats,
             commands::torrents::stop_stream,
             commands::torrents::wipe_all_torrent_files,
             commands::torrents::pause_torrent,

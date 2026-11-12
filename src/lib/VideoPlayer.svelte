@@ -6,6 +6,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
   import { formatTime } from "./utils/timeUtils.js";
+  import StreamStats from "./StreamStats.svelte";
   import { watchProgressStore } from "./stores/watchProgressStore.js";
 import { getSeasonDetails, getTVDetails, getImageUrl, getMovieExternalIds, getTVExternalIds } from "./tmdb.js";
   import { randomSubtitlePreviewBackground } from "./subtitlePreviewBackgrounds.js";
@@ -71,6 +72,20 @@ import { getSeasonDetails, getTVDetails, getImageUrl, getMovieExternalIds, getTV
   let torrentProgress = 0;
   let torrentPieceRanges = []; // [{start, width}] in %, from the torrent's have-pieces bitfield
   let pieceRangeInterval = null;
+  // torrent stream statistics, sampled every second while playing so the graph has history
+  const STATS_HISTORY = 120;
+  let streamIsTorrent = false;
+  let streamStats = null;
+  let statSamples = [];
+  let statsInterval = null;
+  let showStatsSubmenu = false;
+  let statsSubmenuElement = null;
+  let statsSubmenuX = 0;
+  let statsSubmenuY = 0;
+  $: bufferAhead = (() => {
+    const range = rawSeekableRanges.find((r) => r.start <= currentTime && r.end >= currentTime);
+    return range ? range.end - currentTime : 0;
+  })();
   let volume = 1;
   let muted = false;
   let fullscreen = false;
@@ -695,6 +710,24 @@ let currentSkipSection = null;
       return;
     }
 
+    streamIsTorrent = true;
+    if (!statsInterval) {
+      statsInterval = setInterval(async () => {
+        try {
+          streamStats = await invoke("get_stream_stats", {
+            handleId: numericHandle,
+            fileIndex: numericFile,
+          });
+          statSamples = [
+            ...statSamples.slice(-(STATS_HISTORY - 1)),
+            { down: streamStats.download_speed, up: streamStats.upload_speed },
+          ];
+        } catch {
+          // the torrent isn't in the session yet
+        }
+      }, 1000);
+    }
+
     let pollInFlight = false;
     const pollStatus = async () => {
       // a slow backend reply must not stack up overlapping polls
@@ -1232,7 +1265,7 @@ let currentSkipSection = null;
     clearTimeout(controlsTimeout);
     controlsTimeout = setTimeout(() => {
       // Don't hide controls if any menu is open
-      if (playing && !isSeeking && !showPlayerMenu && !showChaptersMenu && !showAudioSubmenu && !showSubtitleSubmenu) {
+      if (playing && !isSeeking && !showPlayerMenu && !showChaptersMenu && !showAudioSubmenu && !showSubtitleSubmenu && !showStatsSubmenu) {
         showControls = false;
         window.dispatchEvent(new CustomEvent("videoControlsVisibility", { detail: { visible: false } }));
       }
@@ -1696,20 +1729,36 @@ let currentSkipSection = null;
 
   function togglePlayerMenu() {
     showPlayerMenu = !showPlayerMenu;
-    if (showPlayerMenu) {
-      showChaptersMenu = false;
-      showAudioSubmenu = false;
-      showSubtitleSubmenu = false;
-    } else {
-      showAudioSubmenu = false;
-      showSubtitleSubmenu = false;
-    }
+    if (showPlayerMenu) showChaptersMenu = false;
+    showAudioSubmenu = false;
+    showSubtitleSubmenu = false;
+    showStatsSubmenu = false;
+  }
+
+  function toggleStatsSubmenu(event) {
+    showStatsSubmenu = !showStatsSubmenu;
+    showAudioSubmenu = false;
+    showSubtitleSubmenu = false;
+    showSubtitleSettings = false;
+    if (!showStatsSubmenu) return;
+
+    const buttonRect = event.currentTarget.getBoundingClientRect();
+    statsSubmenuX = buttonRect.left - 396;
+    statsSubmenuY = buttonRect.top - 8;
+    // place it beside the menu once its real size is known
+    setTimeout(() => {
+      if (!statsSubmenuElement) return;
+      const maxY = window.innerHeight - statsSubmenuElement.offsetHeight - 20;
+      statsSubmenuX = buttonRect.left - statsSubmenuElement.offsetWidth - 16;
+      statsSubmenuY = Math.max(20, Math.min(buttonRect.top, maxY)) - 8;
+    }, 0);
   }
 
   function toggleAudioSubmenu(event) {
     const wasOpen = showAudioSubmenu;
     showAudioSubmenu = !showAudioSubmenu;
     showSubtitleSubmenu = false;
+    showStatsSubmenu = false;
     
     if (showAudioSubmenu) {
       const button = event.currentTarget;
@@ -1743,6 +1792,7 @@ let currentSkipSection = null;
     const wasOpen = showSubtitleSubmenu;
     showSubtitleSubmenu = !showSubtitleSubmenu;
     showAudioSubmenu = false;
+    showStatsSubmenu = false;
     showSubtitleSettings = false;
     
     if (showSubtitleSubmenu) {
@@ -2372,6 +2422,7 @@ let currentSkipSection = null;
     saveProgress();
     clearInterval(pollInterval);
     if (pieceRangeInterval) clearInterval(pieceRangeInterval);
+    if (statsInterval) clearInterval(statsInterval);
     if (progressTrackingInterval) clearInterval(progressTrackingInterval);
     if (skipButtonTimeout) clearTimeout(skipButtonTimeout);
     if (skipTimerInterval) clearInterval(skipTimerInterval);
@@ -2772,6 +2823,30 @@ let currentSkipSection = null;
                 <i class="ri-external-link-line"></i> Open in external player
               </span>
             </button>
+
+            {#if streamIsTorrent}
+              <button
+                class="player-track-option menu-item submenu-trigger"
+                on:click|stopPropagation={toggleStatsSubmenu}
+              >
+                <span class="player-track-info">
+                  <i class="ri-line-chart-line"></i> Statistics
+                </span>
+                <i class="ri-arrow-right-s-line"></i>
+              </button>
+            {/if}
+          </div>
+        {/if}
+
+        <!-- Statistics Submenu (floating) -->
+        {#if showStatsSubmenu}
+          <div class="submenu stats-submenu" style="left: {statsSubmenuX}px; top: {statsSubmenuY}px;" bind:this={statsSubmenuElement}>
+            <StreamStats
+              samples={statSamples}
+              stats={streamStats}
+              {bufferAhead}
+              span={STATS_HISTORY}
+            />
           </div>
         {/if}
 

@@ -3,7 +3,7 @@
 use magnolia_core::extensions::ExtensionInfo;
 use magnolia_core::files::MediaFile;
 use magnolia_core::playback::{PlaybackPlan, PlaybackRequest, TorrentFiles};
-use magnolia_core::torrent::{StreamStatus, TorrentInfo};
+use magnolia_core::torrent::{StreamStats, StreamStatus, TorrentInfo};
 use magnolia_core::tracking::{EpisodeTorrent, ShowHistory};
 
 use super::CoreState;
@@ -69,6 +69,11 @@ pub async fn get_torrent_piece_ranges(
     file_index: usize,
 ) -> Result<Vec<(f64, f64)>, String> {
     core.torrents.get_piece_ranges(handle_id, file_index).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn get_stream_stats(core: CoreState<'_>, handle_id: usize, file_index: usize) -> Result<StreamStats, String> {
+    core.torrents.get_stream_stats(handle_id, file_index).await.map_err(err)
 }
 
 #[tauri::command]

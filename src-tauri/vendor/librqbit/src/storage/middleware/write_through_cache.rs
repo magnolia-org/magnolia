@@ -5,7 +5,10 @@ free.
 An example, untested and unproven to be useful.
 */
 
-use std::num::NonZeroUsize;
+use std::{
+    num::NonZeroUsize,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
 use librqbit_core::lengths::{Lengths, ValidPieceIndex};
@@ -41,11 +44,13 @@ impl<U: StorageFactory + Clone> StorageFactory for WriteThroughCacheStorageFacto
         shared: &crate::ManagedTorrentShared,
         metadata: &TorrentMetadata,
     ) -> anyhow::Result<Self::Storage> {
-        let pieces = self
+        let pieces: usize = self
             .max_cache_bytes
             .div_ceil(metadata.info.lengths().default_piece_length() as u64)
             .try_into()?;
-        let pieces = NonZeroUsize::new(pieces).context("bug: pieces == 0")?;
+        // magnolia: a stream waits on a few pieces at once (the file's start, its index at
+        // the end, the seek target), which should all fit even when one piece is 32 mb
+        let pieces = NonZeroUsize::new(pieces.max(MIN_CACHED_PIECES)).context("bug: pieces == 0")?;
         let lru = RwLock::new(LruCache::new(pieces));
         Ok(WriteThroughCacheStorage {
             lru,
@@ -60,15 +65,27 @@ impl<U: StorageFactory + Clone> StorageFactory for WriteThroughCacheStorageFacto
     }
 }
 
+const MIN_CACHED_PIECES: usize = 4;
+
+// magnolia: a piece still being written keeps its place in a full cache this long after its
+// last write. otherwise many pieces downloading at once keep evicting each other, and every
+// chunk allocates and zeroes a whole piece again.
+const BUSY_PIECE_GRACE: Duration = Duration::from_secs(2);
+
 // magnolia: a cached piece and the byte ranges of it that were actually written. a piece
 // evicted mid-download comes back zeroed, so reads only trust ranges recorded here.
 struct CachedPiece {
     data: Box<[u8]>,
     // sorted, non-overlapping, non-adjacent [start, end) ranges
     written: Vec<(usize, usize)>,
+    touched: Instant,
 }
 
 impl CachedPiece {
+    fn is_complete(&self) -> bool {
+        self.covers(0, self.data.len())
+    }
+
     fn mark_written(&mut self, start: usize, end: usize) {
         let mut start = start;
         let mut end = end;
@@ -141,17 +158,32 @@ impl<U: TorrentStorage> TorrentStorage for WriteThroughCacheStorage<U> {
         }
         let (id, start) = self.locate(file_id, offset)?;
         let mut g = self.lru.write();
-        let piece = g.get_or_insert_mut(id, || CachedPiece {
-            data: vec![0; self.lengths.piece_length(id) as usize].into_boxed_slice(),
-            written: Vec::new(),
-        });
+        if !g.contains(&id) {
+            // a full cache only gives up a piece that is done or has gone quiet
+            let has_room = g.len() < g.cap().get()
+                || g.peek_lru()
+                    .is_some_and(|(_, p)| p.is_complete() || p.touched.elapsed() > BUSY_PIECE_GRACE);
+            if has_room {
+                g.put(
+                    id,
+                    CachedPiece {
+                        data: vec![0; self.lengths.piece_length(id) as usize].into_boxed_slice(),
+                        written: Vec::new(),
+                        touched: Instant::now(),
+                    },
+                );
+            }
+        }
         let end = start + buf.len();
-        piece
-            .data
-            .get_mut(start..end)
-            .context("bugged range")?
-            .copy_from_slice(buf);
-        piece.mark_written(start, end);
+        if let Some(piece) = g.get_mut(&id) {
+            piece
+                .data
+                .get_mut(start..end)
+                .context("bugged range")?
+                .copy_from_slice(buf);
+            piece.mark_written(start, end);
+            piece.touched = Instant::now();
+        }
         drop(g);
         self.underlying.pwrite_all(file_id, offset, buf)
     }

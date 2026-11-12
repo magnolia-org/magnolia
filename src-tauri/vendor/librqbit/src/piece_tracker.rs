@@ -42,16 +42,24 @@ const MIN_MISSING_CHUNKS_TO_HELP: usize = 8;
 // magnolia: a blocked piece that is still unfinished admits one more helper every interval, up
 // to the cap, so a piece stuck with slow peers soon gets faster ones too.
 const EXTRA_HELPER_EVERY: Duration = Duration::from_millis(750);
-pub(crate) const MAX_PIECE_HELPERS_ESCALATED: usize = 6;
+const MAX_PIECE_HELPERS_ESCALATED: usize = 6;
+
+// magnolia: a large piece has room for more peers from the start, one per this many missing
+// chunks (2 mb). a 32 mb piece is otherwise most of a minute of work for three peers while
+// the rest of the swarm fetches pieces nothing is waiting on.
+const MISSING_CHUNKS_PER_HELPER: usize = 128;
+const MAX_PIECE_HELPERS_LARGE: usize = 16;
 
 impl InflightPiece {
     pub fn is_downloading(&self, peer: PeerHandle) -> bool {
         self.peer == peer || self.helpers.contains(&peer)
     }
 
-    fn has_helper_room(&self) -> bool {
+    fn has_helper_room(&self, missing_chunks: usize) -> bool {
         let extra = (self.started.elapsed().as_millis() / EXTRA_HELPER_EVERY.as_millis()) as usize;
-        self.helpers.len() < (MAX_PIECE_HELPERS + extra).min(MAX_PIECE_HELPERS_ESCALATED)
+        let by_time = (MAX_PIECE_HELPERS + extra).min(MAX_PIECE_HELPERS_ESCALATED);
+        let by_size = (missing_chunks / MISSING_CHUNKS_PER_HELPER).min(MAX_PIECE_HELPERS_LARGE);
+        self.helpers.len() < by_time.max(by_size)
     }
 }
 
@@ -291,8 +299,10 @@ impl PieceTracker {
             } else if !info.helpers.is_empty() {
                 info.peer = info.helpers.remove(0);
             } else {
+                // magnolia: the chunks this peer delivered are on disk, so the next peer only
+                // fetches the rest instead of starting a large piece over
                 self.inflight.remove(&piece);
-                self.chunks.mark_piece_broken_if_not_have(piece);
+                self.chunks.requeue_piece_keeping_chunks(piece);
                 count += 1;
             }
         }
@@ -321,11 +331,12 @@ impl PieceTracker {
             if !peer_has_piece(piece) || self.chunks.is_piece_have(piece) {
                 continue;
             }
+            let missing = self.missing_chunks(piece);
             match self.inflight.get(&piece) {
-                Some(info) if !info.is_downloading(peer) && info.has_helper_room() => {}
+                Some(info) if !info.is_downloading(peer) && info.has_helper_room(missing) => {}
                 _ => continue,
             }
-            if self.missing_chunks(piece) < MIN_MISSING_CHUNKS_TO_HELP {
+            if missing < MIN_MISSING_CHUNKS_TO_HELP {
                 continue;
             }
             let info = self.inflight.get_mut(&piece)?;
@@ -354,9 +365,10 @@ impl PieceTracker {
                 && match self.inflight.get(&piece) {
                     None => true,
                     Some(info) => {
+                        let missing = self.missing_chunks(piece);
                         !info.is_downloading(peer)
-                            && info.has_helper_room()
-                            && self.missing_chunks(piece) >= MIN_MISSING_CHUNKS_TO_HELP
+                            && info.has_helper_room(missing)
+                            && missing >= MIN_MISSING_CHUNKS_TO_HELP
                     }
                 }
         })

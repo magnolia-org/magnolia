@@ -91,7 +91,7 @@ use crate::{
     peer_connection::{
         PeerConnection, PeerConnectionHandler, PeerConnectionOptions, WriterRequest,
     },
-    piece_tracker::{AcquireRequest, AcquireResult, MAX_PIECE_HELPERS_ESCALATED, PieceTracker},
+    piece_tracker::{AcquireRequest, AcquireResult, PieceTracker},
     session::CheckedIncomingConnection,
     session_stats::SessionStats,
     stream_connect::ConnectionKind,
@@ -1538,7 +1538,8 @@ impl PeerHandler {
                 let rate = self.state.lengths.default_piece_length() as f64 / t.as_secs_f64();
                 ((rate * STREAMING_QUEUE_SECS / chunk) as usize).clamp(8, 128)
             }
-            _ => 32,
+            // nothing measured yet, which on large pieces lasts a while
+            _ => 64,
         }
     }
 
@@ -1762,9 +1763,10 @@ impl PeerHandler {
             let chunks: Vec<ChunkInfo> = self.state.lengths.iter_chunk_infos(next).collect();
             // magnolia: helpers start partway into the piece, each in the largest stretch nobody
             // started on, so peers sharing it fetch different chunks first
-            const HELPER_START: [f64; MAX_PIECE_HELPERS_ESCALATED] = [0.5, 0.25, 0.75, 0.125, 0.625, 0.375];
+            // (1/2, 1/4, 3/4, 1/8, 5/8, ...: the slot number with its bits reversed)
             let start = helper_slot.map_or(0, |slot| {
-                (chunks.len() as f64 * HELPER_START[slot.min(HELPER_START.len() - 1)]) as usize
+                let fraction = ((slot as u32 + 1).reverse_bits() as f64) / (1u64 << 32) as f64;
+                (chunks.len() as f64 * fraction) as usize
             });
 
             for i in 0..chunks.len() {

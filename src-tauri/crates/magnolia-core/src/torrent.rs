@@ -100,6 +100,24 @@ pub struct StreamStatus {
     pub state: String, // "checking", "downloading"
 }
 
+/// live numbers for the stream being played, for the player's statistics page.
+#[derive(Clone, Serialize)]
+pub struct StreamStats {
+    /// bytes per second
+    pub download_speed: u64,
+    pub upload_speed: u64,
+    /// bytes received and sent since the torrent started
+    pub downloaded_bytes: u64,
+    pub uploaded_bytes: u64,
+    /// verified bytes of the played file
+    pub file_bytes: u64,
+    pub file_size: u64,
+    pub peers: usize,
+    pub peers_connecting: usize,
+    pub peers_seen: usize,
+    pub piece_size: u64,
+}
+
 #[derive(Clone)]
 struct HttpState {
     session: Arc<Session>,
@@ -1350,6 +1368,41 @@ impl TorrentManager {
 
     pub async fn get_http_port(&self) -> Result<u16, String> {
         Ok(self.http_addr.port())
+    }
+
+    pub async fn get_stream_stats(&self, handle_id: usize, file_index: usize) -> Result<StreamStats> {
+        let torrents = self.torrents.read().await;
+        let entry = torrents.get(&handle_id).context("Torrent handle not found")?;
+        let session_id = entry.session_id.context("Torrent not yet added to session")?;
+        drop(torrents);
+
+        let handle = self
+            .session
+            .get(TorrentIdOrHash::Id(session_id))
+            .context("Session torrent not found")?;
+        let (file_size, piece_size) = handle
+            .with_metadata(|m| {
+                m.file_infos
+                    .get(file_index)
+                    .map(|fi| (fi.len, m.lengths().default_piece_length() as u64))
+            })?
+            .context("File index out of range")?;
+
+        let stats = handle.stats();
+        let live = stats.live.as_ref();
+        let peers = live.map(|l| &l.snapshot.peer_stats);
+        Ok(StreamStats {
+            download_speed: live.map(|l| l.download_speed.as_bytes()).unwrap_or(0),
+            upload_speed: live.map(|l| l.upload_speed.as_bytes()).unwrap_or(0),
+            downloaded_bytes: live.map(|l| l.snapshot.fetched_bytes).unwrap_or(0),
+            uploaded_bytes: stats.uploaded_bytes,
+            file_bytes: stats.file_progress.get(file_index).copied().unwrap_or(0).min(file_size),
+            file_size,
+            peers: peers.map(|p| p.live as usize).unwrap_or(0),
+            peers_connecting: peers.map(|p| p.connecting as usize).unwrap_or(0),
+            peers_seen: peers.map(|p| p.seen as usize).unwrap_or(0),
+            piece_size,
+        })
     }
 
     /// Downloaded ranges of a file as (start, end) fractions in [0, 1], derived

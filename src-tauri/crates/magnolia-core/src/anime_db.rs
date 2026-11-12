@@ -248,7 +248,33 @@ pub fn number_show(entries: &[AnimeEntry], episodes: &[TmdbEpisodeDate]) -> Show
         .collect();
     let mut numbering = ShowNumbering { episodes };
     split_same_day_broadcasts(entries, &mut numbering);
+    spread_schedule_gaps(entries, &mut numbering);
     numbering
+}
+
+/// anilist's schedule is often incomplete for a season released at once (one node for the
+/// premiere), so every tmdb episode of that day lands on it. when tmdb and anilist agree on
+/// how many episodes the entry has nothing is split, so such a run counts on from its first.
+fn spread_schedule_gaps(entries: &[AnimeEntry], numbering: &mut ShowNumbering) {
+    let mut by_entry: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (i, m) in numbering.episodes.iter().enumerate() {
+        by_entry.entry(m.anime.anilist_id).or_default().push(i);
+    }
+    for (id, indices) in by_entry {
+        let total = entries.iter().find(|e| e.anilist_id == id).and_then(|e| e.episodes);
+        if total != Some(indices.len() as u32) {
+            continue;
+        }
+        let mut run = 0;
+        for pair in 1..indices.len() {
+            let (prev, this) = (indices[pair - 1], indices[pair]);
+            let same = numbering.episodes[this].anime.episode + run == numbering.episodes[prev].anime.episode;
+            run = if same { run + 1 } else { 0 };
+            let anime = &mut numbering.episodes[this].anime;
+            anime.episode += run;
+            anime.absolute_episode += run;
+        }
+    }
 }
 
 /// when anilist aired several episodes on one day (a double finale), the tmdb segments of
@@ -495,7 +521,10 @@ impl Core {
 
     /// where a tmdb episode of an anime falls in anilist's numbering.
     pub async fn anime_episode(&self, tmdb_id: u32, tmdb: &TmdbEpisode) -> Option<AnimeEpisode> {
-        map_episode(&self.anime_entries(tmdb_id).await?, tmdb)
+        let entries = self.anime_entries(tmdb_id).await?;
+        // the show's saved numbering has seen every episode, so it knows what one alone can't
+        let saved = self.anime_db.numbering(tmdb_id).and_then(|n| n.get(tmdb.season, tmdb.episode).cloned());
+        saved.map(|m| m.anime).or_else(|| map_episode(&entries, tmdb))
     }
 
     /// the tmdb episodes that air as one with this one (split anime episodes share a file
@@ -620,6 +649,21 @@ mod tests {
             .collect();
         let numbering = number_show(&[drop], &episodes);
         assert!(numbering.split_groups().is_empty());
+    }
+
+    #[test]
+    fn incomplete_schedule_does_not_group_a_drop() {
+        // anilist lists only the premiere of "exception", released whole on netflix
+        let mut exception = entry(135660, "exception", Some(8), "2022-10-13");
+        exception.schedule = vec![(1, parse_ymd("2022-10-13").unwrap())];
+        let episodes: Vec<_> = (1..=8)
+            .map(|e| TmdbEpisodeDate { season: 1, episode: e, air_date: Some("2022-10-13".into()) })
+            .collect();
+        let numbering = number_show(&[exception], &episodes);
+        assert!(numbering.split_groups().is_empty());
+        let numbers: Vec<u32> = numbering.episodes.iter().map(|m| m.anime.episode).collect();
+        assert_eq!(numbers, (1..=8).collect::<Vec<u32>>());
+        assert_eq!(numbering.get(1, 5).unwrap().anime.absolute_episode, 5);
     }
 
     #[test]

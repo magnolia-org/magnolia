@@ -42,6 +42,9 @@ import { invoke } from "@tauri-apps/api/core";
   let animeGroups = {};
   let animeNumberingFor = null;
   let selectedEpisode = null;
+  // the season of the open episode; with an episode search every season is listed at once,
+  // so it isn't always the expanded one
+  let selectedEpisodeSeason = null;
   let credits = null;
   let detailsToken = 0;
   let recommendations = [];
@@ -211,10 +214,17 @@ import { invoke } from "@tauri-apps/api/core";
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")
         return;
 
-      if (e.key === "Escape" && selectedEpisode) {
+      if (!selectedEpisode) return;
+      if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
         selectedEpisode = null;
+      } else if (e.key === "ArrowLeft" && previousEpisode) {
+        e.preventDefault();
+        selectedEpisode = previousEpisode;
+      } else if (e.key === "ArrowRight" && followingEpisode) {
+        e.preventDefault();
+        selectedEpisode = followingEpisode;
       }
     };
 
@@ -417,6 +427,40 @@ import { invoke } from "@tauri-apps/api/core";
       .map(([s, e]) => allSeasonsData[s]?.episodes?.find(x => x.episode_number === e)?.name)
       .filter(Boolean);
     return names.join(" / ") || episode.name;
+  }
+
+  function openEpisode(seasonNumber, episode) {
+    selectedEpisodeSeason = seasonNumber;
+    selectedEpisode = episode;
+  }
+
+  // the open episode's neighbours in its season, its watch state and who made it
+  $: episodeSiblings = selectedEpisode
+    ? listedEpisodes(selectedEpisodeSeason, allSeasonsData[selectedEpisodeSeason]?.episodes || [], animeGroups)
+    : [];
+  $: episodePosition = selectedEpisode
+    ? episodeSiblings.findIndex(e => e.episode_number === selectedEpisode.episode_number)
+    : -1;
+  $: previousEpisode = episodePosition > 0 ? episodeSiblings[episodePosition - 1] : null;
+  $: followingEpisode = episodePosition >= 0 ? episodeSiblings[episodePosition + 1] || null : null;
+  $: selectedEpisodeProgress = selectedEpisode && details
+    ? $watchProgressStore[`${details.id}-${media.media_type}-S${selectedEpisodeSeason}-E${selectedEpisode.episode_number}`]
+    : null;
+  $: selectedEpisodePercent = selectedEpisodeProgress?.duration
+    ? Math.min(100, (selectedEpisodeProgress.currentTimestamp / selectedEpisodeProgress.duration) * 100)
+    : 0;
+  $: selectedEpisodeCredits = episodeCredits(selectedEpisode);
+
+  function episodeCredits(episode) {
+    const names = (job) => [...new Set((episode?.crew || []).filter(c => c.job === job).map(c => c.name))];
+    return [
+      { label: "Directed by", names: names("Director") },
+      { label: "Written by", names: names("Writer") },
+    ].filter(credit => credit.names.length > 0);
+  }
+
+  function hasAired(episode) {
+    return !episode?.air_date || new Date(episode.air_date) <= new Date();
   }
 
   // tmdb's recommendations are usually on point; similar titles only fill in when there are none
@@ -852,7 +896,7 @@ import { invoke } from "@tauri-apps/api/core";
   function reselectTorrent() {
     if (details.seasons && details.seasons.length > 0) {
       if (selectedEpisode) {
-        handlePlay(selectedSeason, selectedEpisode.episode_number, true);
+        handlePlay(selectedEpisodeSeason, selectedEpisode.episode_number, true);
       } else {
         handlePlay(1, 1, true);
       }
@@ -1579,9 +1623,9 @@ import { invoke } from "@tauri-apps/api/core";
                               <button
                                 type="button"
                                 class="episode-list-item"
-                                class:selected={selectedEpisode?.episode_number === episode.episode_number}
+                                class:selected={selectedEpisode?.episode_number === episode.episode_number && selectedEpisodeSeason === season.season_number}
                                 class:watched={isWatched}
-                                on:click={() => (selectedEpisode = episode)}
+                                on:click={() => openEpisode(season.season_number, episode)}
                               >
                                 <div class="episode-still">
                                   {#if episode.still_path}
@@ -1651,7 +1695,7 @@ import { invoke } from "@tauri-apps/api/core";
                               style="background: {episode.vote_average ? getRatingColor(episode.vote_average) : 'rgba(255,255,255,0.12)'}"
                               on:click={() => {
                                 selectedSeason = season.season_number;
-                                selectedEpisode = episode;
+                                openEpisode(season.season_number, episode);
                               }}
                               data-tooltip="{episode.name} - {episode.vote_average
                                 ? episode.vote_average.toFixed(1)
@@ -1870,86 +1914,139 @@ import { invoke } from "@tauri-apps/api/core";
 </div>
 
 {#if selectedEpisode}
+  {@const episodeWatched = !!selectedEpisodeProgress?.watched}
+  {@const episodeStarted = !episodeWatched && selectedEpisodePercent > 0}
   <!-- svelte-ignore a11y-click-events-have-key-events -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="episode-modal-overlay" on:click={() => (selectedEpisode = null)} transition:fade={{ duration: 400, easing: cubicOut }}>
+  <div class="episode-modal-overlay" on:click={() => (selectedEpisode = null)} transition:fade={{ duration: 300, easing: cubicOut }}>
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <div class="episode-modal" on:click={(e) => e.stopPropagation()} in:scale|global={{ start: 1.08, opacity: 0, duration: 400, easing: cubicOut }} out:scale|global={{ start: 1.08, opacity: 1, duration: 400, easing: cubicOut }}>
-      <div class="episode-modal-header">
-        <h3>
-          Episode {selectedEpisode.episode_number}: {selectedEpisode.name}
-        </h3>
-        <div class="episode-modal-actions">
-          <button
-            class="btn-standard"
-            disabled={isPlayLoading}
-            on:click={() =>
-              handlePlay(selectedSeason, selectedEpisode.episode_number)}
-          >
-            {#if isPlayLoading}
-              <i class="ri-loader-4-line spin"></i>
-            {:else}
-              <i class="ri-play-fill"></i>
-            {/if}
-            Play
-          </button>
-          <button
-            class="btn-standard close-modal-btn"
-            on:click={() => (selectedEpisode = null)}
-          >
-            <i class="ri-close-line"></i>
-          </button>
-        </div>
-      </div>
-
-      <div class="episode-modal-content">
+    <div class="episode-modal" on:click={(e) => e.stopPropagation()} in:scale|global={{ start: 1.05, opacity: 0, duration: 300, easing: cubicOut }} out:scale|global={{ start: 1.05, opacity: 1, duration: 300, easing: cubicOut }}>
+      <div class="episode-hero" class:no-still={!selectedEpisode.still_path}>
         {#if selectedEpisode.still_path}
-          <div class="episode-modal-still">
+          {#key selectedEpisode.still_path}
             <img
-              src={getImageUrl(selectedEpisode.still_path, "original")}
+              src={getImageUrl(selectedEpisode.still_path, "w1280")}
               alt={selectedEpisode.name}
+              in:fade={{ duration: 250 }}
             />
+          {/key}
+        {:else}
+          <div class="episode-hero-placeholder">
+            <i class="ri-film-line"></i>
           </div>
         {/if}
 
-        <div class="episode-modal-meta">
-          {#if selectedEpisode.vote_average && selectedEpisode.vote_average > 0}
-            <div class="episode-modal-stat">
-              <span class="stat-label">Rating</span>
-              <div class="stat-value">
-                <span
-                  class="rating-badge"
-                  style="background: {getRatingColor(selectedEpisode.vote_average)}"
-                >
-                  {selectedEpisode.vote_average.toFixed(1)}
-                </span>
-                {#if selectedEpisode.vote_count}
-                  <span class="vote-count">({selectedEpisode.vote_count})</span>
-                {/if}
-              </div>
-            </div>
-          {/if}
-
-          <div class="episode-modal-stat">
-            <span class="stat-label">Air Date</span>
-            <span class="stat-value"
-              >{formatDate(selectedEpisode.air_date)}</span
+        <div class="episode-hero-top">
+          <div class="episode-nav">
+            <button
+              class="episode-round-btn"
+              disabled={!previousEpisode}
+              on:click={() => (selectedEpisode = previousEpisode)}
+              title="Previous episode"
             >
+              <i class="ri-arrow-left-s-line"></i>
+            </button>
+            <button
+              class="episode-round-btn"
+              disabled={!followingEpisode}
+              on:click={() => (selectedEpisode = followingEpisode)}
+              title="Next episode"
+            >
+              <i class="ri-arrow-right-s-line"></i>
+            </button>
+            <span class="episode-position">
+              S{selectedEpisodeSeason} · {episodeNumberLabel(selectedEpisodeSeason, selectedEpisode.episode_number, animeGroups)}
+              {#if episodeSiblings.length > 0}
+                <span class="episode-position-total">of {episodeSiblings.length}</span>
+              {/if}
+            </span>
           </div>
+          <button class="episode-round-btn" on:click={() => (selectedEpisode = null)} title="Close">
+            <i class="ri-close-line"></i>
+          </button>
+        </div>
 
-          {#if selectedEpisode.runtime}
-            <div class="episode-modal-stat">
-              <span class="stat-label">Runtime</span>
-              <span class="stat-value">{selectedEpisode.runtime} min</span>
+        <div class="episode-hero-info">
+          <h3>{groupedEpisodeName(selectedEpisodeSeason, selectedEpisode, animeGroups)}</h3>
+          <div class="episode-hero-meta">
+            {#if selectedEpisode.vote_average > 0}
+              <span class="episode-hero-rating" style="--rating-color: {getRatingColor(selectedEpisode.vote_average)}">
+                <i class="ri-star-fill"></i>
+                {selectedEpisode.vote_average.toFixed(1)}
+                {#if selectedEpisode.vote_count}
+                  <span class="episode-hero-votes">({selectedEpisode.vote_count})</span>
+                {/if}
+              </span>
+            {/if}
+            {#if selectedEpisode.air_date}
+              <span>{hasAired(selectedEpisode) ? "" : "Airs "}{formatDate(selectedEpisode.air_date)}</span>
+            {/if}
+            {#if selectedEpisode.runtime}
+              <span>{selectedEpisode.runtime} min</span>
+            {/if}
+            {#if episodeWatched}
+              <span class="episode-hero-watched">
+                <i class="ri-checkbox-circle-fill"></i>
+                Watched
+              </span>
+            {/if}
+          </div>
+        </div>
+
+        {#if episodeStarted}
+          <div class="episode-hero-progress">
+            <div class="episode-hero-progress-fill" style="width: {selectedEpisodePercent}%"></div>
+          </div>
+        {/if}
+      </div>
+
+      <div class="episode-modal-body">
+        <div class="episode-modal-actions">
+          <button
+            class="btn-standard primary btn-large play-btn-with-resume"
+            disabled={isPlayLoading}
+            on:click={() => handlePlay(selectedEpisodeSeason, selectedEpisode.episode_number)}
+          >
+            {#if isPlayLoading}
+              <i class="ri-loader-4-line spin"></i>
+            {:else if episodeWatched}
+              <i class="ri-repeat-line"></i>
+            {:else}
+              <i class="ri-play-fill"></i>
+            {/if}
+            <div class="play-btn-content">
+              <span class="play-btn-main">{episodeWatched ? "Rewatch" : episodeStarted ? "Resume" : "Play"}</span>
+              {#if episodeStarted && !isPlayLoading}
+                <span class="play-btn-resume-info">From {formatTime(selectedEpisodeProgress.currentTimestamp)}</span>
+              {/if}
             </div>
-          {/if}
+          </button>
+          <button
+            class="btn-standard btn-large"
+            disabled={isPlayLoading}
+            on:click={() => handlePlay(selectedEpisodeSeason, selectedEpisode.episode_number, true)}
+            title="Pick a different torrent for this episode"
+          >
+            <i class="ri-refresh-line"></i>
+            Change source
+          </button>
         </div>
 
-        <div class="episode-modal-overview">
-          <h4>Overview</h4>
-          <p>{selectedEpisode.overview || "No overview available."}</p>
-        </div>
+        <p class="episode-modal-overview" class:empty={!selectedEpisode.overview}>
+          {selectedEpisode.overview || "No overview available."}
+        </p>
+
+        {#if selectedEpisodeCredits.length > 0}
+          <div class="episode-modal-credits">
+            {#each selectedEpisodeCredits as credit}
+              <div class="episode-modal-credit">
+                <span class="credit-label">{credit.label}</span>
+                <span class="credit-names">{credit.names.join(", ")}</span>
+              </div>
+            {/each}
+          </div>
+        {/if}
       </div>
     </div>
   </div>
