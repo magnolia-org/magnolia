@@ -192,6 +192,8 @@ pub fn title_score(wanted: &str, title: &str) -> f64 {
     }
 }
 
+const THIN_SWARM_SEEDS: u32 = 5;
+
 fn resolution_bonus(resolution: Option<&str>) -> f64 {
     match resolution {
         Some("1080p") => 6.0,
@@ -260,6 +262,10 @@ pub fn rank_result(r: &mut SearchResult, ctx: &RankContext) {
     }
     if r.seeds == 0 {
         score -= 25.0;
+    } else if r.seeds < THIN_SWARM_SEEDS {
+        // a stream starts slowly from a handful of seeds, so a thinly seeded episode falls
+        // below a well seeded pack that holds it
+        score -= (THIN_SWARM_SEEDS - r.seeds) as f64 * 4.0;
     }
     if r.trusted {
         score += 4.0;
@@ -344,6 +350,24 @@ mod tests {
         assert!(exact.relevance > other.relevance);
         assert!(exact.relevance > wrong_show.relevance);
         assert_eq!(wrong_show.match_kind, MatchKind::Unknown);
+    }
+
+    #[test]
+    fn well_seeded_packs_beat_thinly_seeded_episodes() {
+        let ctx = tv("Breaking Bad", 1, 5);
+        let rank = |title: &str, seeds: u32| {
+            let mut r = result(title, seeds, "1 GB");
+            rank_result(&mut r, &ctx);
+            r
+        };
+        let pack = rank("Breaking Bad S01 1080p WEB-DL", 25);
+        assert_eq!(pack.match_kind, MatchKind::Pack);
+        for seeds in 1..=3 {
+            let thin = rank("Breaking Bad S01E05 1080p WEB-DL", seeds);
+            assert!(pack.relevance > thin.relevance, "{seeds} seeds");
+        }
+        let healthy = rank("Breaking Bad S01E05 1080p WEB-DL", 20);
+        assert!(healthy.relevance > pack.relevance);
     }
 
     #[test]

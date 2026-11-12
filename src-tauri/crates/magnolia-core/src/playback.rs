@@ -244,6 +244,11 @@ impl Core {
             },
         };
 
+        // the player opens and prepares the stream next; starting the file now saves that wait
+        if handle_id.is_some() {
+            self.warm_torrent(req.magnet_link.clone(), req.file_index);
+        }
+
         let progress = self.watch_progress.get_entry(req.media_id, &req.media_type).await;
         Ok(PlaybackPlan {
             handle_id,
@@ -253,6 +258,28 @@ impl Core {
             episode,
             initial_timestamp: watch_state::initial_timestamp(progress.as_ref(), is_movie, season, episode),
         })
+    }
+
+    /// starts the remembered torrent file of an episode (or movie) that is likely to be
+    /// played soon, like the one the details view offers to resume, so play finds its peers
+    /// connected and its start downloaded. nothing happens when no torrent was picked for it.
+    pub async fn warm_up_playback(&self, media_id: u32, media_type: &str, season: Option<u32>, episode: Option<u32>) {
+        if self.streaming_client().await.is_some() {
+            return;
+        }
+        let (slot_season, slot_episode) = tracking_slot(media_type, season, episode);
+        if let Some(saved) = self.selections.get_selection(media_id, slot_season, slot_episode).await {
+            self.warm_torrent(saved.magnet_link, saved.file_index);
+        }
+    }
+
+    fn warm_torrent(&self, magnet_link: String, file_index: usize) {
+        let torrents = self.torrents.clone();
+        tokio::spawn(async move {
+            if let Err(e) = torrents.warm(&magnet_link, file_index).await {
+                log::warn!("warming {} failed: {:#}", magnet_link, e);
+            }
+        });
     }
 
     /// plays an episode (or movie) straight from its remembered torrent file.

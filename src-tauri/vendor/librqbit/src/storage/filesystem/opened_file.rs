@@ -186,7 +186,11 @@ impl OpenedFile {
         if !g.tried_marking_sparse {
             g.tried_marking_sparse = true;
             let f = g.fd.as_ref().ok_or(Error::FsFileIsNone)?;
-            tracing::debug!(path=?g.path, marked=super::sparse::mark_file_sparse(f), "marking sparse");
+            // magnolia: upstream marked the file inside the debug! arguments, which tracing
+            // skips when debug logs are off, so files were never sparse and the first write
+            // near the end of a large file zero-filled all of it (10+ s on a 28 gb file)
+            let marked = super::sparse::mark_file_sparse(f);
+            tracing::debug!(path=?g.path, marked, "marking sparse");
         }
         let g = parking_lot::RwLockWriteGuard::downgrade(g);
         Ok(RwLockReadGuard::try_map(g, |f| f.fd.as_ref()).ok().unwrap())

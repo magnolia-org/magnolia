@@ -176,9 +176,15 @@
         if (!episodeSearch) {
             return [{ id: "all", title: "Results", items: list }].filter(s => s.items.length);
         }
-        return [
+        // a pack the backend ranks above every copy of the episode (a thinly seeded one) comes first
+        const top = (items) => Math.max(-Infinity, ...items.map(r => r.relevance));
+        const matches = [
             { id: "exact", title: `Episode ${currentEpisode}`, items: by("exact") },
             { id: "pack", title: "Packs with this episode", items: by("pack") },
+        ];
+        if (top(matches[1].items) > top(matches[0].items)) matches.reverse();
+        return [
+            ...matches,
             { id: "unknown", title: "Other results", items: by("unknown") },
             { id: "mismatch", title: "Other episodes and seasons", items: by("mismatch"), collapsible: true },
         ].filter(s => s.items.length);

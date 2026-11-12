@@ -677,11 +677,30 @@ import { invoke } from "@tauri-apps/api/core";
   $: if (details) refreshResumeInfo($watchProgressStore[`${details.id}-${media.media_type}`]);
   $: if (!details) resumeInfo = null;
 
+  // the backend starts the saved torrent of what resume would play, so pressing play
+  // finds it connected and partly downloaded
+  let warmedKey = null;
+  function warmUpResume(info) {
+    if (!info || !details) return;
+    const key = `${details.id}-${media.media_type}-${info.season}-${info.episode}`;
+    if (key === warmedKey) return;
+    warmedKey = key;
+    invoke("warm_up_playback", {
+      mediaId: details.id,
+      mediaType: media.media_type,
+      season: info.season ?? null,
+      episode: info.episode ?? null,
+    }).catch((err) => console.error("failed to warm up playback:", err));
+  }
+
   async function refreshResumeInfo(_progress) {
     const request = ++resumeRequest;
     try {
       const info = await getResumeInfo();
-      if (request === resumeRequest) resumeInfo = info;
+      if (request === resumeRequest) {
+        resumeInfo = info;
+        warmUpResume(info);
+      }
     } catch (err) {
       console.error("failed to load resume info:", err);
     }

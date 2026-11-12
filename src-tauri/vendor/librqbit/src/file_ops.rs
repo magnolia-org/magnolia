@@ -115,7 +115,9 @@ impl<'a> FileOps<'a> {
             }
 
             piece_files.clear();
-            let mut computed_hash = Sha1::new();
+            // magnolia: made only for pieces with data. creating a hasher per piece costs
+            // about a second on a large torrent whose files don't exist yet (windows cryptoapi)
+            let mut computed_hash: Option<Sha1> = None;
             let mut piece_remaining = piece_info.len as usize;
             let mut some_files_broken = false;
             progress.fetch_add(piece_info.len as u64, Ordering::Relaxed);
@@ -149,7 +151,7 @@ impl<'a> FileOps<'a> {
                     current_file.fi,
                     pos,
                     self.files,
-                    &mut computed_hash,
+                    computed_hash.get_or_insert_with(Sha1::new),
                     &mut read_buffer,
                     to_read_in_file,
                 ) {
@@ -162,13 +164,13 @@ impl<'a> FileOps<'a> {
                 }
             }
 
-            if some_files_broken {
+            let Some(computed_hash) = computed_hash.filter(|_| !some_files_broken) else {
                 trace!(
                     "piece {} had errors, marking as needed",
                     piece_info.piece_index
                 );
                 continue;
-            }
+            };
 
             if self
                 .torrent

@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use librqbit::storage::middleware::write_through_cache::WriteThroughCacheStorageFactory;
 use librqbit::storage::{StorageFactoryExt, filesystem::FilesystemStorageFactory};
 use librqbit::{
-    AddTorrent, AddTorrentOptions, AddTorrentResponse, ConnectionOptions, PeerConnectionOptions, Session, SessionOptions,
-    ValidatedTorrentMetaV1Info, api::TorrentIdOrHash,
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, ConnectionOptions, ListenerMode, ListenerOptions,
+    PeerConnectionOptions, Session, SessionOptions, ValidatedTorrentMetaV1Info, api::TorrentIdOrHash,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -269,7 +269,15 @@ pub struct TorrentManager {
     http_addr: SocketAddr,
     // Torrent cache: keep up to 10 torrents paused with data cleared
     torrent_cache: Arc<RwLock<Vec<CachedTorrent>>>,
+    // the session torrent the player streams from, which nothing else may slow down
+    playing: Arc<std::sync::Mutex<Option<usize>>>,
+    // a torrent started before play was pressed (see `warm`), as (session id, generation)
+    warm: Arc<std::sync::Mutex<Option<(usize, u64)>>>,
+    warm_generation: std::sync::atomic::AtomicU64,
 }
+
+// an unclaimed warm torrent stops downloading after this
+const WARM_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn video_files_from_info(info: &ValidatedTorrentMetaV1Info<librqbit::ByteBufOwned>) -> Result<Vec<TorrentFile>> {
     Ok(info
@@ -496,6 +504,13 @@ impl TorrentManager {
                 .iter()
                 .filter_map(|t| url::Url::parse(t).ok())
                 .collect(),
+            // without a listener only peers we can dial over tcp are reachable. most of a swarm
+            // sits behind nat, so peers need to reach us (announced port, upnp) and we need utp
+            listen: Some(ListenerOptions {
+                mode: ListenerMode::TcpAndUtp,
+                enable_upnp_port_forwarding: true,
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -587,6 +602,9 @@ impl TorrentManager {
             next_id,
             http_addr,
             torrent_cache: Arc::new(RwLock::new(Vec::new())),
+            playing: Arc::new(std::sync::Mutex::new(None)),
+            warm: Arc::new(std::sync::Mutex::new(None)),
+            warm_generation: std::sync::atomic::AtomicU64::new(0),
         };
         
         Ok(manager)
@@ -927,6 +945,129 @@ impl TorrentManager {
         Ok(result)
     }
 
+    /// how to add a magnet to the session: its resolved metadata when that was cached on
+    /// disk, otherwise the magnet itself.
+    fn torrent_source(&self, magnet_or_url: &str) -> Result<AddTorrent<'static>> {
+        let cached = info_hash_from_magnet(magnet_or_url)
+            .and_then(|hash| std::fs::read(self.metadata_dir.join(format!("{hash}.torrent"))).ok());
+        Ok(match cached {
+            Some(bytes) => AddTorrent::from_bytes(bytes),
+            None if magnet_or_url.starts_with("magnet:") || magnet_or_url.starts_with("http") => {
+                AddTorrent::from_url(magnet_or_url.to_string())
+            }
+            None => AddTorrent::from_local_filename(magnet_or_url)?,
+        })
+    }
+
+    /// starts downloading one file of a torrent, adding the torrent to the session or
+    /// switching it over when it is there already.
+    async fn start_file(
+        &self,
+        add: AddTorrent<'_>,
+        seen_peers: Vec<SocketAddr>,
+        file_index: usize,
+    ) -> Result<(usize, Arc<librqbit::ManagedTorrent>)> {
+        // peers discovered while resolving the magnet connect without waiting for a tracker
+        let opts = AddTorrentOptions {
+            overwrite: true,
+            paused: false,
+            only_files: Some(vec![file_index]),
+            force_tracker_interval: Some(std::time::Duration::from_secs(5)),
+            initial_peers: (!seen_peers.is_empty()).then_some(seen_peers),
+            ..Default::default()
+        };
+        match self.session.add_torrent(add, Some(opts)).await? {
+            AddTorrentResponse::Added(id, handle) => Ok((id, handle)),
+            AddTorrentResponse::AlreadyManaged(id, handle) => {
+                // still live for another of its files, like the previous episode of a pack,
+                // which would keep the swarm busy with that one
+                if handle.only_files() != Some(vec![file_index]) {
+                    let only = std::collections::HashSet::from([file_index]);
+                    self.session.update_only_files(&handle, &only).await?;
+                }
+                if handle.is_paused() {
+                    self.session.unpause(&handle).await?;
+                }
+                Ok((id, handle))
+            }
+            AddTorrentResponse::ListOnly(_) => Err(anyhow::anyhow!("Unexpected list_only response")),
+        }
+    }
+
+    /// makes `session_id` the stream being played: every other torrent left running from
+    /// earlier plays or warm ups is paused, so none of them takes bandwidth from it.
+    async fn focus(&self, session_id: usize) {
+        *self.playing.lock().unwrap() = Some(session_id);
+        self.warm.lock().unwrap().take_if(|(id, _)| *id == session_id);
+        let others: Vec<Arc<librqbit::ManagedTorrent>> = self.session.with_torrents(|all| {
+            all.filter(|(id, h)| *id != session_id && !h.is_paused())
+                .map(|(_, h)| h.clone())
+                .collect()
+        });
+        for handle in others {
+            if let Err(e) = self.session.pause(&handle).await {
+                tracing::warn!("failed to pause torrent {}: {:#}", handle.id(), e);
+            }
+        }
+    }
+
+    /// starts the file a play is likely to ask for next, so its peers are connected and
+    /// its head and tail are downloading before the player opens. the stream claims the
+    /// torrent when it starts; left alone it pauses after `WARM_TTL`.
+    pub async fn warm(self: &Arc<Self>, magnet_or_url: &str, file_index: usize) -> Result<()> {
+        let t0 = std::time::Instant::now();
+        let generation = self.warm_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let (bytes, seen_peers) = {
+            let torrents = self.torrents.read().await;
+            let known = torrents.values().find(|e| e.magnet_url == magnet_or_url && e.torrent_bytes.is_some());
+            (
+                known.and_then(|e| e.torrent_bytes.clone()),
+                known.map(|e| e.seen_peers.clone()).unwrap_or_default(),
+            )
+        };
+        let add = match bytes {
+            Some(bytes) => AddTorrent::TorrentFileBytes(bytes),
+            None => self.torrent_source(magnet_or_url)?,
+        };
+        let add = tokio::time::timeout(METADATA_TIMEOUT, self.start_file(add, seen_peers, file_index));
+        let (session_id, handle) = add.await.context("timed out fetching torrent metadata")??;
+
+        // a newer warm up or a stream may have started while this one resolved
+        let previous = {
+            let mut warm = self.warm.lock().unwrap();
+            if warm.is_some_and(|(_, g)| g > generation) {
+                return Ok(());
+            }
+            warm.replace((session_id, generation))
+        };
+        if let Some((old, _)) = previous.filter(|(old, _)| *old != session_id) {
+            self.pause_unless_playing(old).await;
+        }
+        spawn_prefetch(handle, file_index, Arc::new(PrefetchState::default()));
+        tracing::info!("[player-init] warm: session {} file {} started in {:.3}s", session_id, file_index, t0.elapsed().as_secs_f64());
+
+        let this = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(WARM_TTL).await;
+            let expired = this.warm.lock().unwrap().take_if(|(_, g)| *g == generation).is_some();
+            if expired {
+                this.pause_unless_playing(session_id).await;
+            }
+        });
+        Ok(())
+    }
+
+    async fn pause_unless_playing(&self, session_id: usize) {
+        if *self.playing.lock().unwrap() == Some(session_id) {
+            return;
+        }
+        if let Some(handle) = self.session.get(TorrentIdOrHash::Id(session_id)) {
+            if !handle.is_paused() {
+                let _ = self.session.pause(&handle).await;
+            }
+        }
+    }
+
     pub async fn prepare_stream(&self, handle_id: usize, file_index: usize) -> Result<()> {
         let t0 = std::time::Instant::now();
         tracing::info!("[player-init] prepare_stream: start handle_id={} file_index={}", handle_id, file_index);
@@ -962,6 +1103,7 @@ impl TorrentManager {
                 }
 
                 tracing::info!("[player-init] prepare_stream: resumed from cache session_id={} in {:.3}s", session_id, t0.elapsed().as_secs_f64());
+                self.focus(session_id).await;
 
                 let prefetch = Arc::new(PrefetchState::default());
                 spawn_prefetch(handle.clone(), file_index, prefetch.clone());
@@ -987,53 +1129,16 @@ impl TorrentManager {
         // Add the torrent with ONLY the specific file selected.
         // Prefer the torrent bytes cached during add_torrent's list_only resolution:
         // adding from bytes skips re-resolving the magnet over DHT entirely.
-        let add_torrent = if let Some(bytes) = &entry.torrent_bytes {
-            tracing::info!("[player-init] prepare_stream: using cached torrent bytes (skipping magnet resolution)");
-            AddTorrent::TorrentFileBytes(bytes.clone())
-        } else if entry.magnet_url.starts_with("magnet:") {
-            AddTorrent::from_url(&entry.magnet_url)
-        } else if entry.magnet_url.starts_with("http") {
-            AddTorrent::from_url(&entry.magnet_url)
-        } else {
-            AddTorrent::from_local_filename(&entry.magnet_url)?
+        let add_torrent = match &entry.torrent_bytes {
+            Some(bytes) => AddTorrent::TorrentFileBytes(bytes.clone()),
+            None => self.torrent_source(&entry.magnet_url)?,
         };
-
-        // Peers discovered while resolving the magnet connect immediately,
-        // without waiting for a fresh DHT/tracker round-trip.
-        let initial_peers = if entry.seen_peers.is_empty() {
-            None
-        } else {
-            tracing::info!("[player-init] prepare_stream: seeding {} previously seen peers", entry.seen_peers.len());
-            Some(entry.seen_peers.clone())
-        };
-
-        tracing::info!("[player-init] prepare_stream: no cache hit, calling session.add_torrent (t={:.3}s)", t0.elapsed().as_secs_f64());
-
-        let opts = AddTorrentOptions {
-            overwrite: true,
-            paused: false,
-            only_files: Some(vec![file_index]),
-            force_tracker_interval: Some(std::time::Duration::from_secs(5)), // Request peers faster
-            initial_peers,
-            ..Default::default()
-        };
-        
+        let seen_peers = entry.seen_peers.clone();
+        tracing::info!("[player-init] prepare_stream: no cache hit, starting the session torrent (t={:.3}s)", t0.elapsed().as_secs_f64());
         let add_t = std::time::Instant::now();
-        let response = self.session.add_torrent(add_torrent, Some(opts)).await?;
-        tracing::info!("[player-init] prepare_stream: session.add_torrent returned in {:.3}s", add_t.elapsed().as_secs_f64());
-        let (session_id, handle) = match response {
-            AddTorrentResponse::Added(id, h) => (id, h),
-            AddTorrentResponse::AlreadyManaged(id, h) => {
-                tracing::info!("[player-init] prepare_stream: torrent already managed, reusing");
-                if h.is_paused() {
-                    self.session.unpause(&h).await?;
-                }
-                (id, h)
-            }
-            AddTorrentResponse::ListOnly(_) => {
-                return Err(anyhow::anyhow!("Unexpected list_only response"));
-            }
-        };
+        let (session_id, handle) = self.start_file(add_torrent, seen_peers, file_index).await?;
+        tracing::info!("[player-init] prepare_stream: session torrent started in {:.3}s", add_t.elapsed().as_secs_f64());
+        self.focus(session_id).await;
 
         tracing::info!("[player-init] prepare_stream: setting session_id={} for handle_id={}", session_id, handle_id);
 

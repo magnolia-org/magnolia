@@ -785,6 +785,7 @@ fn main() {
             commands::torrents::prepare_playback,
             commands::torrents::prepare_saved_playback,
             commands::torrents::plan_quick_play,
+            commands::torrents::warm_up_playback,
             commands::search::search_torrents,
             commands::search::cancel_torrent_search,
             commands::search::get_tracker_preference,

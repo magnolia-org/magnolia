@@ -193,3 +193,15 @@ pub async fn prepare_saved_playback(
 pub async fn plan_quick_play(core: CoreState<'_>, media_id: u32, media_type: String) -> Result<Option<PlaybackPlan>, String> {
     core.plan_quick_play(media_id, &media_type).await
 }
+
+#[tauri::command]
+pub async fn warm_up_playback(
+    core: CoreState<'_>,
+    media_id: u32,
+    media_type: String,
+    season: Option<u32>,
+    episode: Option<u32>,
+) -> Result<(), String> {
+    core.warm_up_playback(media_id, &media_type, season, episode).await;
+    Ok(())
+}
