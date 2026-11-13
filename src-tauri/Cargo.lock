@@ -3170,6 +3170,7 @@ dependencies = [
  "chrono",
  "fix-path-env",
  "gag",
+ "gtk",
  "keepawake",
  "libc",
  "log",

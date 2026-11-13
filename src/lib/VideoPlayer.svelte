@@ -10,7 +10,7 @@
   import { watchProgressStore } from "./stores/watchProgressStore.js";
 import { getSeasonDetails, getTVDetails, getImageUrl, getMovieExternalIds, getTVExternalIds } from "./tmdb.js";
   import { randomSubtitlePreviewBackground } from "./subtitlePreviewBackgrounds.js";
-  import { isWindows, isMacOS } from "./utils/platform.js";
+  import { isWindows, isMacOS, isLinux } from "./utils/platform.js";
 
   import { createEventDispatcher } from "svelte";
   import { fade, fly } from "svelte/transition";
@@ -90,6 +90,14 @@ import { getSeasonDetails, getTVDetails, getImageUrl, getMovieExternalIds, getTV
   let statsInterval = null;
   let showStatsSubmenu = false;
   let statsSubmenuElement = null;
+  let showScalingSubmenu = false;
+  let scalingSubmenuElement = null;
+  let scalingSubmenuX = 0;
+  let scalingSubmenuY = 0;
+  let scalingSubmenuWidth = 0;
+  // linux: which renderer draws the video, shown in the statistics panel
+  let rendererInfo = null;
+  let rendererInterval = null;
   let statsSubmenuX = 0;
   let statsSubmenuY = 0;
   $: bufferAhead = (() => {
@@ -172,6 +180,21 @@ import { getSeasonDetails, getTVDetails, getImageUrl, getMovieExternalIds, getTV
   let clearCacheAfterWatch = false;
   let hideChapterMarkers = false;
   let forceStereoAudio = false;
+  // "gpu" | "sw" on the linux x11 video path, null elsewhere (no scaling menu)
+  let scalingMode = null;
+  let videoScaling = "balanced";
+  const SCALING_LEVELS = ["fast", "balanced", "quality"];
+  const SCALING_LABELS = { fast: "Fast", balanced: "Balanced", quality: "Quality" };
+  const SCALING_HINTS = {
+    gpu: { fast: "Bilinear", balanced: "Spline36", quality: "EWA Lanczos" },
+    sw: { fast: "Bilinear", balanced: "Bicubic", quality: "Lanczos" },
+  };
+  // gpu: mpv's shader scalers (upscale, downscale, chroma); sw: zimg/swscale on the cpu
+  const SCALING_OPTIONS = {
+    fast: { scale: "bilinear", dscale: "bilinear", cscale: "bilinear", zimg: "bilinear", sws: "fast-bilinear" },
+    balanced: { scale: "spline36", dscale: "mitchell", cscale: "spline36", zimg: "bicubic", sws: "bicubic" },
+    quality: { scale: "ewa_lanczossharp", dscale: "mitchell", cscale: "ewa_lanczossharp", zimg: "lanczos", sws: "lanczos" },
+  };
   let cacheCleared = false;
   
   let torrentSessionId = null;
@@ -481,6 +504,29 @@ let currentSkipSection = null;
     name: "audio-channels",
     value: forceStereoAudio ? "stereo" : "auto-safe",
   }).catch(() => {});
+
+  async function refreshRendererInfo() {
+    rendererInfo = await invoke("video_renderer_info").catch(() => null);
+  }
+
+  // the decoder can change per file, so refresh while the panel is visible
+  $: if (isLinux && showStatsSubmenu && !rendererInterval) {
+    refreshRendererInfo();
+    rendererInterval = setInterval(refreshRendererInfo, 2000);
+  } else if (!showStatsSubmenu && rendererInterval) {
+    clearInterval(rendererInterval);
+    rendererInterval = null;
+  }
+
+  $: if (scalingMode) {
+    const opts = SCALING_OPTIONS[videoScaling] ?? SCALING_OPTIONS.balanced;
+    const names = scalingMode === "gpu"
+      ? { scale: opts.scale, dscale: opts.dscale, cscale: opts.cscale }
+      : { "zimg-scaler": opts.zimg, "sws-scaler": opts.sws };
+    for (const [name, value] of Object.entries(names)) {
+      invoke("mpv_set_option_string", { name, value }).catch(() => {});
+    }
+  }
 
   // Fetch external subtitles when media info is available
   $: {
@@ -1442,7 +1488,7 @@ let currentSkipSection = null;
     clearTimeout(controlsTimeout);
     controlsTimeout = setTimeout(() => {
       // Don't hide controls if any menu is open
-      if (playing && !isSeeking && !showPlayerMenu && !showChaptersMenu && !showAudioSubmenu && !showSubtitleSubmenu && !showStatsSubmenu) {
+      if (playing && !isSeeking && !showPlayerMenu && !showChaptersMenu && !showAudioSubmenu && !showSubtitleSubmenu && !showStatsSubmenu && !showScalingSubmenu) {
         showControls = false;
         window.dispatchEvent(new CustomEvent("videoControlsVisibility", { detail: { visible: false } }));
       }
@@ -1910,10 +1956,12 @@ let currentSkipSection = null;
     showAudioSubmenu = false;
     showSubtitleSubmenu = false;
     showStatsSubmenu = false;
+    showScalingSubmenu = false;
   }
 
   function toggleStatsSubmenu(event) {
     showStatsSubmenu = !showStatsSubmenu;
+    showScalingSubmenu = false;
     showAudioSubmenu = false;
     showSubtitleSubmenu = false;
     showSubtitleSettings = false;
@@ -1936,6 +1984,7 @@ let currentSkipSection = null;
     showAudioSubmenu = !showAudioSubmenu;
     showSubtitleSubmenu = false;
     showStatsSubmenu = false;
+    showScalingSubmenu = false;
     
     if (showAudioSubmenu) {
       const button = event.currentTarget;
@@ -1970,6 +2019,7 @@ let currentSkipSection = null;
     showSubtitleSubmenu = !showSubtitleSubmenu;
     showAudioSubmenu = false;
     showStatsSubmenu = false;
+    showScalingSubmenu = false;
     showSubtitleSettings = false;
     
     if (showSubtitleSubmenu) {
@@ -2078,6 +2128,41 @@ let currentSkipSection = null;
       await invoke('save_settings', { settings });
     } catch (error) {
       console.error('failed to save forceStereoAudio:', error);
+    }
+  }
+
+  function toggleScalingSubmenu(event) {
+    showScalingSubmenu = !showScalingSubmenu;
+    showAudioSubmenu = false;
+    showSubtitleSubmenu = false;
+    showStatsSubmenu = false;
+    showSubtitleSettings = false;
+    if (!showScalingSubmenu) return;
+
+    // a real dropdown: drop down from the button, matching its right edge
+    const rect = event.currentTarget.getBoundingClientRect();
+    scalingSubmenuWidth = rect.width;
+    scalingSubmenuX = rect.right - scalingSubmenuWidth;
+    scalingSubmenuY = rect.bottom + 4;
+    setTimeout(() => {
+      if (!scalingSubmenuElement) return;
+      // flip above the button when it would run off the bottom
+      const height = scalingSubmenuElement.offsetHeight;
+      if (rect.bottom + 4 + height > window.innerHeight - 12) {
+        scalingSubmenuY = rect.top - height - 4;
+      }
+    }, 0);
+  }
+
+  async function selectVideoScaling(level) {
+    videoScaling = level;
+    showScalingSubmenu = false;
+    try {
+      const settings = await invoke('get_settings');
+      settings.video_scaling = videoScaling;
+      await invoke('save_settings', { settings });
+    } catch (error) {
+      console.error('failed to save videoScaling:', error);
     }
   }
 
@@ -2495,9 +2580,11 @@ let currentSkipSection = null;
       clearCacheAfterWatch = settings.clear_cache_after_watch;
       hideChapterMarkers = settings.hide_chapter_markers ?? false;
       forceStereoAudio = settings.force_stereo_audio ?? false;
+      if (SCALING_LEVELS.includes(settings.video_scaling)) videoScaling = settings.video_scaling;
     } catch (error) {
       console.error('Failed to load settings:', error);
     }
+    scalingMode = await invoke('video_scaling_mode').catch(() => null);
     
     // Sync fullscreen state when the native window changes (e.g. macOS green traffic light)
     const appWindow = getCurrentWindow();
@@ -2649,6 +2736,7 @@ let currentSkipSection = null;
     clearInterval(pollInterval);
     if (pieceRangeInterval) clearInterval(pieceRangeInterval);
     if (statsInterval) clearInterval(statsInterval);
+    if (rendererInterval) clearInterval(rendererInterval);
     if (progressTrackingInterval) clearInterval(progressTrackingInterval);
     if (skipButtonTimeout) clearTimeout(skipButtonTimeout);
     if (skipTimerInterval) clearInterval(skipTimerInterval);
@@ -3019,6 +3107,23 @@ let currentSkipSection = null;
               <span class="menu-toggle-indicator" class:on={forceStereoAudio}></span>
             </button>
 
+            {#if scalingMode}
+              <button
+                class="player-track-option menu-item scaling-item"
+                class:open={showScalingSubmenu}
+                type="button"
+                on:click|stopPropagation={toggleScalingSubmenu}
+              >
+                <span class="player-track-info">
+                  <i class="ri-aspect-ratio-line"></i> Scaling
+                </span>
+                <span class="scaling-value">
+                  <span class="menu-speed-value">{SCALING_LABELS[videoScaling]}</span>
+                  <i class="ri-arrow-down-s-line scaling-chevron"></i>
+                </span>
+              </button>
+            {/if}
+
             <!-- Chapter options -->
             {#if chapters && chapters.length > 0}
               <button class="player-track-option menu-item" on:click={toggleHideChapters}>
@@ -3039,7 +3144,7 @@ let currentSkipSection = null;
               </span>
             </button>
 
-            {#if streamIsTorrent}
+            {#if streamIsTorrent || isLinux}
               <button
                 class="player-track-option menu-item submenu-trigger"
                 on:click|stopPropagation={toggleStatsSubmenu}
@@ -3065,9 +3170,32 @@ let currentSkipSection = null;
               compact={pipMode}
               samples={statSamples}
               stats={streamStats}
+              renderer={isLinux ? rendererInfo : null}
+              torrent={streamIsTorrent}
               {bufferAhead}
               span={STATS_HISTORY}
             />
+          </div>
+        {/if}
+
+        {#if showScalingSubmenu && scalingMode}
+          <div
+            class="submenu scaling-dropdown"
+            style="left: {scalingSubmenuX}px; top: {scalingSubmenuY}px; width: {scalingSubmenuWidth}px;"
+            bind:this={scalingSubmenuElement}
+          >
+            {#each SCALING_LEVELS as level}
+              <button
+                class="dropdown-option scaling-option"
+                class:selected={videoScaling === level}
+                type="button"
+                on:click|stopPropagation={() => selectVideoScaling(level)}
+              >
+                <span class="scaling-option-label">{SCALING_LABELS[level]}</span>
+                <span class="scaling-option-hint">{SCALING_HINTS[scalingMode][level]}</span>
+                <i class="ri-check-line" class:hidden-check={videoScaling !== level}></i>
+              </button>
+            {/each}
           </div>
         {/if}
 

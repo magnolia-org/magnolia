@@ -130,12 +130,15 @@ impl MpvHandle {
         #[cfg(target_os = "macos")]
         set_str("target-colorspace-hint", "yes");
         // Hardware decode. On Linux the bundled ffmpeg's hw paths (nvdec/vdpau)
-        // segfault inside avcodec_send_packet on NVIDIA driver stacks, so
-        // default to software decoding there; override with MAGNOLIA_HWDEC=auto
-        // (or any other mpv hwdec value) to experiment.
+        // segfaulted inside avcodec_send_packet on NVIDIA driver stacks, and the
+        // bundled libmpv has no GL interop for zero-copy decode anyway. On the
+        // X11 GTK path, copy-back nvdec works and cuts decode CPU sharply; it
+        // falls back to software on non-NVIDIA GPUs. Elsewhere on Linux keep
+        // software decoding. Override with MAGNOLIA_HWDEC (any mpv hwdec value).
         #[cfg(target_os = "linux")]
         {
-            let hwdec = std::env::var("MAGNOLIA_HWDEC").unwrap_or_else(|_| "no".into());
+            let default = if mode == super::gtk_video::EMBED_MODE_GTK { "nvdec-copy" } else { "no" };
+            let hwdec = std::env::var("MAGNOLIA_HWDEC").unwrap_or_else(|_| default.into());
             set_str("hwdec", &hwdec);
         }
         #[cfg(not(target_os = "linux"))]
@@ -166,6 +169,16 @@ impl MpvHandle {
             set_str("sub-font", "Geist");
         }
 
+        #[cfg(target_os = "linux")]
+        let use_gtk_widget = mode == super::gtk_video::EMBED_MODE_GTK;
+        #[cfg(not(target_os = "linux"))]
+        let use_gtk_widget = false;
+        if use_gtk_widget {
+            set_str("vo", "libmpv");
+            set_str("zimg-scaler", "bicubic");
+            set_str("sws-scaler", "bicubic");
+        }
+
         let init_result = unsafe { mpv_initialize(ctx) };
         if init_result < 0 {
             unsafe { mpv_destroy(ctx) };
@@ -176,17 +189,21 @@ impl MpvHandle {
         // mode (decided by the caller from the actual window handle type):
         // macOS = 0 (native/Metal), X11/HWND = 1 (wid), Wayland = 2 (render context).
         let display_ptr = display.unwrap_or(std::ptr::null());
-        let soia_utils_ptr = unsafe {
-            soia_utils_create(
-                ctx,
-                raw_window,
-                display_ptr,
-                mode,
-                std::ptr::null(),
-                std::ptr::null(),
-            )
+        let soia_utils_ptr = if use_gtk_widget {
+            std::ptr::null_mut()
+        } else {
+            unsafe {
+                soia_utils_create(
+                    ctx,
+                    raw_window,
+                    display_ptr,
+                    mode,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            }
         };
-        if soia_utils_ptr.is_null() {
+        if soia_utils_ptr.is_null() && !use_gtk_widget {
             unsafe { mpv_destroy(ctx) };
             return Err(
                 "soia_utils_create failed — ensure libsoia_utils is present in src-tauri/libs/mpv/lib/"
@@ -281,6 +298,11 @@ impl MpvHandle {
             mpv_free(value_ptr as *mut c_void);
             Ok(value)
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn raw_ctx(&self) -> *mut c_void {
+        self.ctx_ptr()
     }
 
     /// Returns the raw soia_utils pointer (used by macOS layer geometry sync).

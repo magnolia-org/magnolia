@@ -1342,6 +1342,7 @@
 .menu-item .ri-skip-forward-mini-line,
 .menu-item .ri-speed-line,
 .menu-item .ri-headphone-line,
+.menu-item .ri-aspect-ratio-line,
 .menu-item .ri-bookmark-line {
     margin-right: 8px;
     font-size: 16px;
@@ -1675,6 +1676,66 @@
 .speed-item:hover {
     background: var(--bg-secondary);
     border-color: transparent;
+}
+
+/* Scaling: a regular menu row whose value opens a dropdown below it */
+.scaling-item {
+    justify-content: space-between;
+}
+
+.scaling-item.open {
+    background: var(--bg-tertiary);
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.scaling-value {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+}
+
+.scaling-chevron {
+    font-size: 16px;
+    line-height: 1;
+    color: var(--text-tertiary);
+    transition: transform 0.2s ease, color 0.2s ease;
+}
+
+.scaling-item:hover .scaling-chevron {
+    color: var(--text-primary);
+}
+
+.scaling-item.open .scaling-chevron {
+    transform: rotate(180deg);
+}
+
+.submenu.scaling-dropdown {
+    min-width: 0;
+    max-width: none;
+    padding: 4px;
+    border-radius: var(--border-radius-sm);
+    animation: slideDown 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.scaling-option {
+    gap: 8px;
+    padding: 7px 10px;
+    font-size: 13px;
+    border-radius: 6px;
+}
+
+.scaling-option-label {
+    flex: 1;
+}
+
+.scaling-option-hint {
+    font-size: 11px;
+    color: var(--text-tertiary);
+}
+
+.scaling-option i.hidden-check {
+    visibility: hidden;
 }
 
 .speed-item-header {
@@ -2425,6 +2486,7 @@ html:not(.macos) .player-track-dropdown {
 .video-player.pip .menu-item .ri-closed-captioning-line,
 .video-player.pip .menu-item .ri-speed-line,
 .video-player.pip .menu-item .ri-headphone-line,
+.video-player.pip .menu-item .ri-aspect-ratio-line,
 .video-player.pip .menu-item .ri-bookmark-line,
 .video-player.pip .menu-item .ri-line-chart-line {
     margin-right: 6px;
@@ -2789,6 +2851,30 @@ html:not(.macos) .player-track-dropdown {
     font-size: 15px;
     color: var(--accent-color);
     background: color-mix(in srgb, var(--accent-color) 14%, transparent);
+}
+
+/* Linux renderer info: two compact key/value lines */
+.stats-video {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.stats-video-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: var(--spacing-sm);
+    min-width: 0;
+}
+
+.stats-video-value {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .stats-tile-text {
