@@ -10,10 +10,10 @@
   import { watchProgressStore } from "./stores/watchProgressStore.js";
 import { getSeasonDetails, getTVDetails, getImageUrl, getMovieExternalIds, getTVExternalIds } from "./tmdb.js";
   import { randomSubtitlePreviewBackground } from "./subtitlePreviewBackgrounds.js";
-  import { isWindows, isLinux } from "./utils/platform.js";
+  import { isWindows, isMacOS, isLinux } from "./utils/platform.js";
 
   import { createEventDispatcher } from "svelte";
-  import { fade } from "svelte/transition";
+  import { fade, fly } from "svelte/transition";
 
   export let src = "";
   export let metadata = null;
@@ -54,9 +54,7 @@ import { getSeasonDetails, getTVDetails, getImageUrl, getMovieExternalIds, getTV
   const STREAM_POLL_INTERVAL = 250;
   // pip window geometry (logical px, 16:9)
   const PIP_WIDTH = 480;
-  const PIP_HEIGHT = 270;
   const PIP_MIN_WIDTH = 320;
-  const PIP_MIN_HEIGHT = 180;
   const PIP_MARGIN = 24;
   const WINDOW_MIN_WIDTH = 1000;
   const WINDOW_MIN_HEIGHT = 700;
@@ -69,6 +67,18 @@ import { getSeasonDetails, getTVDetails, getImageUrl, getMovieExternalIds, getTV
   let duration = 0;
   let rawSeekableRanges = []; // [{start, end}] in seconds, from mpv's demuxer cache
   $: bufferedRanges = deriveBufferedRanges(rawSeekableRanges, duration);
+  $: playPercent = duration > 0
+    ? Math.min(100, Math.max(0, ((isSeeking ? seekPreviewTime : currentTime) / duration) * 100))
+    : 0;
+  $: seekSegments = buildSeekSegments(
+    hideChapterMarkers ? [] : chapters,
+    duration,
+    bufferedRanges,
+    torrentPieceRanges,
+  );
+  $: hoverSegmentIndex = hoverTime === null || duration <= 0
+    ? -1
+    : seekSegments.findIndex((seg) => (hoverTime / duration) * 100 < seg.end);
   let torrentProgress = 0;
   let torrentPieceRanges = []; // [{start, width}] in %, from the torrent's have-pieces bitfield
   let pieceRangeInterval = null;
@@ -103,6 +113,11 @@ import { getSeasonDetails, getTVDetails, getImageUrl, getMovieExternalIds, getTV
   let showControls = true;
   let justSeeked = false;
   let showBufferingIndicator = false;
+  // mpv reports a stall right away, but a seek inside the cache resolves within a frame or
+  // two, so the indicator only appears once the stall has lasted this long
+  const BUFFERING_SHOW_DELAY = 280;
+  let stalled = false;
+  let stallTimer = null;
   let controlsTimeout;
   let isDragging = false;
   let progressBar;
@@ -440,7 +455,8 @@ let currentSkipSection = null;
   let episodesPanelSeason = null;
   let episodesData = {};
   let loadingEpisodesPanel = false;
-  let episodeTorrentStatus = {}; // key: `${season}-${episode}` -> boolean
+  // split anime episodes that play from one file, by `${season}-${episode}` of each part
+  let episodeGroups = {};
 
   // Episode name for player header
   let episodeName = null;
@@ -707,7 +723,7 @@ let currentSkipSection = null;
       src = url;
       loadingStatus.status = "Starting player...";
       loadingStatus.phaseProgress = 90;
-      await invoke("load_file", { path: src });
+      await loadIntoPlayer(src);
       // loading = false is set by the file_loaded mpv event listener
     } catch (error) {
       // Keep the loading overlay up so the error text + Cancel button stay
@@ -716,6 +732,27 @@ let currentSkipSection = null;
       loadingStatus.status = `${debridExt.manifest.debrid_name || debridExt.manifest.name}: ${error}`;
       loadingPhase = "error";
     }
+  }
+
+  // how far into the file playback resumes (0 to 1), from the duration saved with the
+  // watch progress. lets the backend fetch that part of the file before mpv asks for it
+  function resumeFraction() {
+    if (!(initialTimestamp > 0) || !mediaId || !mediaType) return null;
+    const key = seasonNum != null && episodeNum != null
+      ? `${mediaId}-${mediaType}-S${seasonNum}-E${episodeNum}`
+      : `${mediaId}-${mediaType}`;
+    const saved = $watchProgressStore[key];
+    if (!saved?.duration || saved.duration <= 0) return null;
+    const fraction = initialTimestamp / saved.duration;
+    return fraction > 0 && fraction < 1 ? fraction : null;
+  }
+
+  // mpv opens directly at the resume point, so nothing from the start of the file is
+  // fetched or decoded first
+  async function loadIntoPlayer(path) {
+    const resumePosition = initialTimestamp > 0 && !hasSeekedToInitial ? initialTimestamp : null;
+    if (resumePosition !== null) hasSeekedToInitial = true;
+    await invoke("load_file", { path, resumePosition });
   }
 
   async function startStreamProcess() {
@@ -748,6 +785,7 @@ let currentSkipSection = null;
       await invoke("prepare_stream", {
         handleId: numericHandle,
         fileIndex: numericFile,
+        resumeFraction: resumeFraction(),
       });
     } catch (error) {
       console.error("Failed to prepare stream:", error);
@@ -806,7 +844,7 @@ let currentSkipSection = null;
           // Hand off to mpv
           loadingStatus.status = "Starting player...";
           loadingStatus.phaseProgress = 90;
-          await invoke("load_file", { path: src });
+          await loadIntoPlayer(src);
           // loading = false will be set by the file_loaded mpv event listener
         } else if (loadingPhase === "initializing") {
           loadingPhase = "buffering";
@@ -870,6 +908,77 @@ let currentSkipSection = null;
     }
   }
 
+  // menus leave the way they came, unless the system asks for less motion
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  const menuOut = { duration: reducedMotion ? 0 : 120 };
+  const submenuOut = { x: 14, duration: reducedMotion ? 0 : 150 };
+
+  // the short edge never goes under this, so the menus keep room to open
+  const PIP_MIN_SHORT_EDGE = 180;
+
+  // width / height of the video, which the mini player window keeps as it is resized
+  let videoAspect = 16 / 9;
+  let pipResizeUnlisten = null;
+  let pipResizeTimer = null;
+
+  // the mini player's size for a given long edge, in the video's shape
+  function pipSize(longEdge) {
+    return videoAspect >= 1
+      ? { width: longEdge, height: Math.round(longEdge / videoAspect) }
+      : { width: Math.round(longEdge * videoAspect), height: longEdge };
+  }
+
+  // macos locks the ratio natively while the window is dragged. elsewhere the height is
+  // put back in line with the width once a resize settles
+  async function lockPipAspect() {
+    await invoke("set_mini_player_window", { active: true, aspect: videoAspect }).catch(() => {});
+    if (isMacOS || pipResizeUnlisten) return;
+    const appWindow = getCurrentWindow();
+    pipResizeUnlisten = await appWindow.onResized(() => {
+      clearTimeout(pipResizeTimer);
+      pipResizeTimer = setTimeout(async () => {
+        if (!pipMode) return;
+        const scale = await appWindow.scaleFactor();
+        const size = (await appWindow.innerSize()).toLogical(scale);
+        const height = Math.round(size.width / videoAspect);
+        if (Math.abs(height - size.height) > 1) {
+          await appWindow.setSize(new LogicalSize(size.width, height));
+        }
+      }, 150);
+    });
+  }
+
+  async function unlockPipAspect() {
+    clearTimeout(pipResizeTimer);
+    pipResizeUnlisten?.();
+    pipResizeUnlisten = null;
+    await invoke("set_mini_player_window", { active: false, aspect: null }).catch(() => {});
+  }
+
+  // a new file can have a different shape: keep the width, fix the height
+  async function refitPipWindow() {
+    const appWindow = getCurrentWindow();
+    try {
+      const scale = await appWindow.scaleFactor();
+      const size = (await appWindow.innerSize()).toLogical(scale);
+      const min = pipMinSize();
+      const width = Math.max(size.width, min.width);
+      await appWindow.setMinSize(new LogicalSize(min.width, min.height));
+      await appWindow.setSize(new LogicalSize(width, Math.round(width / videoAspect)));
+      await invoke("set_mini_player_window", { active: true, aspect: videoAspect });
+    } catch (err) {
+      console.error("PiP refit error:", err);
+    }
+  }
+
+  function pipMinSize() {
+    const size = pipSize(PIP_MIN_WIDTH);
+    const shortEdge = Math.min(size.width, size.height);
+    if (shortEdge >= PIP_MIN_SHORT_EDGE) return size;
+    const grow = PIP_MIN_SHORT_EDGE / shortEdge;
+    return { width: Math.round(size.width * grow), height: Math.round(size.height * grow) };
+  }
+
   function notifyPipMode() {
     window.dispatchEvent(new CustomEvent("videoPipMode", { detail: { active: pipMode } }));
   }
@@ -890,8 +999,11 @@ let currentSkipSection = null;
       if (maximized) await appWindow.unmaximize();
 
       // the configured min size is larger than the pip window, so drop it first
-      await appWindow.setMinSize(new LogicalSize(PIP_MIN_WIDTH, PIP_MIN_HEIGHT));
-      await appWindow.setSize(new LogicalSize(PIP_WIDTH, PIP_HEIGHT));
+      const pipMin = pipMinSize();
+      const pip = pipSize(PIP_WIDTH);
+      if (pip.width < pipMin.width) Object.assign(pip, pipMin);
+      await appWindow.setMinSize(new LogicalSize(pipMin.width, pipMin.height));
+      await appWindow.setSize(new LogicalSize(pip.width, pip.height));
 
       const monitor = await currentMonitor();
       if (monitor) {
@@ -899,10 +1011,12 @@ let currentSkipSection = null;
         const origin = area.position.toLogical(monitor.scaleFactor);
         const bounds = area.size.toLogical(monitor.scaleFactor);
         await appWindow.setPosition(new LogicalPosition(
-          Math.round(origin.x + bounds.width - PIP_WIDTH - PIP_MARGIN),
-          Math.round(origin.y + bounds.height - PIP_HEIGHT - PIP_MARGIN)
+          Math.round(origin.x + bounds.width - pip.width - PIP_MARGIN),
+          Math.round(origin.y + bounds.height - pip.height - PIP_MARGIN)
         ));
       }
+
+      await lockPipAspect();
 
       await appWindow.setAlwaysOnTop(pipAlwaysOnTop);
       pipMode = true;
@@ -916,6 +1030,8 @@ let currentSkipSection = null;
   async function exitPip() {
     const appWindow = getCurrentWindow();
     try {
+      // the ratio lock has to go before the window gets its old shape back
+      await unlockPipAspect();
       await appWindow.setAlwaysOnTop(false);
       await appWindow.setMinSize(new LogicalSize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT));
       if (preWindowState) {
@@ -1029,6 +1145,42 @@ let currentSkipSection = null;
       .filter((r) => r.width >= 0.15);
   }
 
+  // the parts of `ranges` ({start, width} in % of the bar) inside one segment, in % of
+  // that segment
+  function clipRanges(ranges, segStart, segEnd) {
+    const span = segEnd - segStart;
+    const out = [];
+    for (const r of ranges) {
+      const start = Math.max(r.start, segStart);
+      const end = Math.min(r.start + r.width, segEnd);
+      if (end > start) out.push({ left: ((start - segStart) / span) * 100, width: ((end - start) / span) * 100 });
+    }
+    return out;
+  }
+
+  // the seek bar as one segment per chapter (a single one without chapters), each
+  // carrying its own slice of what is already available
+  function buildSeekSegments(chapterList, dur, buffered, pieces) {
+    const bounds = [0];
+    if (dur > 0) {
+      for (const ch of chapterList || []) {
+        const pct = (ch.start_time / dur) * 100;
+        // chapters too short to draw fold into the one before
+        if (pct - bounds[bounds.length - 1] < 0.6 || pct > 99.4) continue;
+        bounds.push(pct);
+      }
+    }
+    return bounds.map((start, i) => {
+      const end = i + 1 < bounds.length ? bounds[i + 1] : 100;
+      return {
+        start,
+        end,
+        // downloaded to disk or held in the player's cache, drawn as a single layer
+        available: clipRanges([...pieces, ...buffered], start, end),
+      };
+    });
+  }
+
   // the backend owns every watch rule; this only reports where playback is.
   // media details go along once per session so the title lands in watch history
   async function saveProgress({ withHistory = false } = {}) {
@@ -1065,6 +1217,31 @@ let currentSkipSection = null;
     }
   }
 
+  // the credit is plain html, and following its links inside the webview would replace the
+  // whole app, so they go to the system browser instead
+  async function openAttributionLink(event) {
+    const link = event.target.closest("a[href]");
+    if (!link) return;
+    event.preventDefault();
+    try {
+      const { open } = await import("@tauri-apps/plugin-shell");
+      await open(link.href);
+    } catch (e) {
+      console.error("failed to open link:", e);
+    }
+  }
+
+  function setStalled(next) {
+    if (next === stalled) return;
+    stalled = next;
+    clearTimeout(stallTimer);
+    if (next) {
+      stallTimer = setTimeout(() => { showBufferingIndicator = true; }, BUFFERING_SHOW_DELAY);
+    } else {
+      showBufferingIndicator = false;
+    }
+  }
+
   function handleMpvProgress(payload) {
     if (payload.time_pos !== undefined && payload.time_pos !== null) {
       currentTime = payload.time_pos;
@@ -1073,7 +1250,7 @@ let currentSkipSection = null;
       duration = payload.duration;
     }
     playing = payload.is_playing;
-    showBufferingIndicator = !!payload.is_buffering;
+    setStalled(!!payload.is_buffering || !!payload.is_seeking);
 
     // Check for cache clearing on completion
     if (duration > 0 && currentTime / duration > 0.9 && clearCacheAfterWatch && !cacheCleared && mediaId) {
@@ -2083,6 +2260,12 @@ let currentSkipSection = null;
       return;
     }
 
+    if (event.key === "Escape" && showEpisodesPanel) {
+      event.preventDefault();
+      showEpisodesPanel = false;
+      return;
+    }
+
     switch (event.key.toLowerCase()) {
       case " ":
       case "k":
@@ -2261,27 +2444,63 @@ let currentSkipSection = null;
       } else {
         episodesPanelSeason = targetSeason;
       }
-      // Load torrent assignment status
-      loadEpisodeTorrentStatus();
+      loadEpisodeGroups();
     }
   }
 
-  async function loadEpisodeTorrentStatus() {
-    if (!mediaId) return;
+  // brings the episode being played into view when the panel opens
+  function scrollToCurrent(node, isCurrent) {
+    if (isCurrent) node.scrollIntoView({ block: "center" });
+  }
+
+  function formatAirDate(date) {
+    const parsed = new Date(date);
+    if (isNaN(parsed)) return "";
+    return parsed.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
+
+  async function loadEpisodeGroups() {
+    if (!mediaId || mediaType !== "tv") return;
     try {
-      const allSelections = await invoke('get_all_torrent_selections', { showId: Number(mediaId) });
-      if (allSelections) {
-        const status = {};
-        for (const [sNum, seasonData] of Object.entries(allSelections.seasons || {})) {
-          for (const epNum of Object.keys(seasonData.episodes || {})) {
-            status[`${sNum}-${epNum}`] = true;
-          }
-        }
-        episodeTorrentStatus = status;
+      const groups = await invoke("get_episode_groups", { mediaId: Number(mediaId) });
+      const byEpisode = {};
+      for (const group of groups || []) {
+        for (const [s, e] of group) byEpisode[`${s}-${e}`] = group;
       }
+      episodeGroups = byEpisode;
     } catch (e) {
-      console.error('[episode panel] failed to load torrent status:', e);
+      console.error("[episode panel] failed to load episode groups:", e);
     }
+  }
+
+  // the episodes to list: a split episode shows once, under its first part
+  function listedEpisodes(season, episodes, groups) {
+    return (episodes || []).filter((ep) => {
+      const group = groups[`${season}-${ep.episode_number}`];
+      return !group || (group[0][0] === season && group[0][1] === ep.episode_number);
+    });
+  }
+
+  // "28-30" for a split episode, "28" otherwise
+  function episodeLabel(season, episode, groups) {
+    const group = groups[`${season}-${episode}`];
+    return group ? `${group[0][1]}-${group[group.length - 1][1]}` : `${episode}`;
+  }
+
+  function episodeTitle(season, ep, groups) {
+    const group = groups[`${season}-${ep.episode_number}`];
+    if (!group) return ep.name || `Episode ${ep.episode_number}`;
+    const names = group
+      .map(([s, e]) => episodesData[s]?.episodes?.find((x) => x.episode_number === e)?.name)
+      .filter(Boolean);
+    return names.join(" / ") || ep.name || `Episode ${ep.episode_number}`;
+  }
+
+  // whether the episode being played is this one or shares its file
+  function isPlayingEpisode(season, episode, groups) {
+    if (season === seasonNum && episode === episodeNum) return true;
+    const group = groups[`${season}-${episode}`];
+    return !!group && group.some(([s, e]) => s === seasonNum && e === episodeNum);
   }
 
   async function loadSeasonEpisodes(sNum) {
@@ -2399,6 +2618,16 @@ let currentSkipSection = null;
       handleMpvProgress(event.payload);
     }));
 
+    // the video's pixel size, sent when a file's dimensions are known
+    mpvUnlisteners.push(await listen("resize_window", (event) => {
+      const [width, height] = event.payload || [];
+      if (!(width > 0 && height > 0)) return;
+      const aspect = width / height;
+      if (Math.abs(aspect - videoAspect) < 0.005) return;
+      videoAspect = aspect;
+      if (pipMode) refitPipWindow();
+    }));
+
     mpvUnlisteners.push(await listen("mpv-seekable-ranges", (event) => {
       rawSeekableRanges = event.payload?.ranges || [];
     }));
@@ -2441,10 +2670,6 @@ let currentSkipSection = null;
       playing = true;
       loadingPhase = "ready";
       rawSeekableRanges = []; // stale ranges from the previous file
-      if (initialTimestamp > 0 && !hasSeekedToInitial) {
-        hasSeekedToInitial = true;
-        await invoke("seek_video", { seconds: initialTimestamp }).catch(() => {});
-      }
       setTimeout(async () => {
         await applyAllSubtitleSettingsToMpv();
         await loadTrackPreferences();
@@ -2505,6 +2730,7 @@ let currentSkipSection = null;
   });
 
   onDestroy(async () => {
+    clearTimeout(stallTimer);
     // the interval only saves every 10s, so flush the final position on close
     saveProgress();
     clearInterval(pollInterval);
@@ -2582,11 +2808,9 @@ let currentSkipSection = null;
   {/if}
 
   <!-- Buffering indicator -->
-  {#if showBufferingIndicator}
-    <div class="buffering-indicator">
-      <div class="buffering-spinner">
-        <i class="ri-loader-4-line"></i>
-      </div>
+  {#if showBufferingIndicator && !loading}
+    <div class="buffering-indicator" role="status" aria-label="Buffering" transition:fade={{ duration: 160 }}>
+      <div class="buffering-ring"></div>
     </div>
   {/if}
 
@@ -2661,44 +2885,35 @@ let currentSkipSection = null;
     <div
       class="progress-bar"
       bind:this={progressBar}
+      class:scrubbing={isSeeking}
       on:mousedown={startDrag}
       on:mousemove={handleProgressHover}
       on:mouseleave={handleProgressLeave}
     >
-      {#each torrentPieceRanges as range}
-        <div
-          class="progress-torrent"
-          style="left: {range.start}%; width: {range.width}%"
-        ></div>
-      {/each}
-      {#each bufferedRanges as range}
-        <div
-          class="progress-buffered"
-          style="left: {range.start}%; width: {range.width}%"
-        ></div>
-      {/each}
-      <div
-        class="progress-filled"
-        style="width: {((isSeeking ? seekPreviewTime : currentTime) /
-          duration) *
-          100}%; transition: {(isSeeking || justSeeked) ? 'none' : 'width 0.1s linear'}"
-      >
-        <div class="progress-handle"></div>
-      </div>
-
-            <!-- Chapter markers -->
-      {#if !hideChapterMarkers && chapters && chapters.length > 0}
-        {#each chapters as chapter}
-          {#if chapter.start_time > 1}
-            <div
-              class="chapter-marker"
-              style="left: {(chapter.start_time / duration) * 100}%"
-              title="{formatTime(chapter.start_time)} - {chapter.title ||
-                `Chapter ${chapter.index + 1}`}"
-            ></div>
-          {/if}
+      <div class="seek-track">
+        {#each seekSegments as seg, i (i)}
+          <div
+            class="seek-segment"
+            class:hovered={seekSegments.length > 1 && i === hoverSegmentIndex}
+            style="left: {seg.start}%; width: {seg.end - seg.start}%"
+          >
+            <div class="seek-segment-bar">
+              <div class="seek-segment-available">
+                {#each seg.available as range}
+                  <div class="progress-buffered" style="left: {range.left}%; width: {range.width}%"></div>
+                {/each}
+              </div>
+              <!-- spans from the start of the whole bar to the playhead and is clipped by its
+                   segment, so the gradient runs unbroken across the chapter gaps -->
+              <div
+                class="progress-filled"
+                style="left: {(-seg.start / (seg.end - seg.start)) * 100}%; width: {(playPercent / (seg.end - seg.start)) * 100}%"
+              ></div>
+            </div>
+          </div>
         {/each}
-      {/if}
+      </div>
+      <div class="progress-handle" style="left: {playPercent}%"></div>
 
       <!-- Hover preview tooltip -->
       {#if hoverTime !== null && !isSeeking}
@@ -2834,7 +3049,7 @@ let currentSkipSection = null;
           <i class="ri-settings-3-line"></i>
         </button>
         {#if showPlayerMenu}
-          <div class="player-track-dropdown player-menu" bind:this={playerMenuElement}>
+          <div class="player-track-dropdown player-menu" bind:this={playerMenuElement} out:fade={menuOut}>
             <!-- Audio Submenu -->
             {#if videoMetadata?.audio_tracks && videoMetadata.audio_tracks.length > 0}
               <div class="submenu-container">
@@ -2945,8 +3160,14 @@ let currentSkipSection = null;
 
         <!-- Statistics Submenu (floating) -->
         {#if showStatsSubmenu}
-          <div class="submenu stats-submenu" style="left: {statsSubmenuX}px; top: {statsSubmenuY}px;" bind:this={statsSubmenuElement}>
+          <div class="submenu stats-submenu" style="left: {statsSubmenuX}px; top: {statsSubmenuY}px;" bind:this={statsSubmenuElement} out:fly={submenuOut}>
+            {#if pipMode}
+              <button class="submenu-back" on:click|stopPropagation={() => (showStatsSubmenu = false)}>
+                <i class="ri-arrow-left-s-line"></i> Statistics
+              </button>
+            {/if}
             <StreamStats
+              compact={pipMode}
               samples={statSamples}
               stats={streamStats}
               renderer={isLinux ? rendererInfo : null}
@@ -2980,7 +3201,12 @@ let currentSkipSection = null;
 
         <!-- Audio Submenu (floating) -->
         {#if showAudioSubmenu && videoMetadata?.audio_tracks}
-          <div class="submenu" style="left: {audioSubmenuX}px; top: {audioSubmenuY}px;" bind:this={audioSubmenuElement}>
+          <div class="submenu" style="left: {audioSubmenuX}px; top: {audioSubmenuY}px;" bind:this={audioSubmenuElement} out:fly={submenuOut}>
+            {#if pipMode}
+              <button class="submenu-back" on:click|stopPropagation={() => (showAudioSubmenu = false)}>
+                <i class="ri-arrow-left-s-line"></i> Audio Track
+              </button>
+            {/if}
             {#each videoMetadata.audio_tracks as track, i}
               <button
                 class="player-track-option menu-item"
@@ -3018,7 +3244,12 @@ let currentSkipSection = null;
 
         <!-- Subtitle Submenu (floating) -->
         {#if showSubtitleSubmenu}
-          <div class="submenu" style="left: {subtitleSubmenuX}px; top: {subtitleSubmenuY}px;" bind:this={subtitleSubmenuElement}>
+          <div class="submenu" style="left: {subtitleSubmenuX}px; top: {subtitleSubmenuY}px;" bind:this={subtitleSubmenuElement} out:fly={submenuOut}>
+            {#if pipMode}
+              <button class="submenu-back" on:click|stopPropagation={() => (showSubtitleSubmenu = false)}>
+                <i class="ri-arrow-left-s-line"></i> Subtitles
+              </button>
+            {/if}
             <button
               class="player-track-option menu-item submenu-trigger"
               on:click|stopPropagation={toggleSubtitleSettings}
@@ -3154,7 +3385,12 @@ let currentSkipSection = null;
 
         <!-- Subtitle Settings Submenu -->
         {#if showSubtitleSettings}
-          <div class="submenu settings-submenu" style="left: {subtitleSettingsX}px; top: {subtitleSettingsY}px;" bind:this={subtitleSettingsElement}>
+          <div class="submenu settings-submenu" style="left: {subtitleSettingsX}px; top: {subtitleSettingsY}px;" bind:this={subtitleSettingsElement} out:fly={submenuOut}>
+            {#if pipMode}
+              <button class="submenu-back" on:click|stopPropagation={() => (showSubtitleSettings = false)}>
+                <i class="ri-arrow-left-s-line"></i> Customize
+              </button>
+            {/if}
             <div class="settings-preview-container" style="background-image: url('{subtitlePreviewBg.src}');">
               <div class="settings-preview-sub" style="bottom: {6 + subtitleSettings.windowMargin * 0.2}px;">
                 <span class="settings-preview-line" style="
@@ -3170,7 +3406,9 @@ let currentSkipSection = null;
               </div>
             </div>
             {#if subtitlePreviewBg.attribution}
-              <div class="settings-preview-attribution">{@html subtitlePreviewBg.attribution}</div>
+              <!-- svelte-ignore a11y-click-events-have-key-events -->
+              <!-- svelte-ignore a11y-no-static-element-interactions -->
+              <div class="settings-preview-attribution" on:click={openAttributionLink}>{@html subtitlePreviewBg.attribution}</div>
             {/if}
 
             <div class="settings-group">
@@ -3368,75 +3606,106 @@ let currentSkipSection = null;
 
   <!-- Episodes Panel -->
   {#if showEpisodesPanel && metadata && metadata.seasons}
+    {@const panelSeasons = metadata.seasons.filter(s => s.season_number > 0)}
+    {@const panelEpisodes = episodesData[episodesPanelSeason]
+      ? listedEpisodes(episodesPanelSeason, episodesData[episodesPanelSeason].episodes, episodeGroups)
+      : null}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div class="episodes-island-backdrop" transition:fade={{ duration: 300 }} on:click={() => showEpisodesPanel = false}></div>
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <div class="episodes-island" on:click|stopPropagation out:fade={{ duration: 300 }}>
+    <div class="episodes-island" role="dialog" aria-label="Episodes" on:click|stopPropagation out:fade={{ duration: 300 }}>
       <div class="episodes-panel-header">
         <span class="episodes-panel-title">{metadata.name || metadata.title}</span>
-        <button class="episodes-panel-close" on:click={() => showEpisodesPanel = false} title="Close">
+        <button class="episodes-panel-close" on:click={() => showEpisodesPanel = false} title="Close" aria-label="Close episodes">
           <i class="ri-close-line"></i>
         </button>
       </div>
 
       <!-- Season tabs -->
-      {#if metadata.seasons.filter(s => s.season_number > 0).length > 1}
-        <div class="episodes-season-tabs">
-          {#each metadata.seasons.filter(s => s.season_number > 0) as season}
+      {#if panelSeasons.length > 1}
+        <div class="episodes-season-tabs" role="tablist">
+          {#each panelSeasons as season}
             <button
               class="episodes-season-tab"
               class:active={episodesPanelSeason === season.season_number}
+              role="tab"
+              aria-selected={episodesPanelSeason === season.season_number}
               on:click={() => loadSeasonEpisodes(season.season_number)}
-            >S{season.season_number}</button>
+            >Season {season.season_number}</button>
           {/each}
         </div>
       {/if}
 
-      <!-- Episode list -->
+      <!-- Episode grid -->
       <div class="episodes-list-scroll">
         {#if loadingEpisodesPanel}
-          <div class="episodes-loading">
-            <div class="episodes-loading-spinner"></div>
+          <div class="episodes-grid-cards" aria-hidden="true">
+            {#each Array(6) as _}
+              <div class="episodes-card skeleton">
+                <div class="episodes-panel-still"></div>
+                <span class="episodes-skeleton-line"></span>
+              </div>
+            {/each}
           </div>
-        {:else if episodesData[episodesPanelSeason]}
-          {#each episodesData[episodesPanelSeason].episodes as ep}
-            {@const epKey = `${mediaId}-${mediaType}-S${episodesPanelSeason}-E${ep.episode_number}`}
-            {@const epProgress = $watchProgressStore[epKey]}
-            {@const epPct = epProgress?.duration ? (epProgress.currentTimestamp / epProgress.duration) * 100 : 0}
-            {@const isCurrent = episodesPanelSeason === seasonNum && ep.episode_number === episodeNum}
-            {@const hasTorrent = !!episodeTorrentStatus[`${episodesPanelSeason}-${ep.episode_number}`]}
-            <!-- svelte-ignore a11y-click-events-have-key-events -->
-            <!-- svelte-ignore a11y-no-static-element-interactions -->
-            <div
-              class="episodes-panel-item"
-              class:current={isCurrent}
-              on:click={() => playEpisodeFromPanel(episodesPanelSeason, ep.episode_number)}
-            >
-              <div class="episodes-panel-still">
-                {#if ep.still_path}
-                  <img src={getImageUrl(ep.still_path, 'w300')} alt={ep.name} />
-                {:else}
-                  <div class="episodes-panel-still-placeholder"><i class="ri-film-line"></i></div>
-                {/if}
-                {#if isCurrent}
-                  <div class="episodes-panel-now-playing"><i class="ri-play-fill"></i></div>
-                {:else if epPct > 85}
-                  <div class="episodes-panel-watched"><i class="ri-check-line"></i></div>
-                {:else if epPct > 0}
-                  <div class="episodes-panel-progress-bar"><div style="width:{epPct}%"></div></div>
-                {/if}
-              </div>
-              <div class="episodes-panel-info">
-                <span class="episodes-panel-num">E{ep.episode_number}</span>
-                <span class="episodes-panel-name">{ep.name}</span>
-                {#if hasTorrent}
-                  <span class="ep-torrent-dot" title="Torrent assigned"><i class="ri-magnet-fill"></i></span>
-                {/if}
-              </div>
-            </div>
-          {/each}
+        {:else if panelEpisodes}
+          <div class="episodes-grid-cards">
+            {#each panelEpisodes as ep (ep.episode_number)}
+              {@const epKey = `${mediaId}-${mediaType}-S${episodesPanelSeason}-E${ep.episode_number}`}
+              {@const epProgress = $watchProgressStore[epKey]}
+              {@const epPct = epProgress?.duration ? (epProgress.currentTimestamp / epProgress.duration) * 100 : 0}
+              {@const isCurrent = isPlayingEpisode(episodesPanelSeason, ep.episode_number, episodeGroups)}
+              {@const isWatched = !isCurrent && (epProgress?.watched || epPct > 85)}
+              {@const isUnaired = !!ep.air_date && new Date(ep.air_date) > new Date()}
+              {@const minutesLeft = epProgress?.duration ? Math.max(1, Math.round((epProgress.duration - epProgress.currentTimestamp) / 60)) : 0}
+              {@const epTitle = episodeTitle(episodesPanelSeason, ep, episodeGroups)}
+              <button
+                class="episodes-card"
+                class:current={isCurrent}
+                class:watched={isWatched}
+                disabled={isUnaired}
+                title={epTitle}
+                aria-current={isCurrent ? "true" : undefined}
+                use:scrollToCurrent={isCurrent}
+                on:click={() => { if (isCurrent) showEpisodesPanel = false; else playEpisodeFromPanel(episodesPanelSeason, ep.episode_number); }}
+              >
+                <div class="episodes-panel-still">
+                  {#if ep.still_path}
+                    <img src={getImageUrl(ep.still_path, 'w300')} alt="" loading="lazy" />
+                  {:else}
+                    <div class="episodes-panel-still-placeholder"><i class="ri-film-line"></i></div>
+                  {/if}
+                  <span class="episodes-card-num">{episodeLabel(episodesPanelSeason, ep.episode_number, episodeGroups)}</span>
+                  {#if isCurrent}
+                    <div class="episodes-panel-now-playing"><i class="ri-play-fill"></i></div>
+                  {:else if isWatched}
+                    <div class="episodes-panel-watched"><i class="ri-check-line"></i></div>
+                  {/if}
+                  {#if isCurrent || (!isWatched && epPct > 0)}
+                    <div class="episodes-panel-progress-bar"><div style="width:{isCurrent && duration > 0 ? (currentTime / duration) * 100 : epPct}%"></div></div>
+                  {/if}
+                </div>
+                <span class="episodes-panel-name">{epTitle}</span>
+                <span class="episodes-panel-meta">
+                  {#if isCurrent}
+                    <span class="episodes-panel-status">Now playing</span>
+                  {:else if isUnaired}
+                    Airs {formatAirDate(ep.air_date)}
+                  {:else if !isWatched && epPct > 0}
+                    <span class="episodes-panel-status">{minutesLeft}m left</span>
+                  {:else if ep.runtime}
+                    {ep.runtime}m
+                  {/if}
+                </span>
+              </button>
+            {/each}
+          </div>
+        {:else}
+          <div class="episodes-panel-empty">
+            <span>Couldn't load this season.</span>
+            <button class="episodes-panel-retry" on:click={() => loadSeasonEpisodes(episodesPanelSeason)}>Try again</button>
+          </div>
         {/if}
       </div>
     </div>

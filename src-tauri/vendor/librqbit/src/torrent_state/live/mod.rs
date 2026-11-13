@@ -804,8 +804,13 @@ impl TorrentStateLive {
     pub(crate) fn update_only_files(&self, only_files: &HashSet<usize>) -> anyhow::Result<()> {
         let mut g = self.lock_write("update_only_files");
         let pt = g.get_pieces_mut()?;
-        let hns = pt.update_only_files(&self.metadata.file_infos, only_files)?;
-        if !hns.finished() {
+        let finished = pt.update_only_files(&self.metadata.file_infos, only_files)?.finished();
+        // magnolia: peer tasks lock their peer entry and then this state (acquire_next_piece,
+        // should_switch_to_critical), so walking the peers with the state still locked
+        // deadlocks against them and freezes every runtime worker. upstream drops the lock
+        // the same way in on_piece_completed.
+        drop(g);
+        if !finished {
             self.reconnect_all_not_needed_peers();
         }
         Ok(())

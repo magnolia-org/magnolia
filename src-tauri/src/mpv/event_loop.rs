@@ -74,6 +74,8 @@ struct ProgressPayload {
     video_bitrate: f64,
     is_buffering: bool,
     download_speed_bps: f64,
+    // waiting for data after a seek, before playback restarts
+    is_seeking: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -150,6 +152,7 @@ fn emit_progress(
     video_bitrate: f64,
     is_buffering: bool,
     download_speed_bps: f64,
+    is_seeking: bool,
 ) {
     emit_event(
         app_handle,
@@ -162,6 +165,7 @@ fn emit_progress(
             video_bitrate,
             is_buffering,
             download_speed_bps,
+            is_seeking,
         },
     );
 }
@@ -324,6 +328,7 @@ fn emit_end_file_and_progress(
         0.0,
         false,
         0.0,
+        false,
     );
 }
 
@@ -425,6 +430,7 @@ pub(super) fn mpv_event_loop(
     const PAUSED_FOR_CACHE_ID: u64 = 12;
     const HWDEC_CURRENT_ID: u64 = 13;
     const CHAPTER_LIST_ID: u64 = 14;
+    const SEEKING_ID: u64 = 15;
 
     let mut last_time_pos: f64 = 0.0;
     let mut last_duration: f64 = 0.0;
@@ -433,6 +439,7 @@ pub(super) fn mpv_event_loop(
     let mut last_demuxer_cache_time: f64 = 0.0;
     let mut last_buffered_pos: f64 = 0.0;
     let mut last_is_buffering: bool = false;
+    let mut last_is_seeking: bool = false;
     let mut last_download_speed_bps: f64 = 0.0;
     let mut notify_start: bool = false;
     let mut width: i64 = 0;
@@ -522,6 +529,7 @@ pub(super) fn mpv_event_loop(
             "paused-for-cache",
             mpv_format::MPV_FORMAT_FLAG,
         );
+        observe_property(event_client, SEEKING_ID, "seeking", mpv_format::MPV_FORMAT_FLAG);
         observe_property(
             event_client,
             HWDEC_CURRENT_ID,
@@ -841,6 +849,13 @@ pub(super) fn mpv_event_loop(
                                     last_is_buffering = *(value_ptr as *mut c_int) != 0;
                                 }
                             }
+                            SEEKING_ID => {
+                                if (*prop_event).format == mpv_format::MPV_FORMAT_FLAG
+                                    && !value_ptr.is_null()
+                                {
+                                    last_is_seeking = *(value_ptr as *mut c_int) != 0;
+                                }
+                            }
                             WIDTH_ID => {
                                 if (*prop_event).format == mpv_format::MPV_FORMAT_INT64
                                     && !value_ptr.is_null()
@@ -973,6 +988,7 @@ pub(super) fn mpv_event_loop(
                                 last_video_bitrate,
                                 last_is_buffering,
                                 last_download_speed_bps,
+                                last_is_seeking,
                             );
                         }
                     }
@@ -980,6 +996,7 @@ pub(super) fn mpv_event_loop(
                 mpv_event_id::MPV_EVENT_END_FILE => {
                     is_playing.store(false, Ordering::Relaxed);
                     last_is_buffering = false;
+                    last_is_seeking = false;
                     last_download_speed_bps = 0.0;
                     let reason = if !(*event).data.is_null() {
                         let end_file = &*((*event).data as *const MpvEventEndFile);

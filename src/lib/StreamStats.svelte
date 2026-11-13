@@ -9,6 +9,8 @@
   export let bufferAhead = 0;
   // how many seconds the graph spans
   export let span = 120;
+  // the mini player's version: speeds, the graph and one line of totals
+  export let compact = false;
 
   const WIDTH = 320;
   const HEIGHT = 96;
@@ -60,7 +62,7 @@
   }
 </script>
 
-<div class="stats-page">
+<div class="stats-page" class:compact>
   {#if renderer}
     <div class="stats-video">
       <div class="stats-video-row">
@@ -131,6 +133,13 @@
     </div>
     </div>
 
+    {#if compact}
+      <div class="stats-compact-line">
+        <span>{stats.peers} {stats.peers === 1 ? "peer" : "peers"}</span>
+        <span>{filePercent.toFixed(0)}% downloaded</span>
+        <span>{bufferAhead >= 60 ? `${(bufferAhead / 60).toFixed(1)} min` : `${Math.round(bufferAhead)}s`} ahead</span>
+      </div>
+    {:else}
     <div class="stats-file">
       <div class="stats-file-row">
         <span class="stats-label">File downloaded</span>
@@ -167,5 +176,6 @@
         <span class="stats-chip">{stats.peers_connecting} connecting</span>
       {/if}
     </div>
+    {/if}
   {/if}
 </div>

@@ -46,6 +46,12 @@ pub struct AnimeNumbering {
     groups: Vec<Vec<(u32, u32)>>,
 }
 
+/// the tmdb (season, episode) lists of a show that play from one file, as last numbered.
+#[tauri::command]
+pub fn get_episode_groups(core: CoreState<'_>, media_id: u32) -> Vec<Vec<(u32, u32)>> {
+    core.episode_groups(media_id)
+}
+
 /// the episode after this one, past every tmdb episode sharing its file.
 #[tauri::command]
 pub fn get_next_episode(core: CoreState<'_>, media_id: u32, media_type: String, season: u32, episode: u32) -> u32 {

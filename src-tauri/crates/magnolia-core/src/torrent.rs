@@ -125,7 +125,11 @@ struct HttpState {
     fonts_dir: PathBuf,
     // the newest request per (session, file); mpv opens a new request on every seek
     active_streams: Arc<std::sync::Mutex<HashMap<(usize, usize), CancellationToken>>>,
+    resume_hints: ResumeHints,
 }
+
+// streams held open around the point a resumed play will seek to, by (session, file)
+type ResumeHints = Arc<std::sync::Mutex<HashMap<(usize, usize), CancellationToken>>>;
 
 // Trackers added to every torrent on top of whatever the magnet/torrent carries.
 // Magnet links from search providers often have few or zero trackers, leaving
@@ -247,6 +251,58 @@ fn spawn_prefetch(
     }
 }
 
+// a resume hint gives up after this, whether or not the player ever seeked
+const RESUME_HINT_TTL: std::time::Duration = std::time::Duration::from_secs(45);
+const RESUME_HINT_MIN_BYTES: u64 = 24 * 1024 * 1024;
+const RESUME_HINT_MAX_BYTES: u64 = 96 * 1024 * 1024;
+
+/// Prioritise the pieces around the point a resumed play will seek to, while the head and
+/// tail prefetch are still running. The byte offset is only an estimate (bitrate is not
+/// constant), so the window is wide and starts a little before it. The stream is never read:
+/// holding it open keeps its window in the piece queue, so peers that would otherwise fetch
+/// the start of the file fetch what playback needs first. It ends once the player's own
+/// request reaches the middle of the file, or after `RESUME_HINT_TTL`.
+fn spawn_resume_hint(
+    handle: Arc<librqbit::ManagedTorrent>,
+    session_id: usize,
+    file_index: usize,
+    fraction: f64,
+    hints: ResumeHints,
+) {
+    if !fraction.is_finite() || fraction <= 0.01 || fraction >= 0.995 {
+        return;
+    }
+    let cancel = CancellationToken::new();
+    if let Some(previous) = hints.lock().unwrap().insert((session_id, file_index), cancel.clone()) {
+        previous.cancel();
+    }
+    tokio::spawn(async move {
+        let hold = async {
+            // stream() fails while the torrent is still initializing.
+            let mut stream = loop {
+                match handle.clone().stream(file_index).await {
+                    Ok(s) => break s,
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(150)).await,
+                }
+            };
+            let len = stream.len();
+            let window = (len / 32).clamp(RESUME_HINT_MIN_BYTES, RESUME_HINT_MAX_BYTES);
+            let estimate = (len as f64 * fraction) as u64;
+            let start = estimate.saturating_sub(window / 4).min(len);
+            stream.set_lookahead(window);
+            if stream.seek(std::io::SeekFrom::Start(start)).await.is_ok() {
+                tracing::info!("[player-init] resume hint: holding {} bytes from offset {} of {}", window, start, len);
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::select! {
+            _ = hold => {}
+            _ = cancel.cancelled() => {}
+            _ = tokio::time::sleep(RESUME_HINT_TTL) => {}
+        }
+    });
+}
+
 // In-memory only: cached torrents live for the duration of the app run so a
 // recently watched torrent resumes instantly, but nothing is restored at startup.
 #[derive(Clone)]
@@ -274,6 +330,7 @@ pub struct TorrentManager {
     // a torrent started before play was pressed (see `warm`), as (session id, generation)
     warm: Arc<std::sync::Mutex<Option<(usize, u64)>>>,
     warm_generation: std::sync::atomic::AtomicU64,
+    resume_hints: ResumeHints,
 }
 
 // an unclaimed warm torrent stops downloading after this
@@ -358,6 +415,14 @@ async fn stream_file(
         .insert((session_id, file_id), cancel.clone())
     {
         previous.cancel();
+    }
+
+    // a read in the middle of the file is the player seeking to where it resumes, and from
+    // here its own stream prioritises the right pieces
+    if start >= HEAD_PREFETCH_BYTES && start + TAIL_PREFETCH_BYTES < file_size {
+        if let Some(hint) = state.resume_hints.lock().unwrap().remove(&(session_id, file_id)) {
+            hint.cancel();
+        }
     }
 
     // Pre-fetch relative filename for the disk fallback (before stream() consumes the Arc).
@@ -571,7 +636,9 @@ impl TorrentManager {
         let http_addr = listener.local_addr()?;
         println!("HTTP server will run on: {}", http_addr);
         
+        let resume_hints: ResumeHints = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let state = HttpState {
+            resume_hints: resume_hints.clone(),
             session: session.clone(),
             download_dir: download_dir.clone(),
             fonts_dir,
@@ -605,6 +672,7 @@ impl TorrentManager {
             playing: Arc::new(std::sync::Mutex::new(None)),
             warm: Arc::new(std::sync::Mutex::new(None)),
             warm_generation: std::sync::atomic::AtomicU64::new(0),
+            resume_hints,
         };
         
         Ok(manager)
@@ -1068,9 +1136,20 @@ impl TorrentManager {
         }
     }
 
-    pub async fn prepare_stream(&self, handle_id: usize, file_index: usize) -> Result<()> {
+    /// `resume_fraction` is how far into the file playback will start (0 to 1), when known.
+    pub async fn prepare_stream(
+        &self,
+        handle_id: usize,
+        file_index: usize,
+        resume_fraction: Option<f64>,
+    ) -> Result<()> {
         let t0 = std::time::Instant::now();
         tracing::info!("[player-init] prepare_stream: start handle_id={} file_index={}", handle_id, file_index);
+        // only one file plays at a time, so a hint left from the last one (the previous
+        // episode of a pack, say) would keep pulling pieces nobody will watch
+        for (_, hint) in self.resume_hints.lock().unwrap().drain() {
+            hint.cancel();
+        }
         let torrents = self.torrents.read().await;
         let entry = torrents
             .get(&handle_id)
@@ -1107,6 +1186,9 @@ impl TorrentManager {
 
                 let prefetch = Arc::new(PrefetchState::default());
                 spawn_prefetch(handle.clone(), file_index, prefetch.clone());
+                if let Some(fraction) = resume_fraction {
+                    spawn_resume_hint(handle.clone(), session_id, file_index, fraction, self.resume_hints.clone());
+                }
 
                 drop(torrents);
                 let mut torrents = self.torrents.write().await;
@@ -1143,7 +1225,10 @@ impl TorrentManager {
         tracing::info!("[player-init] prepare_stream: setting session_id={} for handle_id={}", session_id, handle_id);
 
         let prefetch = Arc::new(PrefetchState::default());
-        spawn_prefetch(handle, file_index, prefetch.clone());
+        spawn_prefetch(handle.clone(), file_index, prefetch.clone());
+        if let Some(fraction) = resume_fraction {
+            spawn_resume_hint(handle, session_id, file_index, fraction, self.resume_hints.clone());
+        }
 
         drop(torrents);
         let mut torrents = self.torrents.write().await;
