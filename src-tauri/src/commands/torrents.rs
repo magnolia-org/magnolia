@@ -28,8 +28,13 @@ pub async fn list_torrents(core: CoreState<'_>) -> Result<Vec<TorrentInfo>, Stri
 }
 
 #[tauri::command]
-pub async fn prepare_stream(core: CoreState<'_>, handle_id: usize, file_index: usize) -> Result<(), String> {
-    core.torrents.prepare_stream(handle_id, file_index).await.map_err(err)
+pub async fn prepare_stream(
+    core: CoreState<'_>,
+    handle_id: usize,
+    file_index: usize,
+    resume_fraction: Option<f64>,
+) -> Result<(), String> {
+    core.torrents.prepare_stream(handle_id, file_index, resume_fraction).await.map_err(err)
 }
 
 #[tauri::command]

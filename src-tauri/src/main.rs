@@ -36,15 +36,15 @@ async fn load_file(
         let lock_t = std::time::Instant::now();
         let guard = mpv.lock().map_err(|e| e.to_string())?;
         log::info!("[player-init] load_file: mpv lock acquired in {:.3}s", lock_t.elapsed().as_secs_f64());
-        let start_opt;
-        let mut args: Vec<&str> = vec!["loadfile", &path, "replace"];
-        if let Some(pos) = resumePosition {
-            if pos > 0.0 {
-                start_opt = format!("start={pos}");
-                args.push(&start_opt);
-            }
-        }
-        guard.command(&args);
+        // open straight at the resume point instead of at 0 followed by a seek, which would
+        // fetch and decode the start of the file for nothing. set as a property because the
+        // position of loadfile's options argument differs between mpv versions.
+        let start = match resumePosition {
+            Some(pos) if pos.is_finite() && pos > 0.0 => format!("{pos:.3}"),
+            _ => "none".to_string(),
+        };
+        guard.set_option_string("start", &start);
+        guard.command(&["loadfile", &path, "replace"]);
         log::info!("[player-init] load_file: loadfile command sent in {:.3}s total", t0.elapsed().as_secs_f64());
         let pause_val = if autoPlay.unwrap_or(true) { "no" } else { "yes" };
         guard.set_option_string("pause", pause_val);
@@ -416,6 +416,69 @@ unsafe fn reapply_traffic_light_inset(ns_window: &objc2_app_kit::NSWindow) {
         origin.x = x + (i as f64 * space_between);
         button.setFrameOrigin(origin);
     }
+}
+
+#[cfg(target_os = "linux")]
+const MINI_PLAYER_TITLE: &str = "Magnolia Mini Player";
+#[cfg(target_os = "linux")]
+static WINDOW_TITLE_BEFORE_MINI_PLAYER: Mutex<Option<String>> = Mutex::new(None);
+
+/// Turns the main window into the mini player's window and back. While active, resizing
+/// keeps `aspect` (width / height) and the window is marked as floating, so tiling window
+/// managers leave it out of their layout. Linux has no such mark to set at runtime, so the
+/// title changes there instead, which gives a window manager rule something to match. Not
+/// on macos, where the title is drawn over the video.
+#[tauri::command]
+fn set_mini_player_window(active: bool, aspect: Option<f64>, window: tauri::Window) -> Result<(), String> {
+    let aspect = aspect.filter(|a| active && a.is_finite() && *a > 0.0);
+
+    #[cfg(target_os = "linux")]
+    if let Ok(mut before) = WINDOW_TITLE_BEFORE_MINI_PLAYER.lock() {
+        if active {
+            if before.is_none() {
+                *before = window.title().ok();
+            }
+            let _ = window.set_title(MINI_PLAYER_TITLE);
+        } else if let Some(title) = before.take() {
+            let _ = window.set_title(&title);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let window_cl = window.clone();
+        window
+            .run_on_main_thread(move || {
+                use objc2::msg_send;
+                use objc2_app_kit::NSWindow;
+                use objc2_foundation::{NSSize, NSString};
+
+                let Ok(ns_window_ptr) = window_cl.ns_window() else { return };
+                // SAFETY: ns_window() hands back the live NSWindow for this webview window,
+                // and it is only used here on the main thread.
+                #[allow(unused_unsafe)]
+                unsafe {
+                    let ns_window: &NSWindow = &*(ns_window_ptr as *const NSWindow);
+                    match aspect {
+                        Some(aspect) => ns_window.setContentAspectRatio(NSSize::new(aspect * 1000.0, 1000.0)),
+                        // setting resize increments is how appkit drops an aspect ratio
+                        None => ns_window.setContentResizeIncrements(NSSize::new(1.0, 1.0)),
+                    }
+                    // yabai and aerospace only tile windows whose accessibility subrole is
+                    // the standard one. nil puts appkit's own answer back.
+                    let subrole = active.then(|| NSString::from_str("AXFloatingWindow"));
+                    let _: () = msg_send![ns_window, setAccessibilitySubrole: subrole.as_deref()];
+                }
+            })
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = aspect;
+    }
+
+    Ok(())
 }
 
 /// Show or hide the macOS traffic lights (close/minimize/zoom buttons).
@@ -796,6 +859,8 @@ fn main() {
             commands::library::get_watch_history,
             commands::library::get_anime_numbering,
             commands::library::get_next_episode,
+            commands::library::get_episode_groups,
+            set_mini_player_window,
             commands::library::remove_watch_history_item,
             commands::library::clear_watch_history,
             commands::library::get_watch_progress,

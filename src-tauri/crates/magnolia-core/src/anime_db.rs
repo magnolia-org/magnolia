@@ -536,6 +536,12 @@ impl Core {
         }
     }
 
+    /// every set of tmdb episodes of a show that air as one, from its saved numbering. empty
+    /// for shows that aren't anime or were never numbered.
+    pub fn episode_groups(&self, media_id: u32) -> Vec<Vec<(u32, u32)>> {
+        self.anime_db.numbering(media_id).map(|n| n.split_groups()).unwrap_or_default()
+    }
+
     /// the episode after this one, skipping the rest of a split anime episode's file. it may
     /// run past the end of the season, which the resume target resolves.
     pub fn next_episode(&self, media_id: u32, media_type: &str, season: u32, episode: u32) -> u32 {

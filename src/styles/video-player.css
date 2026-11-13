@@ -156,37 +156,73 @@
     position: relative;
     width: 100%;
     height: 6px;
-    background: rgba(255, 255, 255, 0.25);
-    border-radius: 3px;
     cursor: pointer;
-    transition: height 0.15s ease;
+    /* other stylesheets style a global .progress-bar (an accent gradient, clipping), which
+       would otherwise show through as a second bar behind the segments */
+    background: none;
+    overflow: visible;
+    transition: none;
 }
 
-.video-player .progress-bar:hover {
-    height: 8px;
+/* a taller target than the bar itself, so it is easy to grab */
+.video-player .progress-bar::before {
+    content: "";
+    position: absolute;
+    inset: -12px 0 -6px;
 }
 
-/* Buffered Progress */
-.progress-torrent {
+.seek-track {
+    position: absolute;
+    inset: 0;
+}
+
+/* one segment per chapter, separated by a small gap */
+.seek-segment {
     position: absolute;
     top: 0;
-    left: 0;
     height: 100%;
-    background: rgba(255, 255, 255, 0.15);
-    border-radius: 3px;
+    padding-right: 3px;
+    box-sizing: border-box;
     pointer-events: none;
-    z-index: 0;
+}
+
+.seek-segment:last-child {
+    padding-right: 0;
+}
+
+.seek-segment-bar {
+    position: relative;
+    top: 50%;
+    height: 100%;
+    transform: translateY(-50%);
+    overflow: hidden;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.22);
+    transition: height 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.progress-bar:hover .seek-segment-bar,
+.progress-bar.scrubbing .seek-segment-bar {
+    height: 134%;
+}
+
+.progress-bar:hover .seek-segment.hovered .seek-segment-bar {
+    height: 200%;
+}
+
+/* already available. overlapping ranges are opaque over a transparent bar so they
+   read as one layer, and the bar's own opacity sets how bright that layer is */
+.seek-segment-available {
+    position: absolute;
+    inset: 0;
+    opacity: 0.3;
 }
 
 .progress-buffered {
     position: absolute;
     top: 0;
-    left: 0;
     height: 100%;
-    background: rgba(255, 255, 255, 0.35);
-    border-radius: 3px;
-    pointer-events: none;
-    z-index: 1;
+    background: #fff;
 }
 
 /* Filled Progress */
@@ -196,38 +232,28 @@
     left: 0;
     height: 100%;
     background: linear-gradient(90deg, var(--accent-color), var(--accent-color) calc(100% - 64px), var(--accent-light));
-    border-radius: 3px;
-    pointer-events: none;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    box-shadow: 0 0 12px color-mix(in srgb, var(--accent-color) 40%, transparent);
-    z-index: 2;
 }
 
 /* Progress Handle */
 .progress-handle {
     position: absolute;
-    right: -8px;
     top: 50%;
-    transform: translateY(-50%);
-    width: 16px;
-    height: 16px;
+    width: 14px;
+    height: 14px;
+    margin: -7px 0 0 -7px;
     background: white;
     border-radius: 50%;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
     border: 2px solid var(--accent-color);
+    box-sizing: border-box;
+    pointer-events: none;
+    z-index: 4;
+    transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-/* Chapter Markers */
-.chapter-marker {
-    position: absolute;
-    top: 0;
-    width: 2px;
-    height: 100%;
-    background: rgba(255, 255, 255, 0.5);
-    pointer-events: none;
-    z-index: 3;
+.progress-bar:hover .progress-handle,
+.progress-bar.scrubbing .progress-handle {
+    transform: scale(1.22);
 }
 
 /* Time Tooltip */
@@ -259,6 +285,7 @@
     color: var(--text-secondary);
     margin-top: 2px;
 }
+
 
 /* Control Buttons Row */
 .control-buttons {
@@ -932,7 +959,7 @@
     line-height: 1.4;
 }
 
-/* Buffering Indicator - Compact overlay */
+/* Buffering Indicator - a plain spinner over the video */
 .buffering-indicator {
     position: absolute;
     top: 50%;
@@ -942,23 +969,31 @@
     pointer-events: none;
 }
 
-.buffering-spinner {
-    width: 64px;
-    height: 64px;
-    background: rgba(0, 0, 0, 0.75);
-    backdrop-filter: blur(10px);
+.buffering-ring {
+    width: 44px;
+    height: 44px;
+    box-sizing: border-box;
+    border: 3px solid rgba(255, 255, 255, 0.22);
+    border-top-color: #fff;
     border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: 2px solid rgba(255, 255, 255, 0.1);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.5));
+    animation: spin 0.9s linear infinite;
 }
 
-.buffering-spinner i {
-    font-size: 32px;
-    color: var(--text-primary);
-    animation: spin 1s linear infinite;
+.video-player.pip .buffering-ring {
+    width: 28px;
+    height: 28px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .buffering-ring {
+        animation-duration: 2.4s;
+    }
+
+    .seek-segment-bar,
+    .progress-handle {
+        transition: none;
+    }
 }
 
 @keyframes spin {
@@ -1733,8 +1768,8 @@
     left: 50%;
     top: 50%;
     transform: translate(-50%, -50%);
-    width: min(520px, 90vw);
-    max-height: 72vh;
+    width: min(760px, 92vw);
+    max-height: 80vh;
     background: color-mix(in srgb, var(--bg-primary) 94%, transparent);
     -webkit-backdrop-filter: blur(28px);
     backdrop-filter: blur(28px);
@@ -1761,19 +1796,19 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px 16px 12px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    gap: 12px;
+    padding: 16px 14px 12px 20px;
     flex-shrink: 0;
 }
 
 .episodes-panel-title {
-    font-size: 14px;
+    font-size: 16px;
     font-weight: 600;
     color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 240px;
+    min-width: 0;
 }
 
 .episodes-panel-close {
@@ -1781,93 +1816,128 @@
     border: none;
     color: var(--text-secondary);
     cursor: pointer;
-    padding: 4px;
-    border-radius: 6px;
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+    border-radius: 8px;
     font-size: 18px;
-    line-height: 1;
     display: flex;
     align-items: center;
-    transition: color 0.15s ease;
+    justify-content: center;
+    transition: color 0.15s ease, background-color 0.15s ease;
 }
 
-.episodes-panel-close:hover { color: var(--text-primary); }
+.episodes-panel-close:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.08);
+}
 
+/* one row that scrolls sideways, so a long-running show doesn't push the grid down */
 .episodes-season-tabs {
     display: flex;
-    gap: 4px;
-    padding: 10px 12px;
-    flex-wrap: wrap;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    gap: 6px;
+    padding: 0 20px 14px;
+    overflow-x: auto;
+    scrollbar-width: none;
     flex-shrink: 0;
+}
+
+.episodes-season-tabs::-webkit-scrollbar {
+    display: none;
 }
 
 .episodes-season-tab {
     background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: none;
     color: var(--text-secondary);
-    border-radius: 6px;
-    padding: 4px 10px;
+    border-radius: 999px;
+    padding: 6px 13px;
     font-size: 12px;
     font-weight: 600;
+    white-space: nowrap;
     cursor: pointer;
-    transition: all 0.15s ease;
+    font-variant-numeric: tabular-nums;
+    transition: background-color 0.15s ease, color 0.15s ease;
 }
 
-.episodes-season-tab:hover { background: rgba(255, 255, 255, 0.1); color: var(--text-primary); }
-.episodes-season-tab.active { background: var(--accent-color); border-color: var(--accent-color); color: #000; }
+.episodes-season-tab:hover { background: rgba(255, 255, 255, 0.12); color: var(--text-primary); }
+.episodes-season-tab.active { background: var(--accent-color); color: #0b0b0b; }
 
 .episodes-list-scroll {
     flex: 1;
     overflow-y: auto;
-    padding: 8px 0;
+    padding: 4px 20px 20px;
 }
 
-.episodes-loading {
+/* a grid of stills: the picture and the number find an episode faster than a paragraph */
+.episodes-grid-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 18px 14px;
+}
+
+.episodes-card {
     display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 80px;
-}
-
-.episodes-loading-spinner {
-    width: 24px;
-    height: 24px;
-    border: 2px solid rgba(255, 255, 255, 0.1);
-    border-top-color: var(--accent-color);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-}
-
-.episodes-panel-item {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 12px;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    padding: 0;
+    background: none;
+    border: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
     cursor: pointer;
-    border-radius: 8px;
-    margin: 0 6px;
-    transition: background 0.15s ease;
 }
 
-.episodes-panel-item:hover { background: rgba(255, 255, 255, 0.06); }
-.episodes-panel-item.current { background: rgba(255, 255, 255, 0.08); }
-.episodes-panel-item.current .episodes-panel-name { color: var(--accent-color); }
+.episodes-card:disabled {
+    cursor: default;
+    opacity: 0.45;
+}
+
+.episodes-card:focus-visible,
+.episodes-season-tab:focus-visible,
+.episodes-panel-close:focus-visible,
+.episodes-panel-retry:focus-visible {
+    outline: 2px solid var(--accent-light);
+    outline-offset: 3px;
+    border-radius: 10px;
+}
 
 .episodes-panel-still {
     position: relative;
-    width: 90px;
-    min-width: 90px;
+    width: 100%;
     aspect-ratio: 16/9;
-    border-radius: 8px;
+    margin-bottom: 6px;
+    border-radius: 10px;
     overflow: hidden;
     background: #151515;
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+    transition: box-shadow 0.18s ease;
+}
+
+.episodes-card:not(:disabled):hover .episodes-panel-still {
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08), 0 0 0 2px rgba(255, 255, 255, 0.5);
+}
+
+.episodes-card.current .episodes-panel-still {
+    box-shadow: 0 0 0 2px var(--accent-color);
 }
 
 .episodes-panel-still img {
     width: 100%;
     height: 100%;
     object-fit: cover;
+    display: block;
+    transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.episodes-card:not(:disabled):hover .episodes-panel-still img {
+    transform: scale(1.05);
+}
+
+.episodes-card.watched .episodes-panel-still img {
+    opacity: 0.5;
 }
 
 .episodes-panel-still-placeholder {
@@ -1877,7 +1947,22 @@
     align-items: center;
     justify-content: center;
     color: var(--text-tertiary);
-    font-size: 18px;
+    font-size: 22px;
+}
+
+/* the episode number rides on the still, so the title line stays just the title */
+.episodes-card-num {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    padding: 2px 7px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.72);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.4;
 }
 
 .episodes-panel-now-playing,
@@ -1887,26 +1972,29 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(0, 0, 0, 0.45);
+}
+
+.episodes-panel-now-playing {
+    background: rgba(0, 0, 0, 0.4);
 }
 
 /* same round markers as the browse tiles: accent play for now playing, green check for watched */
 .episodes-panel-now-playing i,
 .episodes-panel-watched i {
-    width: 24px;
-    height: 24px;
+    width: 30px;
+    height: 30px;
     display: flex;
     align-items: center;
     justify-content: center;
     border-radius: 50%;
-    font-size: 14px;
+    font-size: 17px;
 }
 
 .episodes-panel-now-playing i {
     padding-left: 1px;
     color: #0b0b0b;
     background: var(--accent-color);
-    box-shadow: 0 4px 12px color-mix(in srgb, var(--accent-color) 45%, transparent);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
 }
 
 .episodes-panel-watched i {
@@ -1917,13 +2005,13 @@
 
 .episodes-panel-progress-bar {
     position: absolute;
-    left: 5px;
-    right: 5px;
-    bottom: 5px;
+    left: 6px;
+    right: 6px;
+    bottom: 6px;
     height: 3px;
     border-radius: 999px;
     overflow: hidden;
-    background: rgba(255, 255, 255, 0.25);
+    background: rgba(255, 255, 255, 0.28);
 }
 
 .episodes-panel-progress-bar div {
@@ -1932,46 +2020,101 @@
     background: var(--accent-color);
 }
 
-.episodes-panel-info {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-}
-
-.ep-torrent-dot {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 10px;
-    color: #2ed573;
-    margin-top: 2px;
-    opacity: 0.8;
-}
-
-.ep-torrent-dot i {
-    font-size: 11px;
-}
-
-.episodes-panel-num {
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-}
-
 .episodes-panel-name {
     font-size: 13px;
-    font-weight: 500;
+    font-weight: 600;
     color: var(--text-primary);
-    line-height: 1.3;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
+    line-height: 1.35;
+    white-space: nowrap;
     overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.episodes-card.current .episodes-panel-name { color: var(--accent-light); }
+.episodes-card.watched .episodes-panel-name { color: var(--text-secondary); }
+
+.episodes-panel-meta {
+    min-height: 17px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+.episodes-panel-status {
+    color: var(--accent-light);
+    font-weight: 600;
+}
+
+/* loading: cards in the shape of what is coming */
+.episodes-card.skeleton {
+    cursor: default;
+    pointer-events: none;
+}
+
+.episodes-card.skeleton .episodes-panel-still,
+.episodes-skeleton-line {
+    background: rgba(255, 255, 255, 0.07);
+    box-shadow: none;
+    animation: episodesSkeleton 1.2s ease-in-out infinite alternate;
+}
+
+.episodes-skeleton-line {
+    height: 12px;
+    width: 70%;
+    margin-top: 2px;
+    border-radius: 6px;
+}
+
+@keyframes episodesSkeleton {
+    from { opacity: 0.5; }
+    to   { opacity: 1; }
+}
+
+.episodes-panel-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 40px 16px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.episodes-panel-retry {
+    background: rgba(255, 255, 255, 0.08);
+    border: none;
+    border-radius: 999px;
+    padding: 7px 16px;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+
+.episodes-panel-retry:hover {
+    background: rgba(255, 255, 255, 0.14);
+}
+
+@media (max-width: 560px) {
+    .episodes-grid-cards {
+        grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+        gap: 14px 10px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .episodes-island,
+    .episodes-card.skeleton .episodes-panel-still,
+    .episodes-skeleton-line {
+        animation: none;
+    }
+
+    .episodes-panel-still img {
+        transition: none;
+    }
 }
 
 /* ── Non-macOS backdrop-filter fallbacks ────────────────────────────────────
@@ -2123,14 +2266,131 @@ html:not(.macos) .player-track-dropdown {
     height: 56px;
 }
 
-/* popups must still fit inside the small window */
-.video-player.pip .player-track-dropdown {
-    max-height: calc(100vh - 64px);
-    min-width: 170px;
+/* popups sit in the corner above the controls, sized to what they hold, and never grow past
+   the window. they stop short of the top edge, which belongs to the drag strip and the back
+   button. submenus open over the menu, with a way back */
+.video-player.pip .player-track-dropdown,
+.video-player.pip .submenu,
+.video-player.pip .settings-submenu {
+    position: fixed;
+    left: auto !important;
+    top: auto !important;
+    right: 6px;
+    bottom: 58px;
+    width: min(236px, calc(100vw - 12px));
+    min-width: 0;
+    max-width: none;
+    max-height: calc(100vh - 92px);
+    transform-origin: bottom right;
+    animation: pipMenuIn 0.22s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.video-player.pip .player-menu {
-    max-height: calc(100vh - 64px);
+.video-player.pip .submenu {
+    animation-name: pipSubmenuIn;
+}
+
+.video-player.pip .settings-submenu,
+.video-player.pip .stats-submenu {
+    width: min(280px, calc(100vw - 12px));
+}
+
+@keyframes pipMenuIn {
+    from { opacity: 0; transform: translateY(6px) scale(0.96); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* a submenu arrives from the side its arrow points to */
+@keyframes pipSubmenuIn {
+    from { opacity: 0; transform: translateX(14px); }
+    to   { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .video-player.pip .player-track-dropdown,
+    .video-player.pip .submenu {
+        animation: none;
+    }
+}
+
+/* stays put while the submenu scrolls under it */
+.submenu-back {
+    position: sticky;
+    top: -5px;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    width: 100%;
+    padding: 6px 6px 6px 2px;
+    margin-bottom: 4px;
+    background: rgb(12, 12, 12);
+    border: none;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+
+.submenu-back:hover {
+    background: rgb(28, 28, 28);
+}
+
+.submenu-back i {
+    font-size: 16px;
+    color: var(--text-secondary);
+    transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.submenu-back:hover i {
+    color: var(--text-primary);
+    transform: translateX(-2px);
+}
+
+/* mini statistics: speeds, the graph, one line of totals */
+.stats-page.compact {
+    width: auto;
+    padding: 4px;
+    gap: 6px;
+}
+
+.stats-page.compact .stats-speed-label {
+    font-size: 10px;
+}
+
+.stats-page.compact .stats-speed-value {
+    font-size: 15px;
+}
+
+.stats-page.compact .stats-chart-card {
+    padding: 6px 6px 4px;
+    gap: 2px;
+}
+
+.stats-page.compact .stats-chart {
+    height: 44px;
+}
+
+.stats-page.compact .stats-axis-top,
+.stats-page.compact .stats-axis-time {
+    font-size: 9px;
+}
+
+.stats-compact-line {
+    display: flex;
+    flex-wrap: wrap;
+    column-gap: 6px;
+    font-size: 10px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+.stats-compact-line > span + span::before {
+    content: "\00b7";
+    margin-right: 6px;
+    color: var(--text-tertiary);
 }
 
 /* pinned / active mini-player buttons glow with the accent */
@@ -2143,10 +2403,6 @@ html:not(.macos) .player-track-dropdown {
 }
 
 /* the real settings menu + submenus, shrunk to fit the mini player */
-.video-player.pip .player-menu {
-    min-width: 190px;
-}
-
 .video-player.pip .player-track-dropdown {
     padding: 5px;
     border-radius: 10px;
@@ -2169,7 +2425,8 @@ html:not(.macos) .player-track-dropdown {
 .video-player.pip .menu-item .ri-closed-captioning-line,
 .video-player.pip .menu-item .ri-speed-line,
 .video-player.pip .menu-item .ri-headphone-line,
-.video-player.pip .menu-item .ri-bookmark-line {
+.video-player.pip .menu-item .ri-bookmark-line,
+.video-player.pip .menu-item .ri-line-chart-line {
     margin-right: 6px;
     font-size: 13px;
 }
@@ -2235,9 +2492,6 @@ html:not(.macos) .player-track-dropdown {
 
 /* floating submenus (audio / subtitle / customize) */
 .video-player.pip .submenu {
-    min-width: 180px;
-    max-width: 260px;
-    max-height: calc(100vh - 40px);
     padding: 5px;
     border-radius: 10px;
 }
@@ -2249,9 +2503,7 @@ html:not(.macos) .player-track-dropdown {
 
 /* subtitle customize panel */
 .video-player.pip .settings-submenu {
-    width: 264px;
-    padding: 12px;
-    max-height: calc(100vh - 40px);
+    padding: 8px;
 }
 
 .video-player.pip .settings-preview-container {
@@ -2577,6 +2829,3 @@ html:not(.macos) .player-track-dropdown {
     font-variant-numeric: tabular-nums;
 }
 
-.video-player.pip .stats-submenu {
-    display: none;
-}
