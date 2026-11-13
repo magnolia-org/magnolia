@@ -55,6 +55,15 @@ async fn load_file(
 }
 
 #[tauri::command]
+fn video_software_scaling(state: State<'_, AppState>) -> bool {
+    state
+        .mpv_player
+        .lock()
+        .map(|mpv| mpv.software_scaling())
+        .unwrap_or(false)
+}
+
+#[tauri::command]
 async fn cycle_pause(state: State<'_, AppState>) -> Result<(), String> {
     let mpv = state.mpv_player.clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
@@ -636,7 +645,7 @@ fn main() {
                             }
                             _ => None,
                         };
-                        (h.window.get() as *const std::ffi::c_void, connection, 1)
+                        (h.window.get() as *const std::ffi::c_void, connection, mpv::gtk_video::EMBED_MODE_GTK)
                     }
                     #[cfg(target_os = "linux")]
                     RawWindowHandle::Xlib(h) => {
@@ -646,7 +655,7 @@ fn main() {
                             }
                             _ => None,
                         };
-                        (h.window as *const std::ffi::c_void, display, 1)
+                        (h.window as *const std::ffi::c_void, display, mpv::gtk_video::EMBED_MODE_GTK)
                     }
                     #[cfg(target_os = "linux")]
                     RawWindowHandle::Wayland(h) => {
@@ -668,6 +677,12 @@ fn main() {
                     app_handle.clone(),
                 )
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+                #[cfg(target_os = "linux")]
+                if embed_mode == mpv::gtk_video::EMBED_MODE_GTK {
+                    mpv::gtk_video::install(&main_window, mpv_handle.raw_ctx())
+                        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+                }
 
                 let mpv_arc = Arc::new(Mutex::new(mpv_handle));
                 // Register AppState BEFORE starting the event listener —
@@ -842,6 +857,7 @@ fn main() {
             open_external_url,
             set_traffic_lights_visible,
             load_file,
+            video_software_scaling,
             cycle_pause,
             seek_video,
             mpv_run_command,

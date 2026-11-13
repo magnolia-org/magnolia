@@ -27,6 +27,7 @@ pub struct MpvHandle {
     render_loop_handle: Mutex<Option<JoinHandle<()>>>,
     /// soia_utils instance (all platforms).
     soia_utils: AtomicPtr<SoiaUtils>,
+    software_scaling: bool,
 }
 
 unsafe impl Send for MpvHandle {}
@@ -166,6 +167,16 @@ impl MpvHandle {
             set_str("sub-font", "Geist");
         }
 
+        #[cfg(target_os = "linux")]
+        let use_gtk_widget = mode == super::gtk_video::EMBED_MODE_GTK;
+        #[cfg(not(target_os = "linux"))]
+        let use_gtk_widget = false;
+        if use_gtk_widget {
+            set_str("vo", "libmpv");
+            set_str("zimg-scaler", "bicubic");
+            set_str("sws-scaler", "bicubic");
+        }
+
         let init_result = unsafe { mpv_initialize(ctx) };
         if init_result < 0 {
             unsafe { mpv_destroy(ctx) };
@@ -176,17 +187,21 @@ impl MpvHandle {
         // mode (decided by the caller from the actual window handle type):
         // macOS = 0 (native/Metal), X11/HWND = 1 (wid), Wayland = 2 (render context).
         let display_ptr = display.unwrap_or(std::ptr::null());
-        let soia_utils_ptr = unsafe {
-            soia_utils_create(
-                ctx,
-                raw_window,
-                display_ptr,
-                mode,
-                std::ptr::null(),
-                std::ptr::null(),
-            )
+        let soia_utils_ptr = if use_gtk_widget {
+            std::ptr::null_mut()
+        } else {
+            unsafe {
+                soia_utils_create(
+                    ctx,
+                    raw_window,
+                    display_ptr,
+                    mode,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            }
         };
-        if soia_utils_ptr.is_null() {
+        if soia_utils_ptr.is_null() && !use_gtk_widget {
             unsafe { mpv_destroy(ctx) };
             return Err(
                 "soia_utils_create failed — ensure libsoia_utils is present in src-tauri/libs/mpv/lib/"
@@ -204,6 +219,7 @@ impl MpvHandle {
             render_loop_stop: Arc::new(AtomicBool::new(false)),
             render_loop_handle: Mutex::new(None),
             soia_utils: AtomicPtr::new(soia_utils_ptr),
+            software_scaling: use_gtk_widget,
         };
 
         Ok(handle)
@@ -281,6 +297,11 @@ impl MpvHandle {
             mpv_free(value_ptr as *mut c_void);
             Ok(value)
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn raw_ctx(&self) -> *mut c_void {
+        self.ctx_ptr()
     }
 
     /// Returns the raw soia_utils pointer (used by macOS layer geometry sync).
@@ -362,6 +383,10 @@ impl MpvHandle {
         if !utils.is_null() {
             unsafe { soia_utils_destroy(utils) };
         }
+    }
+
+    pub fn software_scaling(&self) -> bool {
+        self.software_scaling
     }
 
     pub fn eof_reached(&self) -> bool {

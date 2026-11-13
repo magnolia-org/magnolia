@@ -175,6 +175,45 @@ unsafe extern "C" {
     pub(super) fn mpv_free(data: *mut c_void);
 }
 
+#[cfg(target_os = "linux")]
+pub(super) const MPV_RENDER_PARAM_INVALID: c_int = 0;
+#[cfg(target_os = "linux")]
+pub(super) const MPV_RENDER_PARAM_API_TYPE: c_int = 1;
+#[cfg(target_os = "linux")]
+pub(super) const MPV_RENDER_PARAM_SW_SIZE: c_int = 17;
+#[cfg(target_os = "linux")]
+pub(super) const MPV_RENDER_PARAM_SW_FORMAT: c_int = 18;
+#[cfg(target_os = "linux")]
+pub(super) const MPV_RENDER_PARAM_SW_STRIDE: c_int = 19;
+#[cfg(target_os = "linux")]
+pub(super) const MPV_RENDER_PARAM_SW_POINTER: c_int = 20;
+#[cfg(target_os = "linux")]
+pub(super) const MPV_RENDER_UPDATE_FRAME: u64 = 1;
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+pub(super) struct MpvRenderParam {
+    pub ty: c_int,
+    pub data: *mut c_void,
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    pub(super) fn mpv_render_context_create(
+        res: *mut *mut c_void,
+        mpv: *mut c_void,
+        params: *mut MpvRenderParam,
+    ) -> c_int;
+    pub(super) fn mpv_render_context_set_update_callback(
+        ctx: *mut c_void,
+        callback: Option<unsafe extern "C" fn(cb_ctx: *mut c_void)>,
+        callback_ctx: *mut c_void,
+    );
+    pub(super) fn mpv_render_context_update(ctx: *mut c_void) -> u64;
+    pub(super) fn mpv_render_context_render(ctx: *mut c_void, params: *mut MpvRenderParam) -> c_int;
+    pub(super) fn mpv_render_context_free(ctx: *mut c_void);
+}
+
 // ── soia_utils — cross-platform embedding + render context (from bundled library) ──
 
 /// Opaque handle returned by soia_utils_create.

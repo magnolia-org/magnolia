@@ -26,6 +26,8 @@ pub struct Settings {
     /// layout the output device advertises.
     #[serde(default)]
     pub force_stereo_audio: bool,
+    #[serde(default = "default_video_scaling")]
+    pub video_scaling: String,
     /// Streaming client: "builtin" (local torrent pipeline) or the id of an
     /// installed debrid extension.
     #[serde(default = "default_streaming_client")]
@@ -37,6 +39,10 @@ pub struct Settings {
 
 fn default_streaming_client() -> String {
     "builtin".to_string()
+}
+
+fn default_video_scaling() -> String {
+    "balanced".to_string()
 }
 
 fn default_true() -> bool {
@@ -56,6 +62,7 @@ impl Default for Settings {
             hide_chapter_markers: false,
             subtitle_language: String::new(),
             force_stereo_audio: false,
+            video_scaling: default_video_scaling(),
             streaming_client: default_streaming_client(),
             tracker_preference: Vec::new(),
         }

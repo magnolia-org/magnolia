@@ -80,6 +80,10 @@ import { getSeasonDetails, getTVDetails, getImageUrl, getMovieExternalIds, getTV
   let statsInterval = null;
   let showStatsSubmenu = false;
   let statsSubmenuElement = null;
+  let showScalingSubmenu = false;
+  let scalingSubmenuElement = null;
+  let scalingSubmenuX = 0;
+  let scalingSubmenuY = 0;
   let statsSubmenuX = 0;
   let statsSubmenuY = 0;
   $: bufferAhead = (() => {
@@ -157,6 +161,16 @@ import { getSeasonDetails, getTVDetails, getImageUrl, getMovieExternalIds, getTV
   let clearCacheAfterWatch = false;
   let hideChapterMarkers = false;
   let forceStereoAudio = false;
+  let softwareScaling = false;
+  let videoScaling = "balanced";
+  const SCALING_LEVELS = ["fast", "balanced", "quality"];
+  const SCALING_LABELS = { fast: "Fast", balanced: "Balanced", quality: "Quality" };
+  const SCALING_HINTS = { fast: "Bilinear", balanced: "Bicubic", quality: "Lanczos, most CPU" };
+  const SCALING_OPTIONS = {
+    fast: { zimg: "bilinear", sws: "fast-bilinear" },
+    balanced: { zimg: "bicubic", sws: "bicubic" },
+    quality: { zimg: "lanczos", sws: "lanczos" },
+  };
   let cacheCleared = false;
   
   let torrentSessionId = null;
@@ -465,6 +479,12 @@ let currentSkipSection = null;
     name: "audio-channels",
     value: forceStereoAudio ? "stereo" : "auto-safe",
   }).catch(() => {});
+
+  $: if (softwareScaling) {
+    const opts = SCALING_OPTIONS[videoScaling] ?? SCALING_OPTIONS.balanced;
+    invoke("mpv_set_option_string", { name: "zimg-scaler", value: opts.zimg }).catch(() => {});
+    invoke("mpv_set_option_string", { name: "sws-scaler", value: opts.sws }).catch(() => {});
+  }
 
   // Fetch external subtitles when media info is available
   $: {
@@ -1265,7 +1285,7 @@ let currentSkipSection = null;
     clearTimeout(controlsTimeout);
     controlsTimeout = setTimeout(() => {
       // Don't hide controls if any menu is open
-      if (playing && !isSeeking && !showPlayerMenu && !showChaptersMenu && !showAudioSubmenu && !showSubtitleSubmenu && !showStatsSubmenu) {
+      if (playing && !isSeeking && !showPlayerMenu && !showChaptersMenu && !showAudioSubmenu && !showSubtitleSubmenu && !showStatsSubmenu && !showScalingSubmenu) {
         showControls = false;
         window.dispatchEvent(new CustomEvent("videoControlsVisibility", { detail: { visible: false } }));
       }
@@ -1733,10 +1753,12 @@ let currentSkipSection = null;
     showAudioSubmenu = false;
     showSubtitleSubmenu = false;
     showStatsSubmenu = false;
+    showScalingSubmenu = false;
   }
 
   function toggleStatsSubmenu(event) {
     showStatsSubmenu = !showStatsSubmenu;
+    showScalingSubmenu = false;
     showAudioSubmenu = false;
     showSubtitleSubmenu = false;
     showSubtitleSettings = false;
@@ -1759,6 +1781,7 @@ let currentSkipSection = null;
     showAudioSubmenu = !showAudioSubmenu;
     showSubtitleSubmenu = false;
     showStatsSubmenu = false;
+    showScalingSubmenu = false;
     
     if (showAudioSubmenu) {
       const button = event.currentTarget;
@@ -1793,6 +1816,7 @@ let currentSkipSection = null;
     showSubtitleSubmenu = !showSubtitleSubmenu;
     showAudioSubmenu = false;
     showStatsSubmenu = false;
+    showScalingSubmenu = false;
     showSubtitleSettings = false;
     
     if (showSubtitleSubmenu) {
@@ -1901,6 +1925,36 @@ let currentSkipSection = null;
       await invoke('save_settings', { settings });
     } catch (error) {
       console.error('failed to save forceStereoAudio:', error);
+    }
+  }
+
+  function toggleScalingSubmenu(event) {
+    showScalingSubmenu = !showScalingSubmenu;
+    showAudioSubmenu = false;
+    showSubtitleSubmenu = false;
+    showStatsSubmenu = false;
+    showSubtitleSettings = false;
+    if (!showScalingSubmenu) return;
+
+    const buttonRect = event.currentTarget.getBoundingClientRect();
+    scalingSubmenuX = buttonRect.left - 316;
+    scalingSubmenuY = buttonRect.top - 8;
+    setTimeout(() => {
+      if (!scalingSubmenuElement) return;
+      const maxY = window.innerHeight - scalingSubmenuElement.offsetHeight - 20;
+      scalingSubmenuX = buttonRect.left - scalingSubmenuElement.offsetWidth - 16;
+      scalingSubmenuY = Math.max(20, Math.min(buttonRect.top, maxY)) - 8;
+    }, 0);
+  }
+
+  async function selectVideoScaling(level) {
+    videoScaling = level;
+    try {
+      const settings = await invoke('get_settings');
+      settings.video_scaling = videoScaling;
+      await invoke('save_settings', { settings });
+    } catch (error) {
+      console.error('failed to save videoScaling:', error);
     }
   }
 
@@ -2276,9 +2330,11 @@ let currentSkipSection = null;
       clearCacheAfterWatch = settings.clear_cache_after_watch;
       hideChapterMarkers = settings.hide_chapter_markers ?? false;
       forceStereoAudio = settings.force_stereo_audio ?? false;
+      if (SCALING_LEVELS.includes(settings.video_scaling)) videoScaling = settings.video_scaling;
     } catch (error) {
       console.error('Failed to load settings:', error);
     }
+    softwareScaling = await invoke('video_software_scaling').catch(() => false);
     
     // Sync fullscreen state when the native window changes (e.g. macOS green traffic light)
     const appWindow = getCurrentWindow();
@@ -2804,6 +2860,20 @@ let currentSkipSection = null;
               <span class="menu-toggle-indicator" class:on={forceStereoAudio}></span>
             </button>
 
+            {#if softwareScaling}
+              <div class="submenu-container">
+                <button
+                  class="player-track-option menu-item submenu-trigger"
+                  on:click={toggleScalingSubmenu}
+                >
+                  <span class="player-track-info">
+                    <i class="ri-aspect-ratio-line"></i> Scaling
+                  </span>
+                  <span class="menu-speed-value">{SCALING_LABELS[videoScaling]}</span>
+                </button>
+              </div>
+            {/if}
+
             <!-- Chapter options -->
             {#if chapters && chapters.length > 0}
               <button class="player-track-option menu-item" on:click={toggleHideChapters}>
@@ -2847,6 +2917,23 @@ let currentSkipSection = null;
               {bufferAhead}
               span={STATS_HISTORY}
             />
+          </div>
+        {/if}
+
+        {#if showScalingSubmenu && softwareScaling}
+          <div class="submenu" style="left: {scalingSubmenuX}px; top: {scalingSubmenuY}px;" bind:this={scalingSubmenuElement}>
+            {#each SCALING_LEVELS as level}
+              <button
+                class="player-track-option menu-item"
+                class:active={videoScaling === level}
+                on:click={() => selectVideoScaling(level)}
+              >
+                <span class="player-track-info">
+                  {SCALING_LABELS[level]}
+                  <span class="player-track-detail">{SCALING_HINTS[level]}</span>
+                </span>
+              </button>
+            {/each}
           </div>
         {/if}
 

@@ -3163,13 +3163,14 @@ dependencies = [
 
 [[package]]
 name = "magnolia-tauri-app"
-version = "2.7.1"
+version = "2.8.0"
 dependencies = [
  "cc",
  "cfg-if",
  "chrono",
  "fix-path-env",
  "gag",
+ "gtk",
  "keepawake",
  "libc",
  "log",
