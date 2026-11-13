@@ -55,12 +55,52 @@ async fn load_file(
 }
 
 #[tauri::command]
-fn video_software_scaling(state: State<'_, AppState>) -> bool {
-    state
-        .mpv_player
-        .lock()
-        .map(|mpv| mpv.software_scaling())
-        .unwrap_or(false)
+/// Which scaler presets apply on the X11 GTK video path: "gpu" (OpenGL
+/// renderer, mpv's scale/dscale/cscale) or "sw" (CPU zimg/sws). None where
+/// the platform renderer handles scaling itself.
+fn video_scaling_mode() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    if mpv::gtk_video::installed() {
+        return Some(if mpv::gtk_video::software_rendering() { "sw" } else { "gpu" });
+    }
+    None
+}
+
+/// What draws the video, for the statistics panel (Linux only).
+#[derive(serde::Serialize)]
+struct VideoRendererInfo {
+    /// "OpenGL", "Software" or "Native (Wayland)".
+    renderer: String,
+    /// GPU named by the GL context, when rendering with OpenGL.
+    gpu: Option<String>,
+    /// mpv's active hardware decoder, or None for software decoding.
+    hwdec: Option<String>,
+}
+
+#[tauri::command]
+fn video_renderer_info(state: State<'_, AppState>) -> Option<VideoRendererInfo> {
+    #[cfg(target_os = "linux")]
+    {
+        let (renderer, gpu) = if !mpv::gtk_video::installed() {
+            ("Native (Wayland)".to_string(), None)
+        } else if mpv::gtk_video::software_rendering() {
+            ("Software".to_string(), None)
+        } else {
+            ("OpenGL".to_string(), mpv::gtk_video::gl_renderer_name())
+        };
+        let hwdec = state
+            .mpv_player
+            .lock()
+            .ok()
+            .and_then(|mpv| mpv.get_property_string("hwdec-current").ok())
+            .filter(|v| !v.is_empty() && v != "no");
+        Some(VideoRendererInfo { renderer, gpu, hwdec })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = state;
+        None
+    }
 }
 
 #[tauri::command]
@@ -543,6 +583,19 @@ fn disable_webkit_60fps_cap(webview: &webkit2gtk::WebView) {
     }
 }
 
+/// Mirrors GDK's backend choice: Wayland wins whenever it's reachable unless
+/// GDK_BACKEND puts x11 first.
+#[cfg(target_os = "linux")]
+fn is_x11_session() -> bool {
+    if let Ok(backends) = std::env::var("GDK_BACKEND") {
+        if let Some(first) = backends.split(',').map(str::trim).find(|b| !b.is_empty() && *b != "*") {
+            return first == "x11";
+        }
+    }
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+    !wayland && std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty())
+}
+
 fn main() {
     // NVIDIA's Wayland EGL driver enables explicit sync (wp_linux_drm_syncobj)
     // on the window's wl_surface; when GTK or the embedded mpv layer then
@@ -553,6 +606,21 @@ fn main() {
     #[cfg(target_os = "linux")]
     if std::env::var_os("__NV_DISABLE_EXPLICIT_SYNC").is_none() {
         std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1");
+    }
+
+    // On X11 the mpv video sits under a transparent webview inside a
+    // GtkOverlay. WebKitGTK's default DMA-BUF renderer allocates its buffers
+    // through GBM, which fails on the NVIDIA driver under X11 ("Failed to
+    // create GBM buffer ... Invalid argument") and leaves the window black;
+    // the legacy non-DMA-BUF path keeps only freshly damaged regions when the
+    // view is transparent. Keeping the DMA-BUF renderer but backing it with
+    // shared memory renders correctly everywhere we've tested.
+    #[cfg(target_os = "linux")]
+    if is_x11_session()
+        && std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM").is_none()
+        && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
+    {
+        std::env::set_var("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1");
     }
 
     // Default: info for our code, warn for librqbit peer churn noise.
@@ -857,7 +925,8 @@ fn main() {
             open_external_url,
             set_traffic_lights_visible,
             load_file,
-            video_software_scaling,
+            video_scaling_mode,
+            video_renderer_info,
             cycle_pause,
             seek_video,
             mpv_run_command,

@@ -2,6 +2,10 @@
   // one entry per second, oldest first: { down, up } in bytes per second
   export let samples = [];
   export let stats = null;
+  // linux only: { renderer, gpu, hwdec } from video_renderer_info
+  export let renderer = null;
+  // false for direct (non-torrent) playback: only the video section is shown
+  export let torrent = true;
   export let bufferAhead = 0;
   // how many seconds the graph spans
   export let span = 120;
@@ -43,6 +47,9 @@
   $: current = hovered || shown[shown.length - 1] || { down: 0, up: 0 };
   $: filePercent = stats?.file_size ? (stats.file_bytes / stats.file_size) * 100 : 0;
 
+  // NVIDIA reports "GeForce RTX 3060/PCIe/SSE2"; the bus/ISA suffix is noise
+  $: gpuName = renderer?.gpu ? renderer.gpu.split("/")[0].trim() : null;
+
   function handleHover(event) {
     if (shown.length === 0) return;
     const rect = event.currentTarget.getBoundingClientRect();
@@ -54,7 +61,24 @@
 </script>
 
 <div class="stats-page">
-  {#if !stats}
+  {#if renderer}
+    <div class="stats-video">
+      <div class="stats-video-row">
+        <span class="stats-label">Renderer</span>
+        <span class="stats-video-value" title={renderer.gpu ?? ""}>
+          {renderer.renderer}{#if gpuName}<span class="stats-sub"> · {gpuName}</span>{/if}
+        </span>
+      </div>
+      <div class="stats-video-row">
+        <span class="stats-label">Decoder</span>
+        <span class="stats-video-value">{renderer.hwdec ?? "Software"}</span>
+      </div>
+    </div>
+  {/if}
+
+  {#if !torrent}
+    <!-- direct playback has no swarm stats -->
+  {:else if !stats}
     <div class="stats-empty">
       <span class="loading-spinner-small"></span>
       Waiting for the torrent...

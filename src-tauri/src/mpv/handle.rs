@@ -27,7 +27,6 @@ pub struct MpvHandle {
     render_loop_handle: Mutex<Option<JoinHandle<()>>>,
     /// soia_utils instance (all platforms).
     soia_utils: AtomicPtr<SoiaUtils>,
-    software_scaling: bool,
 }
 
 unsafe impl Send for MpvHandle {}
@@ -131,12 +130,15 @@ impl MpvHandle {
         #[cfg(target_os = "macos")]
         set_str("target-colorspace-hint", "yes");
         // Hardware decode. On Linux the bundled ffmpeg's hw paths (nvdec/vdpau)
-        // segfault inside avcodec_send_packet on NVIDIA driver stacks, so
-        // default to software decoding there; override with MAGNOLIA_HWDEC=auto
-        // (or any other mpv hwdec value) to experiment.
+        // segfaulted inside avcodec_send_packet on NVIDIA driver stacks, and the
+        // bundled libmpv has no GL interop for zero-copy decode anyway. On the
+        // X11 GTK path, copy-back nvdec works and cuts decode CPU sharply; it
+        // falls back to software on non-NVIDIA GPUs. Elsewhere on Linux keep
+        // software decoding. Override with MAGNOLIA_HWDEC (any mpv hwdec value).
         #[cfg(target_os = "linux")]
         {
-            let hwdec = std::env::var("MAGNOLIA_HWDEC").unwrap_or_else(|_| "no".into());
+            let default = if mode == super::gtk_video::EMBED_MODE_GTK { "nvdec-copy" } else { "no" };
+            let hwdec = std::env::var("MAGNOLIA_HWDEC").unwrap_or_else(|_| default.into());
             set_str("hwdec", &hwdec);
         }
         #[cfg(not(target_os = "linux"))]
@@ -219,7 +221,6 @@ impl MpvHandle {
             render_loop_stop: Arc::new(AtomicBool::new(false)),
             render_loop_handle: Mutex::new(None),
             soia_utils: AtomicPtr::new(soia_utils_ptr),
-            software_scaling: use_gtk_widget,
         };
 
         Ok(handle)
@@ -383,10 +384,6 @@ impl MpvHandle {
         if !utils.is_null() {
             unsafe { soia_utils_destroy(utils) };
         }
-    }
-
-    pub fn software_scaling(&self) -> bool {
-        self.software_scaling
     }
 
     pub fn eof_reached(&self) -> bool {

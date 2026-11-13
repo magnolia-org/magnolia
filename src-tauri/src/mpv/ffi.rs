@@ -180,6 +180,14 @@ pub(super) const MPV_RENDER_PARAM_INVALID: c_int = 0;
 #[cfg(target_os = "linux")]
 pub(super) const MPV_RENDER_PARAM_API_TYPE: c_int = 1;
 #[cfg(target_os = "linux")]
+pub(super) const MPV_RENDER_PARAM_OPENGL_INIT_PARAMS: c_int = 2;
+#[cfg(target_os = "linux")]
+pub(super) const MPV_RENDER_PARAM_OPENGL_FBO: c_int = 3;
+#[cfg(target_os = "linux")]
+pub(super) const MPV_RENDER_PARAM_FLIP_Y: c_int = 4;
+#[cfg(target_os = "linux")]
+pub(super) const MPV_RENDER_PARAM_X11_DISPLAY: c_int = 8;
+#[cfg(target_os = "linux")]
 pub(super) const MPV_RENDER_PARAM_SW_SIZE: c_int = 17;
 #[cfg(target_os = "linux")]
 pub(super) const MPV_RENDER_PARAM_SW_FORMAT: c_int = 18;
@@ -198,7 +206,24 @@ pub(super) struct MpvRenderParam {
 }
 
 #[cfg(target_os = "linux")]
+#[repr(C)]
+pub(super) struct MpvOpenGlInitParams {
+    pub get_proc_address: Option<unsafe extern "C" fn(ctx: *mut c_void, name: *const c_char) -> *mut c_void>,
+    pub get_proc_address_ctx: *mut c_void,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+pub(super) struct MpvOpenGlFbo {
+    pub fbo: c_int,
+    pub w: c_int,
+    pub h: c_int,
+    pub internal_format: c_int,
+}
+
+#[cfg(target_os = "linux")]
 unsafe extern "C" {
+    pub(super) fn mpv_render_context_report_swap(ctx: *mut c_void);
     pub(super) fn mpv_render_context_create(
         res: *mut *mut c_void,
         mpv: *mut c_void,
