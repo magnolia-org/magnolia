@@ -92,6 +92,20 @@ fn is_latin(name: &str) -> bool {
     name.chars().all(|c| c.is_ascii() || matches!(c, 'ā' | 'ē' | 'ī' | 'ō' | 'ū' | '’'))
 }
 
+/// drops the tags anilist adds to tell entries apart, like "(TV)" or "(2012)". fansubs
+/// never write them, and nyaa treats every word of a query as required.
+fn strip_tags(name: &str) -> String {
+    let mut out = name.trim();
+    while let Some(open) = out.strip_suffix(')').and_then(|rest| rest.rfind('(')) {
+        let rest = out[..open].trim_end();
+        if rest.is_empty() {
+            break;
+        }
+        out = rest;
+    }
+    out.to_string()
+}
+
 /// places a tmdb episode in the show's anilist entries. episode counts walk the entries in
 /// airing order; an air date, when known, overrides that, since tmdb and anilist sometimes
 /// disagree on what counts as an episode.
@@ -144,17 +158,18 @@ pub fn map_episode(entries: &[AnimeEntry], tmdb: &TmdbEpisode) -> Option<AnimeEp
         })
         .unwrap_or(tmdb.episode);
 
-    let mut titles = vec![first.title.clone()];
+    let mut titles = vec![strip_tags(&first.title)];
     for name in first.english_title.iter().chain(&first.synonyms).chain(std::iter::once(&entry.title)) {
-        if is_latin(name) && !titles.iter().any(|t| t.eq_ignore_ascii_case(name)) {
-            titles.push(name.clone());
+        let name = strip_tags(name);
+        if is_latin(&name) && !titles.iter().any(|t| t.eq_ignore_ascii_case(&name)) {
+            titles.push(name);
         }
     }
 
     Some(AnimeEpisode {
         anilist_id: entry.anilist_id,
-        title: entry.title.clone(),
-        franchise_title: first.title.clone(),
+        title: strip_tags(&entry.title),
+        franchise_title: strip_tags(&first.title),
         titles,
         season: k as u32 + 1,
         episode: local,
@@ -583,6 +598,15 @@ mod tests {
             entry(182255, "Sousou no Frieren 2nd Season", Some(10), "2026-01-16"),
             entry(154587, "Sousou no Frieren", Some(28), "2023-09-29"),
         ]
+    }
+
+    #[test]
+    fn disambiguation_tags_are_dropped() {
+        assert_eq!(strip_tags("JoJo no Kimyou na Bouken (TV)"), "JoJo no Kimyou na Bouken");
+        assert_eq!(strip_tags("JoJo's Bizarre Adventure (2012)"), "JoJo's Bizarre Adventure");
+        assert_eq!(strip_tags("Hunter x Hunter (2011) (TV)"), "Hunter x Hunter");
+        assert_eq!(strip_tags("(Not) a Title"), "(Not) a Title");
+        assert_eq!(strip_tags("(TV)"), "(TV)");
     }
 
     #[test]
