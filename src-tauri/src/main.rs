@@ -693,8 +693,18 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(true)
+        .with_ansi(cfg!(not(windows)))
+        .with_writer(logger::backend_writer)
         .try_init()
         .ok();
+
+    // panics on worker threads would otherwise vanish without a trace
+    let default_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!("panic: {}\n{}", info, backtrace);
+        default_panic_hook(info);
+    }));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())

@@ -146,8 +146,18 @@ pub(crate) struct MpvEventEndFile {
     pub playlist_insert_num_entries: c_int,
 }
 
+#[repr(C)]
+#[derive(Debug)]
+pub(crate) struct MpvEventLogMessage {
+    pub prefix: *const c_char,
+    pub level: *const c_char,
+    pub text: *const c_char,
+    pub log_level: c_int,
+}
+
 unsafe extern "C" {
     pub(super) fn mpv_create() -> *mut c_void;
+    pub(super) fn mpv_request_log_messages(ctx: *mut c_void, min_level: *const c_char) -> c_int;
     pub(super) fn mpv_initialize(ctx: *mut c_void) -> c_int;
     pub(super) fn mpv_command(ctx: *mut c_void, args: *const *const c_char) -> c_int;
     pub(super) fn mpv_set_option(

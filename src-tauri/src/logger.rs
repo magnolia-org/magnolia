@@ -1,13 +1,48 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::mem::ManuallyDrop;
 use std::path::PathBuf;
-use std::sync::{Mutex, Arc};
+use std::sync::{Mutex, Arc, OnceLock};
 use std::thread;
 use chrono::Local;
 use tauri::{AppHandle, Manager};
 
 const MAX_LOG_LENGTH: usize = 1000;
+
+// tracing writes here directly where stdout capture can't work (windows gui builds have no stdout)
+static BACKEND_SINK: OnceLock<Arc<Mutex<Option<File>>>> = OnceLock::new();
+
+pub struct BackendWriter;
+
+impl Write for BackendWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let _ = io::stdout().write_all(buf);
+        if let Some(sink) = BACKEND_SINK.get() {
+            if let Ok(mut guard) = sink.lock() {
+                if let Some(file) = guard.as_mut() {
+                    let _ = file.write_all(buf);
+                }
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let _ = io::stdout().flush();
+        if let Some(sink) = BACKEND_SINK.get() {
+            if let Ok(mut guard) = sink.lock() {
+                if let Some(file) = guard.as_mut() {
+                    let _ = file.flush();
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn backend_writer() -> BackendWriter {
+    BackendWriter
+}
 
 pub struct Logger {
     current_log_file: Mutex<Option<File>>,
@@ -69,7 +104,11 @@ impl Logger {
         
         let mut backend_file = self.backend_log_file.lock().unwrap();
         *backend_file = Some(file);
-        
+        drop(backend_file);
+
+        #[cfg(windows)]
+        let _ = BACKEND_SINK.set(Arc::clone(&self.backend_log_file));
+
         println!("started new backend log session: {}", log_path.display());
         Ok(())
     }
@@ -79,6 +118,11 @@ impl Logger {
         // process exits (e.g. GDK calling _exit on a Wayland disconnect),
         // losing the very stderr lines that explain the crash.
         if std::env::var("MAGNOLIA_NO_LOG_CAPTURE").is_ok() {
+            return;
+        }
+        // windows gets its backend log through BACKEND_SINK instead, the std handles
+        // aren't redirectable there and capturing would only duplicate lines in debug builds
+        if cfg!(windows) {
             return;
         }
         let backend_log = Arc::clone(&self.backend_log_file);

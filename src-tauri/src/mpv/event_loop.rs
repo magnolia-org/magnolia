@@ -1,6 +1,7 @@
 use super::ffi::{
     mpv_destroy, mpv_event_id, mpv_format, mpv_free, mpv_get_property_string, mpv_node,
-    mpv_observe_property, mpv_wait_event, MpvEventEndFile, MpvEventProperty,
+    mpv_observe_property, mpv_request_log_messages, mpv_wait_event, MpvEventEndFile,
+    MpvEventLogMessage, MpvEventProperty,
 };
 use crate::AppState;
 use log::{debug, error, info, trace, warn};
@@ -543,6 +544,10 @@ pub(super) fn mpv_event_loop(
             mpv_format::MPV_FORMAT_NODE,
         );
 
+        // mpv's own warnings and errors (vo/decoder failures etc.) are otherwise invisible
+        let min_log_level = CString::new("warn").expect("Log level contains null byte");
+        mpv_request_log_messages(event_client, min_log_level.as_ptr());
+
         debug!("MPV Event Loop: Started observing properties.");
 
         loop {
@@ -1020,6 +1025,27 @@ pub(super) fn mpv_event_loop(
                     }
                     end_file_emitted_for_current_item = reason == 0;
                     wake_lock_manager.update(false);
+                }
+                mpv_event_id::MPV_EVENT_LOG_MESSAGE => {
+                    let msg = (*event).data as *const MpvEventLogMessage;
+                    if !msg.is_null() {
+                        let read = |p: *const std::os::raw::c_char| {
+                            if p.is_null() {
+                                String::new()
+                            } else {
+                                CStr::from_ptr(p).to_string_lossy().into_owned()
+                            }
+                        };
+                        let prefix = read((*msg).prefix);
+                        let text = read((*msg).text);
+                        let text = text.trim_end();
+                        // mpv log levels: 10 fatal, 20 error, 30 warn
+                        if (*msg).log_level <= 20 {
+                            error!("[mpv/{}] {}", prefix, text);
+                        } else {
+                            warn!("[mpv/{}] {}", prefix, text);
+                        }
+                    }
                 }
                 _ => {}
             }
