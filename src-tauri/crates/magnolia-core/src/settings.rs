@@ -12,6 +12,9 @@ pub struct Settings {
     pub external_player_custom_path: String,
     pub remember_preferences: bool,
     pub show_skip_prompts: bool,
+    /// start the next episode by itself when one finishes
+    #[serde(default = "default_true")]
+    pub autoplay_next_episode: bool,
     #[serde(default)]
     pub hide_recommendations: bool,
     #[serde(default)]
@@ -56,6 +59,7 @@ impl Default for Settings {
             external_player_custom_path: String::new(),
             remember_preferences: true,
             show_skip_prompts: true,
+            autoplay_next_episode: true,
             hide_recommendations: false,
             clear_cache_after_watch: false,
             check_for_updates: true,

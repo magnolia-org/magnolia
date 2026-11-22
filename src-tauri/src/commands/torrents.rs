@@ -63,6 +63,11 @@ pub async fn stop_stream(core: CoreState<'_>, handle_id: usize, delete_files: bo
 }
 
 #[tauri::command]
+pub async fn get_stream_error(core: CoreState<'_>, handle_id: usize) -> Result<Option<String>, String> {
+    core.torrents.get_stream_error(handle_id).await.map_err(err)
+}
+
+#[tauri::command]
 pub async fn wipe_all_torrent_files(core: CoreState<'_>) -> Result<(), String> {
     core.torrents.wipe_all_files().await.map_err(err)
 }

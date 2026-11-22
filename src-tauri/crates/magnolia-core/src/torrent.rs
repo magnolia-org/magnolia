@@ -121,7 +121,6 @@ pub struct StreamStats {
 #[derive(Clone)]
 struct HttpState {
     session: Arc<Session>,
-    download_dir: PathBuf,
     fonts_dir: PathBuf,
     // the newest request per (session, file); mpv opens a new request on every seek
     active_streams: Arc<std::sync::Mutex<HashMap<(usize, usize), CancellationToken>>>,
@@ -427,7 +426,7 @@ async fn stream_file(
 
     // Pre-fetch relative filename for the disk fallback (before stream() consumes the Arc).
     let rel_path_for_fallback = handle.with_metadata(|meta| {
-        meta.file_infos.get(file_id).map(|fi| fi.relative_filename.clone())
+        meta.file_infos.get(file_id).map(|fi| handle.output_folder().join(&fi.relative_filename))
     }).ok().flatten();
 
     // Try the librqbit streaming path first (works for in-progress and most finished torrents).
@@ -457,7 +456,7 @@ async fn stream_file(
                     return (StatusCode::INTERNAL_SERVER_ERROR, "stream unavailable".to_string()).into_response();
                 }
             };
-            let file_path = state.download_dir.join(&rel_path);
+            let file_path = rel_path;
             match tokio::fs::File::open(&file_path).await {
                 Ok(mut f) => {
                     if start > 0 {
@@ -492,6 +491,39 @@ async fn stream_file(
     }
 
     response.body(body).unwrap().into_response()
+}
+
+/// deletes everything under `dir` except `keep` and the folders leading to it.
+fn remove_all_except(dir: &std::path::Path, keep: Option<&std::path::Path>) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut deleted = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Some(keep) = keep {
+            if keep == path {
+                continue;
+            }
+            if path.is_dir() && keep.starts_with(&path) {
+                deleted += remove_all_except(&path, Some(keep));
+                continue;
+            }
+        }
+        let result = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => {
+                tracing::info!("Deleted: {:?}", path);
+                deleted += 1;
+            }
+            Err(e) => tracing::warn!("Failed to delete {:?}: {}", path, e),
+        }
+    }
+    deleted
 }
 
 /// The persistent DHT reuses the UDP port saved in dht.json. If that port is now
@@ -640,7 +672,6 @@ impl TorrentManager {
         let state = HttpState {
             resume_hints: resume_hints.clone(),
             session: session.clone(),
-            download_dir: download_dir.clone(),
             fonts_dir,
             active_streams: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
@@ -1494,47 +1525,91 @@ impl TorrentManager {
         self.download_dir.clone()
     }
 
-    pub async fn wipe_all_files(&self) -> Result<()> {
+    /// clears the download dir before a new stream. librqbit keeps every file it touched open
+    /// until its torrent leaves the session, and deleting an open file only hides it (the space
+    /// comes back once the handle closes), so the torrents go first. a warm torrent holding
+    /// nothing but the file about to play is left alone so its peers and prefetch survive.
+    pub async fn wipe_all_files(self: &Arc<Self>) -> Result<()> {
         let t0 = std::time::Instant::now();
         tracing::info!("[player-init] wipe_all_files: starting");
-        
-        let download_dir = self.download_dir.clone();
-        
-        // Delete everything in the download directory
-        if download_dir.exists() {
-            let mut entries = tokio::fs::read_dir(&download_dir).await?;
-            let mut deleted_count = 0;
-            
-            while let Some(entry) = entries.next_entry().await? {
-                let path = entry.path();
-                if path.is_dir() {
-                    match tokio::fs::remove_dir_all(&path).await {
-                        Ok(_) => {
-                            tracing::info!("Deleted directory: {:?}", path);
-                            deleted_count += 1;
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to delete directory {:?}: {}", path, e);
-                        }
-                    }
-                } else {
-                    match tokio::fs::remove_file(&path).await {
-                        Ok(_) => {
-                            tracing::info!("Deleted file: {:?}", path);
-                            deleted_count += 1;
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to delete file {:?}: {}", path, e);
-                        }
-                    }
+
+        let warm_id = self.warm.lock().unwrap().map(|(id, _)| id);
+        let mut keep: Option<(usize, PathBuf)> = None;
+        let mut rewarm: Option<(String, usize)> = None;
+        if let Some(handle) = warm_id.and_then(|id| self.session.get(TorrentIdOrHash::Id(id))) {
+            let target = handle.only_files().filter(|f| f.len() == 1).map(|f| f[0]);
+            if let Some(target) = target {
+                let holds_other_files = handle
+                    .stats()
+                    .file_progress
+                    .iter()
+                    .enumerate()
+                    .any(|(idx, bytes)| idx != target && *bytes > 0);
+                if holds_other_files {
+                    // the episode just watched from the same pack, which only re-adding lets go of
+                    let torrents = self.torrents.read().await;
+                    rewarm = torrents
+                        .values()
+                        .find(|e| e.session_id == Some(handle.id()))
+                        .map(|e| (e.magnet_url.clone(), target));
+                } else if let Ok(Some(path)) = handle.with_metadata(|m| {
+                    m.file_infos
+                        .get(target)
+                        .map(|fi| handle.output_folder().join(&fi.relative_filename))
+                }) {
+                    keep = Some((handle.id(), path));
                 }
             }
-            
-            tracing::info!("[player-init] wipe_all_files: wiped {} items in {:.3}s", deleted_count, t0.elapsed().as_secs_f64());
-        } else {
-            tracing::info!("[player-init] wipe_all_files: directory empty, took {:.3}s", t0.elapsed().as_secs_f64());
         }
-        
+        let keep_id = keep.as_ref().map(|(id, _)| *id);
+
+        let removed: Vec<usize> = self.session.with_torrents(|all| {
+            all.map(|(id, _)| id).filter(|id| Some(*id) != keep_id).collect()
+        });
+        for id in &removed {
+            if let Err(e) = self.session.delete(TorrentIdOrHash::Id(*id), false).await {
+                tracing::warn!("failed to remove torrent {} from the session: {:#}", id, e);
+            }
+        }
+        if !removed.is_empty() {
+            for entry in self.torrents.write().await.values_mut() {
+                if entry.session_id.is_some_and(|id| removed.contains(&id)) {
+                    entry.session_id = None;
+                    entry.buffer_start = None;
+                    entry.prefetch = None;
+                }
+            }
+            self.torrent_cache.write().await.retain(|ct| !removed.contains(&ct.session_id));
+            self.playing.lock().unwrap().take_if(|id| removed.contains(id));
+            self.warm.lock().unwrap().take_if(|(id, _)| removed.contains(id));
+            self.resume_hints.lock().unwrap().retain(|(id, _), hint| {
+                let keep = !removed.contains(id);
+                if !keep {
+                    hint.cancel();
+                }
+                keep
+            });
+        }
+
+        let download_dir = self.download_dir.clone();
+        let keep_path = keep.map(|(_, path)| path);
+        let deleted = tokio::task::spawn_blocking(move || {
+            remove_all_except(&download_dir, keep_path.as_deref())
+        })
+        .await?;
+        tracing::info!(
+            "[player-init] wipe_all_files: released {} torrents, wiped {} items in {:.3}s",
+            removed.len(),
+            deleted,
+            t0.elapsed().as_secs_f64()
+        );
+
+        if let Some((magnet, file_index)) = rewarm {
+            if let Err(e) = self.warm(&magnet, file_index).await {
+                tracing::warn!("failed to restart the warm torrent after wiping: {:#}", e);
+            }
+        }
+
         Ok(())
     }
 
@@ -1558,6 +1633,21 @@ impl TorrentManager {
 
     pub async fn get_http_port(&self) -> Result<u16, String> {
         Ok(self.http_addr.port())
+    }
+
+    /// the fatal error librqbit stopped the stream's torrent with (disk full, say), if any.
+    pub async fn get_stream_error(&self, handle_id: usize) -> Result<Option<String>> {
+        let torrents = self.torrents.read().await;
+        let entry = torrents.get(&handle_id).context("Torrent handle not found")?;
+        let Some(session_id) = entry.session_id else {
+            return Ok(None);
+        };
+        drop(torrents);
+
+        Ok(self
+            .session
+            .get(TorrentIdOrHash::Id(session_id))
+            .and_then(|handle| handle.stats().error))
     }
 
     pub async fn get_stream_stats(&self, handle_id: usize, file_index: usize) -> Result<StreamStats> {

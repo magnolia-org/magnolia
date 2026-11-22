@@ -13,6 +13,7 @@
   let externalPlayerCustomPath = '';
   let rememberPreferences = true;
   let showSkipPrompts = true;
+  let autoplayNextEpisode = true;
   let hideRecommendations = false;
   let checkForUpdates = true;
   let subtitleLanguage = '';
@@ -73,6 +74,7 @@
       externalPlayerCustomPath = settings.external_player_custom_path || '';
       rememberPreferences = settings.remember_preferences;
       showSkipPrompts = settings.show_skip_prompts;
+      autoplayNextEpisode = settings.autoplay_next_episode ?? true;
       hideRecommendations = settings.hide_recommendations;
       checkForUpdates = settings.check_for_updates !== undefined ? settings.check_for_updates : true;
       subtitleLanguage = settings.subtitle_language || '';
@@ -104,6 +106,7 @@
         external_player_custom_path: externalPlayerCustomPath,
         remember_preferences: rememberPreferences,
         show_skip_prompts: showSkipPrompts,
+        autoplay_next_episode: autoplayNextEpisode,
         hide_recommendations: hideRecommendations,
         check_for_updates: checkForUpdates,
         subtitle_language: subtitleLanguage,
@@ -122,7 +125,7 @@
   // Auto-save when any setting changes (tracks the actual variables)
   $: if (settingsLoaded) {
     // This will re-run whenever externalPlayer, rememberPreferences, or showSkipPrompts change
-    externalPlayer, externalPlayerCustomPath, rememberPreferences, showSkipPrompts, hideRecommendations, checkForUpdates, subtitleLanguage, streamingClient;
+    externalPlayer, externalPlayerCustomPath, rememberPreferences, showSkipPrompts, autoplayNextEpisode, hideRecommendations, checkForUpdates, subtitleLanguage, streamingClient;
     saveSettings();
   }
 
@@ -335,6 +338,18 @@
           <div class="setting-control">
             <label class="toggle-switch">
               <input type="checkbox" bind:checked={showSkipPrompts} />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-label">
+            <span>Autoplay next episode</span>
+          </div>
+          <div class="setting-control">
+            <label class="toggle-switch">
+              <input type="checkbox" bind:checked={autoplayNextEpisode} />
               <span class="toggle-slider"></span>
             </label>
           </div>

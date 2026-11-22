@@ -751,16 +751,12 @@ fn main() {
 
             // ── initialise libmpv and embed it under the WebView ──────────
             {
-                use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
                 #[cfg(target_os = "linux")]
                 use raw_window_handle::RawDisplayHandle;
 
                 let wh = main_window
                     .window_handle()
-                    .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
-
-                let dh = main_window
-                    .display_handle()
                     .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 
                 // soia_utils embed mode: macOS = 0 (native/Metal),
@@ -922,6 +918,7 @@ fn main() {
             commands::torrents::get_stream_status,
             commands::torrents::get_torrent_piece_ranges,
             commands::torrents::get_stream_stats,
+            commands::torrents::get_stream_error,
             commands::torrents::stop_stream,
             commands::torrents::wipe_all_torrent_files,
             commands::torrents::pause_torrent,

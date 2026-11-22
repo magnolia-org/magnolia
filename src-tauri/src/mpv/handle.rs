@@ -158,6 +158,9 @@ impl MpvHandle {
         // Start playback as soon as the first frames are decodable instead of
         // waiting for the cache to pre-fill.
         set_str("cache-pause-initial", "no");
+        // hold the last frame at the end instead of unloading the file, which tears down
+        // the vo and leaves the transparent webview showing the desktop behind the window
+        set_str("keep-open", "yes");
         // Disable automatic subtitle selection so the UI and mpv stay in sync.
         // loadTrackPreferences() will apply any saved preference after file load.
         set_str("sub-auto", "no");

@@ -177,6 +177,7 @@ import { getSeasonDetails, getTVDetails, getImageUrl, getMovieExternalIds, getTV
   
   let playingInExternal = false;
   let showSkipPrompts = true;
+  let autoplayNextEpisode = true;
   let clearCacheAfterWatch = false;
   let hideChapterMarkers = false;
   let forceStereoAudio = false;
@@ -863,6 +864,27 @@ let currentSkipSection = null;
     if (!pollInterval) {
       pollInterval = setInterval(pollStatus, STREAM_POLL_INTERVAL);
     }
+  }
+
+  // librqbit stops a torrent for good on fatal errors (a full disk, say), and mpv only sees
+  // the stream die, which would leave a see-through hole where the video was
+  async function checkStreamError() {
+    if (!streamIsTorrent || handleId === null || loadingPhase === "error") return;
+    const error = await invoke("get_stream_error", { handleId: Number(handleId) }).catch(() => null);
+    if (!error || loadingPhase === "error") return;
+    console.error("torrent stopped with an error:", error);
+    await invoke("mpv_run_command", { args: ["stop"] }).catch(() => {});
+    playing = false;
+    loadingStatus.status = describeStreamError(error);
+    loadingPhase = "error";
+    loading = true;
+  }
+
+  function describeStreamError(error) {
+    if (/not enough space|no space left|os error (112|28)\b/i.test(error)) {
+      return "Your disk is full, so the stream had to stop. Free up some space and try again.";
+    }
+    return `The stream stopped: ${error}`;
   }
 
   function toggleMute() {
@@ -2577,6 +2599,7 @@ let currentSkipSection = null;
     try {
       const settings = await invoke('get_settings');
       showSkipPrompts = settings.show_skip_prompts;
+      autoplayNextEpisode = settings.autoplay_next_episode ?? true;
       clearCacheAfterWatch = settings.clear_cache_after_watch;
       hideChapterMarkers = settings.hide_chapter_markers ?? false;
       forceStereoAudio = settings.force_stereo_audio ?? false;
@@ -2676,8 +2699,13 @@ let currentSkipSection = null;
       }, 500);
     }));
 
-    mpvUnlisteners.push(await listen("mpv-end-file", () => {
+    mpvUnlisteners.push(await listen("mpv-end-file", async (event) => {
       playing = false;
+      // only a natural end counts, not a stop, an error or a file swap
+      if (event.payload?.reason !== "eof" || !autoplayNextEpisode || !hasNextEpisode) return;
+      // a torrent that died mid-file also looks like an eof to mpv
+      await checkStreamError();
+      if (loadingPhase !== "error") goToNextEpisode();
     }));
 
     // the backend saw playback reach the credits or finish near the end
@@ -2704,6 +2732,7 @@ let currentSkipSection = null;
     // already on disk (the faint layer under mpv's demuxer-cache segments).
     pieceRangeInterval = setInterval(async () => {
       if (handleId === null || fileIndex === null) return;
+      checkStreamError();
       try {
         const ranges = await invoke("get_torrent_piece_ranges", {
           handleId: Number(handleId),
