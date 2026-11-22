@@ -753,10 +753,16 @@ fn main() {
             {
                 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
                 #[cfg(target_os = "linux")]
-                use raw_window_handle::RawDisplayHandle;
+                use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 
                 let wh = main_window
                     .window_handle()
+                    .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
+                // only the x11 and wayland handles need the display connection
+                #[cfg(target_os = "linux")]
+                let dh = main_window
+                    .display_handle()
                     .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 
                 // soia_utils embed mode: macOS = 0 (native/Metal),
